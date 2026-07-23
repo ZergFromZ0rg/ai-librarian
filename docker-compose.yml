@@ -38,7 +38,19 @@ services:
       - "6334:6334"
     volumes:
       - /ai-vault/_stack/qdrant:/qdrant/storage
-
+  
+  ingestion:
+    build: ./ingestion-service
+    container_name: ingestion
+    restart: unless-stopped
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+      - QDRANT_URL=http://qdrant:6333
+    volumes:
+      - /ai-vault:/ai-vault
+    depends_on:
+      - ollama
+      - qdrant
 networks:
   default:
     name: ai-vault-net
