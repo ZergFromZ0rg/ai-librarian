@@ -1,13 +1,10 @@
-# ai-librarian
-# AI Vault (ai-librarian)
+# AI Librarian
 
-A self-hosted, local-first AI knowledge platform. Turns a folder of personal
-documents into a searchable, conversational knowledge base — fully offline,
-no cloud APIs, no vendor lock-in.
-
-> Own your data. Own your AI. Own your knowledge.
+A self-hosted, local-first knowledge platform. Turns a folder of personal
+documents into a searchable, conversational knowledge base.
 
 ## Architecture
+   
     /ai-vault (filesystem, source of truth)
         |
         +-- inbox/          <- drop files here, auto-sorted
@@ -22,7 +19,7 @@ no cloud APIs, no vendor lock-in.
         - extracts text, chunks, embeds
              |
         Ollama (GPU-accelerated)
-        - llama3.2:3b        -> chat + classification
+        - llama3.2:3b         -> chat + classification
         - nomic-embed-text    -> embeddings
              |
         Qdrant
