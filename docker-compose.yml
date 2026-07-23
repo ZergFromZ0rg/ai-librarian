@@ -26,6 +26,7 @@ services:
       - OLLAMA_BASE_URL=http://ollama:11434
     volumes:
       - /ai-vault/_stack/openwebui:/app/backend/data
+      - /ai-vault:/ai-vault
     depends_on:
       - ollama
 
@@ -38,7 +39,7 @@ services:
       - "6334:6334"
     volumes:
       - /ai-vault/_stack/qdrant:/qdrant/storage
-  
+
   ingestion:
     build: ./ingestion-service
     container_name: ingestion
