@@ -30,6 +30,16 @@ services:
     depends_on:
       - ollama
 
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - /ai-vault/_stack/qdrant:/qdrant/storage
+
 networks:
   default:
     name: ai-vault-net
