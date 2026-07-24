@@ -1,0 +1,6 @@
+vault/
+*.db
+manifest.json
+__pycache__/
+*.pyc
+.env

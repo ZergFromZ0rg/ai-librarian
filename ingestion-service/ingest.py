@@ -2,6 +2,7 @@ import os
 import time
 import json
 import hashlib
+import shutil
 import requests
 from pathlib import Path
 from qdrant_client import QdrantClient
@@ -9,15 +10,18 @@ from qdrant_client.models import Distance, VectorParams, PointStruct
 from pypdf import PdfReader
 
 VAULT_DIR = Path("/ai-vault")
-WATCH_FOLDERS = ["books", "papers", "notes", "conversations", "generated", "inbox"]
+INBOX_DIR = VAULT_DIR / "inbox"
+SORTED_FOLDERS = ["books", "papers", "notes", "conversations", "generated"]
+WATCH_FOLDERS = SORTED_FOLDERS  # folders we index after sorting
 MANIFEST_PATH = Path("/ai-vault/_stack/ingestion/manifest.json")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 EMBED_MODEL = "nomic-embed-text"
+CLASSIFY_MODEL = "llama3.2:3b"
 COLLECTION = "vault"
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
-POLL_INTERVAL = 30  # seconds
+POLL_INTERVAL = 30
 
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf"}
 
@@ -27,7 +31,6 @@ client = QdrantClient(url=QDRANT_URL)
 def ensure_collection():
     collections = [c.name for c in client.get_collections().collections]
     if COLLECTION not in collections:
-        # nomic-embed-text produces 768-dim vectors
         client.create_collection(
             collection_name=COLLECTION,
             vectors_config=VectorParams(size=768, distance=Distance.COSINE),
@@ -61,6 +64,62 @@ def extract_text(path):
         reader = PdfReader(str(path))
         return "\n".join(page.extract_text() or "" for page in reader.pages)
     return ""
+
+
+def classify_file(filename, text_sample):
+    prompt = f"""You are a file classifier for a personal knowledge vault.
+Categories: books, papers, notes, conversations, generated
+
+- books: full-length books, textbooks, long-form reference material
+- papers: academic papers, research papers, technical reports
+- notes: personal notes, class notes, quick writeups, todo lists
+- conversations: chat logs, transcripts, exported conversations
+- generated: AI-generated summaries, outputs, or synthetic content
+
+Filename: {filename}
+Content sample:
+{text_sample[:800]}
+
+Respond with ONLY one word: the category name. Nothing else."""
+
+    resp = requests.post(
+        f"{OLLAMA_URL}/api/generate",
+        json={"model": CLASSIFY_MODEL, "prompt": prompt, "stream": False},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    answer = resp.json().get("response", "").strip().lower()
+
+    for category in SORTED_FOLDERS:
+        if category in answer:
+            return category
+    return "notes"  # safe fallback
+
+
+def sort_inbox_files():
+    if not INBOX_DIR.exists():
+        return
+    for path in list(INBOX_DIR.iterdir()):
+        if not path.is_file() or path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            continue
+        print(f"Sorting: {path.name}")
+        try:
+            text = extract_text(path)
+            category = classify_file(path.name, text)
+            dest_folder = VAULT_DIR / category
+            dest_folder.mkdir(parents=True, exist_ok=True)
+            dest_path = dest_folder / path.name
+
+            # avoid overwriting existing files with same name
+            counter = 1
+            while dest_path.exists():
+                dest_path = dest_folder / f"{path.stem}_{counter}{path.suffix}"
+                counter += 1
+
+            shutil.move(str(path), str(dest_path))
+            print(f"  -> {category}/{dest_path.name}")
+        except Exception as e:
+            print(f"  Error sorting {path.name}: {e}")
 
 
 def chunk_text(text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
@@ -128,7 +187,7 @@ def scan_and_process():
             rel = str(path.relative_to(VAULT_DIR))
             current_hash = file_hash(path)
             if manifest.get(rel) == current_hash:
-                continue  # already processed, unchanged
+                continue
             process_file(path, manifest)
             manifest[rel] = current_hash
             changed = True
@@ -142,6 +201,7 @@ if __name__ == "__main__":
     ensure_collection()
     while True:
         try:
+            sort_inbox_files()
             scan_and_process()
         except Exception as e:
             print(f"Error during scan: {e}")
