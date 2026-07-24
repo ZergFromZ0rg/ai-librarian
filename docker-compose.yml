@@ -8,7 +8,7 @@ services:
     ports:
       - "11434:11434"
     volumes:
-      - /ai-vault/_stack/ollama:/root/.ollama
+      - /home/zerg/ai-vault/_stack/ollama:/root/.ollama
     deploy:
       resources:
         reservations:
@@ -25,8 +25,8 @@ services:
     environment:
       - OLLAMA_BASE_URL=http://ollama:11434
     volumes:
-      - /ai-vault/_stack/openwebui:/app/backend/data
-      - /ai-vault:/ai-vault
+      - /home/zerg/ai-vault/_stack/openwebui:/app/backend/data
+      - /home/zerg/ai-vault:/home/zerg/ai-vault
     depends_on:
       - ollama
 
@@ -38,7 +38,7 @@ services:
       - "6333:6333"
       - "6334:6334"
     volumes:
-      - /ai-vault/_stack/qdrant:/qdrant/storage
+      - /home/zerg/ai-vault/_stack/qdrant:/qdrant/storage
 
   ingestion:
     build: ./ingestion-service
@@ -48,10 +48,22 @@ services:
       - OLLAMA_URL=http://ollama:11434
       - QDRANT_URL=http://qdrant:6333
     volumes:
-      - /ai-vault:/ai-vault
+      - /home/zerg/ai-vault:/home/zerg/ai-vault
     depends_on:
       - ollama
       - qdrant
+  filebrowser:
+    image: filebrowser/filebrowser:latest
+    container_name: filebrowser
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - /home/zerg/ai-vault:/srv
+      - /home/zerg/ai-vault/_stack/filebrowser/database.db:/database.db
+      - /home/zerg/ai-vault/_stack/filebrowser/settings.json:/.filebrowser.json
+
+
 networks:
   default:
     name: ai-vault-net
