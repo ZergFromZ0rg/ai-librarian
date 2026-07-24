@@ -53,17 +53,6 @@ services:
       - ollama
       - qdrant
 
-  filebrowser:
-    image: filebrowser/filebrowser:latest
-    container_name: filebrowser
-    restart: unless-stopped
-    ports:
-      - "8080:80"
-    volumes:
-      - /:/srv
-      - /home/zerg/ai-vault/_stack/filebrowser/database:/database
-      - /home/zerg/ai-vault/_stack/filebrowser/config:/config
-
 networks:
   default:
     name: ai-vault-net
