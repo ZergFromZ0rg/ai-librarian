@@ -62,25 +62,28 @@ docker compose ps
 docker compose logs -f document-service
 ```
 
-Open `http://127.0.0.1:3000`, enter the token from `.env`, and upload a PDF. Wait for its badge to change to `indexed` before searching.
+Open `http://127.0.0.1:3100`, enter the token from `.env`, and upload a PDF. Wait for its badge to change to `indexed` before searching.
 
 ## Connecting to a remote server
 
 The safest simple option is to keep the default loopback binding and open an SSH tunnel from your workstation:
 
 ```bash
-ssh -L 3000:127.0.0.1:3000 -L 8000:127.0.0.1:8000 your-user@your-server
+ssh -L 3100:127.0.0.1:3100 -L 8000:127.0.0.1:8000 your-user@your-server
 ```
 
-Then visit `http://127.0.0.1:3000` locally.
+Then visit `http://127.0.0.1:3100` locally.
 
 To expose the app directly on a trusted LAN, set this in `.env`:
 
 ```dotenv
 BIND_ADDRESS=0.0.0.0
+UI_PORT=3100
 ```
 
-Keep `API_TOKEN` enabled, restrict ports 3000 and 8000 with the server firewall, and use a TLS-enabled reverse proxy before exposing the app beyond a trusted network. The token is stored in the browser's local storage, so do not use the UI from an untrusted machine.
+Then open `http://SERVER_LAN_IP:3100`. If port 3100 is already occupied, choose another unused `UI_PORT`; the container still listens internally on port 80.
+
+Keep `API_TOKEN` enabled, restrict ports 3100 and 8000 with the server firewall, and use a TLS-enabled reverse proxy before exposing the app beyond a trusted network. The token is stored in the browser's local storage, so do not use the UI from an untrusted machine.
 
 ## Adding documents from a server folder
 
@@ -93,7 +96,7 @@ Absolute paths and paths outside `/library` are rejected. Folder imports scan PD
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `BIND_ADDRESS` | `127.0.0.1` | Host interface used by published UI/API ports |
-| `UI_PORT` | `3000` | Browser UI port |
+| `UI_PORT` | `3100` | Browser UI port |
 | `API_PORT` | `8000` | Direct API and interactive docs port |
 | `API_TOKEN` | required by Compose | Protects document, search, and admin endpoints |
 | `MAX_UPLOAD_MB` | `100` | Per-file backend upload limit |
