@@ -1,147 +1,348 @@
-import React, { useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_BASE || "/api";
+const TERMINAL_JOB_STATES = new Set(["done", "partial", "error", "interrupted"]);
+
+async function parseResponse(response) {
+  const contentType = response.headers.get("content-type") || "";
+  const data = contentType.includes("application/json") ? await response.json() : { detail: await response.text() };
+  if (!response.ok) {
+    throw new Error(data.detail || `Request failed (${response.status})`);
+  }
+  return data;
+}
 
 export default function App() {
-  const [folder, setFolder] = useState("/app/test");
-  const [status, setStatus] = useState("");
+  const [token, setToken] = useState(() => localStorage.getItem("ai-librarian-token") || "");
+  const [tokenDraft, setTokenDraft] = useState(token);
+  const [config, setConfig] = useState(null);
+  const [health, setHealth] = useState(null);
+  const [documents, setDocuments] = useState([]);
+  const [folder, setFolder] = useState(".");
+  const [job, setJob] = useState(null);
+  const [notice, setNotice] = useState("");
+  const [noticeError, setNoticeError] = useState(false);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
-  const [ingestJob, setIngestJob] = useState(null);
-  const [ingestFiles, setIngestFiles] = useState([]);
-  const [uploadList, setUploadList] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [uploading, setUploading] = useState(false);
 
-  async function handleIngest() {
-    setStatus("Queueing ingestion job...");
-    setResults([]);
-    try {
-      const res = await fetch(`${API_BASE}/admin/ingest-folder`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folder, full_pipeline: true }),
+  const headers = useMemo(
+    () => (token ? { Authorization: `Bearer ${token}` } : {}),
+    [token],
+  );
+
+  const api = useCallback(
+    async (path, options = {}) => {
+      const response = await fetch(`${API_BASE}${path}`, {
+        ...options,
+        headers: { ...headers, ...(options.headers || {}) },
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setStatus(`Error: ${data.detail || JSON.stringify(data)}`);
-        return;
-      }
-      const jobId = data.job_id;
-      setIngestJob(jobId);
-      setStatus(`Job queued: ${jobId}`);
-      // poll status
-      const poll = setInterval(async () => {
-        const sr = await fetch(`${API_BASE}/admin/ingest-status/${jobId}`);
-        const sd = await sr.json();
-        if (!sr.ok) {
-          setStatus(`Status error: ${sd.detail || JSON.stringify(sd)}`);
-          clearInterval(poll);
-          return;
-        }
-        setIngestFiles(sd.files || []);
-        setStatus(`Job ${jobId} state: ${sd.state}`);
-        if (sd.state === "done" || sd.state === "error") {
-          clearInterval(poll);
-          setIngestJob(null);
-        }
-      }, 2000);
-    } catch (e) {
-      setStatus("Ingest failed: " + e.message);
-    }
-  }
+      return parseResponse(response);
+    },
+    [headers],
+  );
 
-  async function handleFileUpload(files) {
-    const list = Array.from(files).map((f) => ({ name: f.name, status: "queued" }));
-    setUploadList(list);
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i];
+  const refreshDocuments = useCallback(async () => {
+    try {
+      const data = await api("/documents");
+      setDocuments(data.documents || []);
+      setNoticeError(false);
+    } catch (error) {
+      if (config?.auth_required && !token) {
+        setNotice("Enter the server token to open this library.");
+      } else {
+        setNotice(error.message);
+      }
+      setNoticeError(true);
+    }
+  }, [api, config?.auth_required, token]);
+
+  const refreshHealth = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/health/ready`);
+      const data = await response.json();
+      setHealth(data);
+    } catch (_error) {
+      setHealth({ status: "offline", qdrant: false });
+    }
+  }, []);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/config`)
+      .then(parseResponse)
+      .then(setConfig)
+      .catch((error) => {
+        setNotice(error.message);
+        setNoticeError(true);
+      });
+    refreshHealth();
+  }, [refreshHealth]);
+
+  useEffect(() => {
+    refreshDocuments();
+  }, [refreshDocuments]);
+
+  useEffect(() => {
+    const hasPending = documents.some((document) => ["queued", "indexing"].includes(document.indexing_status));
+    if (!hasPending) return undefined;
+    const timer = window.setInterval(refreshDocuments, 2500);
+    return () => window.clearInterval(timer);
+  }, [documents, refreshDocuments]);
+
+  useEffect(() => {
+    if (!job || TERMINAL_JOB_STATES.has(job.state)) return undefined;
+    const timer = window.setInterval(async () => {
       try {
-        setUploadList((s) => s.map((it, idx) => (idx === i ? { ...it, status: "uploading" } : it)));
-        const form = new FormData();
-        form.append("file", f, f.name);
-        const r = await fetch(`${API_BASE}/documents`, { method: "POST", body: form });
-        const d = await r.json();
-        if (!r.ok) {
-          setUploadList((s) => s.map((it, idx) => (idx === i ? { ...it, status: "error", error: d.detail || JSON.stringify(d) } : it)));
-        } else {
-          setUploadList((s) => s.map((it, idx) => (idx === i ? { ...it, status: "done", document_id: d.document_id } : it)));
+        const next = await api(`/admin/ingest-status/${job.job_id}`);
+        setJob(next);
+        if (TERMINAL_JOB_STATES.has(next.state)) {
+          setNotice(`Folder ingestion finished with status: ${next.state}.`);
+          setNoticeError(["partial", "error", "interrupted"].includes(next.state));
+          refreshDocuments();
         }
-      } catch (e) {
-        setUploadList((s) => s.map((it, idx) => (idx === i ? { ...it, status: "error", error: e.message } : it)));
+      } catch (error) {
+        setNotice(error.message);
+        setNoticeError(true);
       }
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [api, job, refreshDocuments]);
+
+  function saveToken(event) {
+    event.preventDefault();
+    const cleaned = tokenDraft.trim();
+    localStorage.setItem("ai-librarian-token", cleaned);
+    setToken(cleaned);
+    setNotice(cleaned ? "Token saved in this browser." : "Token removed from this browser.");
+    setNoticeError(false);
+  }
+
+  async function uploadFiles(fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    setUploading(true);
+    let completed = 0;
+    try {
+      for (const file of files) {
+        setNotice(`Uploading ${file.name}… (${completed + 1}/${files.length})`);
+        setNoticeError(false);
+        const form = new FormData();
+        form.append("file", file, file.name);
+        const result = await api("/documents", { method: "POST", body: form });
+        completed += 1;
+        setNotice(result.deduplicated ? `${file.name} was already in the library.` : `${file.name} is queued for indexing.`);
+      }
+      await refreshDocuments();
+    } catch (error) {
+      setNotice(error.message);
+      setNoticeError(true);
+    } finally {
+      setUploading(false);
     }
   }
 
-  async function handleSearch(e) {
-    e.preventDefault();
-    setStatus("Searching...");
-    setResults([]);
+  async function ingestFolder() {
+    setNotice("Queueing folder ingestion…");
+    setNoticeError(false);
     try {
-      const res = await fetch(`${API_BASE}/search`, {
+      const result = await api("/admin/ingest-folder", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, top_k: 10, rerank: true, rerank_k: 5 }),
+        body: JSON.stringify({ folder: folder.trim() || "." }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setStatus(`Error: ${data.detail || JSON.stringify(data)}`);
-        return;
-      }
-      setResults(data.results || []);
-      setStatus(`Found ${data.results.length} results`);
-    } catch (e) {
-      setStatus("Search failed: " + e.message);
+      setJob(result);
+      setNotice(`Folder job ${result.job_id} is queued.`);
+    } catch (error) {
+      setNotice(error.message);
+      setNoticeError(true);
     }
   }
+
+  async function retryDocument(documentId) {
+    try {
+      await api(`/documents/${documentId}/retry`, { method: "POST" });
+      setNotice("Document queued for another indexing attempt.");
+      setNoticeError(false);
+      refreshDocuments();
+    } catch (error) {
+      setNotice(error.message);
+      setNoticeError(true);
+    }
+  }
+
+  async function removeDocument(document) {
+    if (!window.confirm(`Remove “${document.filename}” from the library?`)) return;
+    try {
+      await api(`/documents/${document.document_id}`, { method: "DELETE" });
+      setNotice(`${document.filename} was removed.`);
+      setNoticeError(false);
+      refreshDocuments();
+    } catch (error) {
+      setNotice(error.message);
+      setNoticeError(true);
+    }
+  }
+
+  async function searchLibrary(event) {
+    event.preventDefault();
+    const cleanQuery = query.trim();
+    if (!cleanQuery || searching) return;
+    setSearching(true);
+    try {
+      const result = await api("/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: cleanQuery, top_k: 8, rerank: true, rerank_k: 20, max_text_chars: 2500 }),
+      });
+      setResults(result.results || []);
+      setNotice(`Found ${result.results?.length || 0} relevant passages.`);
+      setNoticeError(false);
+    } catch (error) {
+      setResults([]);
+      setNotice(error.message);
+      setNoticeError(true);
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  const indexedCount = documents.filter((document) => document.indexing_status === "indexed").length;
+  const healthReady = health?.status === "ready";
 
   return (
-    <div style={{ padding: 24, fontFamily: "Arial, sans-serif" }}>
-      <h2>AI Librarian — Test UI</h2>
-
-      <div style={{ marginBottom: 16 }}>
-        <label>Library folder (server-side): </label>
-        <input style={{ width: 400 }} value={folder} onChange={(e) => setFolder(e.target.value)} />
-        <button style={{ marginLeft: 8 }} onClick={handleIngest}>
-          Ingest (async)
-        </button>
-        <div style={{ marginTop: 8 }}>
-          <label>Upload PDFs from browser: </label>
-          <input type="file" multiple accept="application/pdf" onChange={(e) => handleFileUpload(e.target.files)} />
-          <div>
-            {uploadList.map((u, i) => (
-              <div key={i} style={{ fontSize: 12 }}>
-                {u.name}: {u.status} {u.document_id ? `(${u.document_id})` : ''} {u.error ? ` - ${u.error}` : ''}
-              </div>
-            ))}
-          </div>
+    <main className="app-shell">
+      <header className="topbar">
+        <div className="brand">
+          <h1>AI Librarian</h1>
+          <p>Your private, searchable reading room.</p>
         </div>
-      </div>
+        <div className="health" title={`Qdrant: ${health?.qdrant ? "ready" : "offline"}`}>
+          <span className={`health-dot ${healthReady ? "ready" : ""}`} />
+          {healthReady ? "Library ready" : health?.status || "Connecting"}
+        </div>
+      </header>
 
-      <div style={{ marginBottom: 16 }}>
-        <form onSubmit={handleSearch}>
-          <input style={{ width: 400 }} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Ask a question (e.g. what is absurdism)" />
-          <button style={{ marginLeft: 8 }} type="submit">Search</button>
+      {config?.auth_required && (
+        <form className="token-box" onSubmit={saveToken}>
+          <input
+            aria-label="Server access token"
+            type="password"
+            value={tokenDraft}
+            onChange={(event) => setTokenDraft(event.target.value)}
+            placeholder="Server access token"
+          />
+          <button className="secondary" type="submit">Save token</button>
         </form>
-          <div style={{ marginTop: 8, color: "#666" }}>{status}</div>
-          {ingestFiles.length > 0 && (
-            <div style={{ marginTop: 8 }}>
-              <strong>Ingest progress:</strong>
-              <ul>
-                {ingestFiles.map((f, i) => (
-                  <li key={i}>{f.file}: {f.status} {f.document_id ? ` - ${f.document_id}` : ''} {f.error ? ` - ${f.error}` : ''}</li>
-                ))}
-              </ul>
+      )}
+
+      <div className="layout">
+        <section className="panel library-panel">
+          <div className="panel-title">
+            <h2>Library</h2>
+            <span className="muted">{indexedCount} ready · {documents.length} total</span>
+          </div>
+
+          <label className="drop-zone">
+            <input
+              type="file"
+              multiple
+              accept="application/pdf,.pdf"
+              disabled={uploading}
+              onChange={(event) => {
+                uploadFiles(event.target.files);
+                event.target.value = "";
+              }}
+            />
+            <strong>{uploading ? "Uploading…" : "Choose PDF files"}</strong>
+            <span>Files are indexed locally on your server.</span>
+          </label>
+
+          <div className="field-row">
+            <input
+              aria-label="Folder inside the mounted library"
+              value={folder}
+              onChange={(event) => setFolder(event.target.value)}
+              placeholder="Folder inside /library"
+            />
+            <button className="secondary" type="button" onClick={ingestFolder}>Import</button>
+          </div>
+
+          {notice && <div className={`status-message ${noticeError ? "error" : ""}`}>{notice}</div>}
+
+          {job?.files?.length > 0 && !TERMINAL_JOB_STATES.has(job.state) && (
+            <div className="status-message">
+              {job.files.filter((file) => ["indexed", "duplicate"].includes(file.status)).length}/{job.files.length} files ready
             </div>
           )}
-      </div>
 
-      <div style={{ maxHeight: 400, overflow: "auto", border: "1px solid #ddd", padding: 12 }}>
-        {results.map((r, i) => (
-          <div key={i} style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 12, color: "#888" }}>{r.document} — page {r.page} — score {r.score?.toFixed(3)}</div>
-            <div style={{ whiteSpace: "pre-wrap" }}>{r.text}</div>
+          <div className="document-list">
+            {documents.length === 0 && <p className="muted">No documents yet. Add a PDF to begin.</p>}
+            {documents.map((document) => (
+              <article className="document-card" key={document.document_id}>
+                <div className="document-name" title={document.filename}>{document.filename}</div>
+                <div className="document-meta">
+                  <span className={`badge ${document.indexing_status}`}>{document.indexing_status}</span>
+                  <span>{document.pages} pages</span>
+                  <span>{document.chunks} chunks</span>
+                </div>
+                {document.indexing_error && <div className="status-message error">{document.indexing_error}</div>}
+                <div className="document-actions">
+                  {document.indexing_status === "error" && (
+                    <button className="secondary" type="button" onClick={() => retryDocument(document.document_id)}>Retry</button>
+                  )}
+                  <button className="danger" type="button" onClick={() => removeDocument(document)}>Remove</button>
+                </div>
+              </article>
+            ))}
           </div>
-        ))}
+        </section>
+
+        <section className="panel chat-panel">
+          <div className="chat-header">
+            <h2>Search your library</h2>
+            <p>Semantic search finds and reranks the most relevant source passages.</p>
+          </div>
+          <div className="messages" aria-live="polite">
+            {results.length === 0 && !searching && (
+              <div className="empty-state">
+                <div>
+                  <strong>What are you looking for?</strong>
+                  Add a document, wait for it to be indexed, then search across your collection.
+                </div>
+              </div>
+            )}
+            {results.map((result) => (
+              <article className="search-result" key={`${result.document_id}-${result.chunk_id}`}>
+                <div className="search-result-meta">
+                  <strong>{result.document}</strong>
+                  <span>page {result.page}</span>
+                  <span>score {(result.rerank_score ?? result.score)?.toFixed(3)}</span>
+                </div>
+                <div className="search-result-text">{result.text}</div>
+              </article>
+            ))}
+            {searching && <div className="message assistant">Finding the most relevant passages…</div>}
+          </div>
+          <form className="question-box" onSubmit={searchLibrary}>
+            <textarea
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  event.currentTarget.form.requestSubmit();
+                }
+              }}
+              placeholder="Search concepts, passages, names, or ideas…"
+              aria-label="Search query"
+            />
+            <button className="primary" type="submit" disabled={!query.trim() || searching || indexedCount === 0}>
+              {searching ? "Searching…" : "Search"}
+            </button>
+          </form>
+        </section>
       </div>
-    </div>
+    </main>
   );
 }

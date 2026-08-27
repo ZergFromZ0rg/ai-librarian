@@ -8,3 +8,5 @@ data/
 qdrant_storage/
 *.sqlite3
 *.log
+tests/
+.pytest_cache/

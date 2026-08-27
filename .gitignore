@@ -4,3 +4,13 @@ manifest.json
 __pycache__/
 *.pyc
 .env
+.venv/
+.DS_Store
+data/
+library/
+qdrant_storage/
+document-service/data/
+ui/node_modules/
+ui/dist/
+.pytest_cache/
+.coverage

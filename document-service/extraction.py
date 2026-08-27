@@ -8,8 +8,10 @@ def extract_pages(pdf_path: str) -> List[Dict]:
     Returns a list of dicts: {"page": int, "text": str}
     """
     pages = []
-    doc = fitz.open(str(pdf_path))
-    for i, page in enumerate(doc):
-        text = page.get_text()
-        pages.append({"page": i + 1, "text": text})
+    with fitz.open(str(pdf_path)) as document:
+        if document.needs_pass:
+            raise ValueError("password-protected PDFs are not supported")
+        for i, page in enumerate(document):
+            text = page.get_text("text", sort=True)
+            pages.append({"page": i + 1, "text": text})
     return pages

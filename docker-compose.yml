@@ -1,46 +1,76 @@
-version: "3.8"
-
 services:
   qdrant:
-    image: qdrant/qdrant:latest
-    container_name: qdrant
-    ports:
-      - "6333:6333"
-      - "6334:6334"
+    image: qdrant/qdrant:v1.19.0
+    restart: unless-stopped
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
+    expose:
+      - "6333"
     volumes:
-      - ./qdrant_storage:/qdrant/storage
+      - ./data/qdrant:/qdrant/storage
+    security_opt:
+      - no-new-privileges:true
+
+  qdrant-ready:
+    image: busybox:1.37.0
+    restart: "no"
+    command: ["sh", "-c", "until wget -q -O - http://qdrant:6333/readyz; do sleep 2; done"]
+    depends_on:
+      - qdrant
 
   document-service:
     build:
       context: ./document-service
       dockerfile: Dockerfile
-    container_name: document-service
+    restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "${BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8000}:8000"
     volumes:
-      - ./document-service:/app:rw
-      - ./document-service/data:/app/data:rw
+      - ./data/app:/app/data
+      - ./library:/library:ro
+      - ./data/models:/models
     environment:
-      - PORT=8000
-      - DATA_DIR=/app/data
-      - QDRANT_URL=http://qdrant:6333
+      PORT: "8000"
+      DATA_DIR: /app/data
+      INGEST_ROOT: /library
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: vault
+      API_TOKEN: ${API_TOKEN:?Set a long random API_TOKEN in .env}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
+      RERANK_TIMEOUT: ${RERANK_TIMEOUT:-15}
+      HF_HOME: /models/huggingface
     depends_on:
-      - qdrant
+      qdrant-ready:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
-      interval: 30s
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"
+      interval: 15s
       timeout: 5s
-      retries: 3
-      start_period: 10s
+      retries: 12
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
 
   ui:
     build:
       context: ./ui
       dockerfile: Dockerfile
-    container_name: ai-librarian-ui
+    restart: unless-stopped
     ports:
-      - "3000:80"
-    environment:
-      - VITE_API_BASE=http://document-service:8000
+      - "${BIND_ADDRESS:-127.0.0.1}:${UI_PORT:-3000}:80"
     depends_on:
-      - document-service
+      document-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true

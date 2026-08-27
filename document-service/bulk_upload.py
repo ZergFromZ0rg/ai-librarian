@@ -1,37 +1,48 @@
-import sys
+import argparse
+import os
 import time
 import shutil
 from pathlib import Path
 import requests
 
 
-def upload_file(url, path, wait=False, poll_interval=2, timeout=60):
+def auth_headers(token=None):
+    value = token or os.environ.get("AI_LIBRARIAN_TOKEN")
+    return {"Authorization": f"Bearer {value}"} if value else {}
+
+
+def upload_file(url, path, wait=False, poll_interval=2, timeout=300, token=None):
     with open(path, "rb") as f:
         files = {"file": (path.name, f, "application/pdf")}
-        r = requests.post(f"{url}/documents", files=files)
-    if r.status_code != 201:
+        r = requests.post(f"{url}/documents", files=files, headers=auth_headers(token), timeout=timeout)
+    if r.status_code not in (200, 201):
         print(f"Failed to upload {path.name}: {r.status_code} {r.text}")
         return None
     data = r.json()
     doc_id = data.get("document_id")
-    print(f"Uploaded {path.name} -> document_id={doc_id}")
+    action = "Already present" if data.get("deduplicated") else "Uploaded"
+    print(f"{action}: {path.name} -> document_id={doc_id}")
 
     if wait and doc_id:
         start = time.time()
         while time.time() - start < timeout:
-            cr = requests.get(f"{url}/documents/{doc_id}/chunks")
-            if cr.status_code == 200:
-                chunks = cr.json()
-                # check if first chunk has embedding
-                if chunks and isinstance(chunks, list) and chunks[0].get("embedding"):
-                    print(f"Embeddings ready for {doc_id} (chunks={len(chunks)})")
+            status_response = requests.get(
+                f"{url}/documents/{doc_id}", headers=auth_headers(token), timeout=10
+            )
+            if status_response.status_code == 200:
+                status = status_response.json().get("indexing_status")
+                if status == "indexed":
+                    print(f"Index ready for {doc_id}")
                     return doc_id
+                if status == "error":
+                    print(f"Indexing failed for {doc_id}: {status_response.json().get('indexing_error')}")
+                    return None
             time.sleep(poll_interval)
-        print(f"Timed out waiting for embeddings for {doc_id}")
+        print(f"Timed out waiting for indexing for {doc_id}")
     return doc_id
 
 
-def bulk_upload(folder, url="http://127.0.0.1:8000", wait=False):
+def bulk_upload(folder, url="http://127.0.0.1:8000", wait=False, token=None):
     p = Path(folder)
     if not p.exists() or not p.is_dir():
         print("Folder not found:", folder)
@@ -41,10 +52,10 @@ def bulk_upload(folder, url="http://127.0.0.1:8000", wait=False):
         print("No PDFs found in folder:", folder)
         return
     for pdf in pdfs:
-        upload_file(url, pdf, wait=wait)
+        upload_file(url, pdf, wait=wait, token=token)
 
 
-def watch_and_upload(folder, url="http://127.0.0.1:8000", poll_interval=5, move_after_upload=True, uploaded_dir_name="uploaded"):
+def watch_and_upload(folder, url="http://127.0.0.1:8000", poll_interval=5, move_after_upload=True, uploaded_dir_name="uploaded", token=None):
     p = Path(folder)
     if not p.exists() or not p.is_dir():
         print("Folder not found:", folder)
@@ -64,8 +75,9 @@ def watch_and_upload(folder, url="http://127.0.0.1:8000", poll_interval=5, move_
                 if pdf.parent == uploaded_dir:
                     continue
                 print(f"Found new PDF: {pdf.name}")
-                doc_id = upload_file(url, pdf, wait=False)
-                seen.add(pdf.name)
+                doc_id = upload_file(url, pdf, wait=False, token=token)
+                if doc_id:
+                    seen.add(pdf.name)
                 if move_after_upload and doc_id:
                     try:
                         dest = uploaded_dir / pdf.name
@@ -79,18 +91,18 @@ def watch_and_upload(folder, url="http://127.0.0.1:8000", poll_interval=5, move_
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python bulk_upload.py <pdf-folder> [server_url] [--wait] [--watch] [--move]")
+    parser = argparse.ArgumentParser(description="Upload PDF files to AI Librarian")
+    parser.add_argument("folder", type=Path)
+    parser.add_argument("--url", default="http://127.0.0.1:8000")
+    parser.add_argument("--token", default=os.environ.get("AI_LIBRARIAN_TOKEN"))
+    parser.add_argument("--wait", action="store_true")
+    parser.add_argument("--watch", action="store_true")
+    parser.add_argument("--move", action="store_true", help="move watched files into an uploaded subfolder")
+    args = parser.parse_args()
+    if args.watch:
+        watch_and_upload(args.folder, url=args.url, poll_interval=5, move_after_upload=args.move, token=args.token)
         return
-    folder = sys.argv[1]
-    url = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else "http://127.0.0.1:8000"
-    wait = "--wait" in sys.argv
-    watch = "--watch" in sys.argv
-    move = "--move" in sys.argv
-    if watch:
-        watch_and_upload(folder, url=url, poll_interval=5, move_after_upload=move)
-        return
-    bulk_upload(folder, url=url, wait=wait)
+    bulk_upload(args.folder, url=args.url, wait=args.wait, token=args.token)
 
 
 if __name__ == "__main__":
