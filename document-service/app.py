@@ -20,12 +20,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from chunking import chunk_document
+from chunking import chunk_document, normalize_for_embedding
 from embeddings import DEFAULT_MODEL as EMBEDDING_MODEL
 from embeddings import embed_texts
 from extraction import extract_pages
 from reranker import model_info, rerank
 from vector_store import (
+    INDEX_SCHEMA_VERSION,
     delete_document as delete_document_vectors,
     healthcheck as vector_healthcheck,
     search_vectors,
@@ -49,6 +50,7 @@ INGEST_QUEUE_SIZE = int(os.environ.get("INGEST_QUEUE_SIZE", "10"))
 RERANK_MAX_WORKERS = int(os.environ.get("RERANK_MAX_WORKERS", "2"))
 RERANK_TIMEOUT = float(os.environ.get("RERANK_TIMEOUT", "10"))
 DOC_ID_PATTERN = re.compile(r"^[a-f0-9]{12}$")
+PIPELINE_VERSION = 2
 
 for directory in (DOCUMENTS_DIR, METADATA_DIR, EXTRACTED_DIR, CHUNKS_DIR, JOBS_DIR, INGEST_ROOT):
     directory.mkdir(parents=True, exist_ok=True)
@@ -252,7 +254,7 @@ def index_worker() -> None:
                 vector_dim = 0
                 for start in range(0, len(chunks), EMBEDDING_BATCH_SIZE):
                     batch = chunks[start : start + EMBEDDING_BATCH_SIZE]
-                    vectors = embed_texts([chunk["text"] for chunk in batch])
+                    vectors = embed_texts([chunk.get("embedding_text") or chunk["text"] for chunk in batch])
                     indexed_batch = [{**chunk, "embedding": vector} for chunk, vector in zip(batch, vectors)]
                     if indexed_batch:
                         vector_dim = len(indexed_batch[0]["embedding"])
@@ -264,6 +266,7 @@ def index_worker() -> None:
                     indexed_at=utc_now(),
                     embedding_model=EMBEDDING_MODEL,
                     vector_dim=vector_dim,
+                    index_schema_version=INDEX_SCHEMA_VERSION,
                 )
                 update_ingest_entry(task, "indexed")
         except Exception as exc:
@@ -291,30 +294,54 @@ def hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def build_document_artifacts(stored_path: Path, filename: str, doc_id: str) -> tuple[List[dict], List[dict]]:
+    pages = extract_pages(stored_path)
+    if not any(page.get("text", "").strip() for page in pages):
+        raise ValueError("the PDF contains no extractable text; scanned PDFs require OCR")
+    raw_chunks = chunk_document(pages, max_size=800, overlap=100)
+    chunks = [
+        {
+            "chunk_id": uuid.uuid4().hex[:12],
+            "document_id": doc_id,
+            "filename": filename,
+            "page": page_no,
+            "chunk_index": index,
+            "text": text,
+            "embedding_text": normalize_for_embedding(text),
+            "format": "markdown",
+        }
+        for index, (page_no, text) in enumerate(raw_chunks)
+    ]
+    if not chunks:
+        raise ValueError("the PDF produced no searchable text chunks")
+
+    atomic_write_json(EXTRACTED_DIR / f"{doc_id}.json", pages)
+    atomic_write_json(CHUNKS_DIR / f"{doc_id}.json", chunks)
+    return pages, chunks
+
+
+def rebuild_document_artifacts(metadata: dict) -> dict:
+    doc_id = metadata["document_id"]
+    stored_path = DOCUMENTS_DIR / metadata["stored_filename"]
+    if not stored_path.exists():
+        raise FileNotFoundError("stored PDF is missing; upload the document again")
+    pages, chunks = build_document_artifacts(stored_path, metadata["filename"], doc_id)
+    return update_metadata(
+        doc_id,
+        pages=len(pages),
+        chunks=len(chunks),
+        pipeline_version=PIPELINE_VERSION,
+        index_schema_version=0,
+        indexing_status="queued",
+        indexing_error=None,
+    )
+
+
 def create_document(stored_path: Path, filename: str, content_sha256: str) -> dict:
     doc_id = stored_path.stem
     try:
-        pages = extract_pages(stored_path)
-        if not any(page.get("text", "").strip() for page in pages):
-            raise ValueError("the PDF contains no extractable text; scanned PDFs require OCR")
-        raw_chunks = chunk_document(pages, max_size=800, overlap=100)
-        chunks = [
-            {
-                "chunk_id": uuid.uuid4().hex[:12],
-                "document_id": doc_id,
-                "filename": filename,
-                "page": page_no,
-                "chunk_index": index,
-                "text": text,
-            }
-            for index, (page_no, text) in enumerate(raw_chunks)
-        ]
-        if not chunks:
-            raise ValueError("the PDF produced no searchable text chunks")
+        pages, chunks = build_document_artifacts(stored_path, filename, doc_id)
 
-        atomic_write_json(EXTRACTED_DIR / f"{doc_id}.json", pages)
-        chunks_path = CHUNKS_DIR / f"{doc_id}.json"
-        atomic_write_json(chunks_path, chunks)
         now = utc_now()
         metadata = {
             "document_id": doc_id,
@@ -331,6 +358,8 @@ def create_document(stored_path: Path, filename: str, content_sha256: str) -> di
             "indexing_error": None,
             "embedding_model": EMBEDDING_MODEL,
             "vector_dim": 0,
+            "pipeline_version": PIPELINE_VERSION,
+            "index_schema_version": 0,
         }
         atomic_write_json(metadata_path(doc_id), metadata)
         return metadata
@@ -440,14 +469,25 @@ def recover_interrupted_work() -> None:
             logger.exception("Could not recover job %s", path)
 
     for metadata in list_metadata():
-        if metadata.get("indexing_status") in {"queued", "indexing"}:
-            doc_id = metadata.get("document_id")
+        doc_id = metadata.get("document_id")
+        try:
+            if metadata.get("pipeline_version") != PIPELINE_VERSION:
+                metadata = rebuild_document_artifacts(metadata)
+            needs_index = (
+                metadata.get("indexing_status") in {"queued", "indexing"}
+                or metadata.get("index_schema_version") != INDEX_SCHEMA_VERSION
+                or metadata.get("embedding_model") != EMBEDDING_MODEL
+            )
             chunks_path = CHUNKS_DIR / f"{doc_id}.json"
-            if doc_id and chunks_path.exists():
+            if needs_index and doc_id and chunks_path.exists():
+                enqueue_index(IndexTask(doc_id, str(chunks_path)), update_status=True)
+        except Exception as exc:
+            logger.exception("Could not migrate or recover indexing for %s", doc_id)
+            if doc_id:
                 try:
-                    enqueue_index(IndexTask(doc_id, str(chunks_path)), update_status=True)
+                    update_metadata(doc_id, indexing_status="error", indexing_error=str(exc))
                 except Exception:
-                    logger.exception("Could not recover indexing for %s", doc_id)
+                    logger.exception("Could not persist migration error for %s", doc_id)
 
 
 def start_workers() -> None:
@@ -493,7 +533,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(
     title="AI Librarian",
     description="Local-first document ingestion and semantic search.",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -511,7 +551,10 @@ app.add_middleware(
 async def run_reranker(query: str, hits: List[dict]) -> List[dict]:
     if not hits or RERANK_EXECUTOR is None:
         return hits
-    passages = [hit.get("payload", {}).get("text", "") for hit in hits]
+    passages = [
+        hit.get("payload", {}).get("embedding_text") or hit.get("payload", {}).get("text", "")
+        for hit in hits
+    ]
     loop = asyncio.get_running_loop()
     future = loop.run_in_executor(RERANK_EXECUTOR, rerank, query, passages)
     try:
@@ -538,7 +581,13 @@ async def retrieve(
     query_vector = await asyncio.to_thread(lambda: embed_texts([query])[0])
     filters = {key: value for key, value in {"document_id": document_id, "filename": filename}.items() if value}
     candidate_count = max(top_k, rerank_k) if rerank_enabled else top_k
-    hits = await asyncio.to_thread(search_vectors, query_vector, candidate_count, filters or None)
+    hits = await asyncio.to_thread(
+        search_vectors,
+        query_vector,
+        candidate_count,
+        filters or None,
+        query,
+    )
     if rerank_enabled:
         hits = await run_reranker(query, hits)
     return hits[:top_k]
@@ -571,6 +620,8 @@ async def config():
         "ingest_root": str(INGEST_ROOT),
         "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
         "embedding_model": EMBEDDING_MODEL,
+        "pipeline_version": PIPELINE_VERSION,
+        "index_schema_version": INDEX_SCHEMA_VERSION,
     }
 
 
@@ -651,6 +702,11 @@ async def retry_document(doc_id: str):
     metadata = await asyncio.to_thread(read_metadata, doc_id)
     if metadata.get("indexing_status") in {"queued", "indexing"}:
         raise HTTPException(status_code=409, detail="document is already queued for indexing")
+    if metadata.get("pipeline_version") != PIPELINE_VERSION:
+        try:
+            metadata = await asyncio.to_thread(rebuild_document_artifacts, metadata)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"document rebuild failed: {exc}") from exc
     chunks_path = CHUNKS_DIR / f"{doc_id}.json"
     if not chunks_path.exists():
         raise HTTPException(status_code=409, detail="document chunks are missing; upload the document again")

@@ -6,6 +6,21 @@ def split_into_paragraphs(text: str) -> List[str]:
     return [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
 
 
+def normalize_for_embedding(markdown: str) -> str:
+    """Remove presentation-only Markdown while preserving words and symbols."""
+    text = re.sub(r"!\[([^]]*)\]\([^)]*\)", r"\1", markdown)
+    text = re.sub(r"\[([^]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"^\s{0,3}#{1,6}\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*>\s?", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*\d+[.)]\s+", "", text, flags=re.MULTILINE)
+    text = text.replace("**", "").replace("__", "").replace("~~", "")
+    text = re.sub(r"`([^`]*)`", r"\1", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\s*\n\s*", " ", text)
+    return text.strip()
+
+
 def split_into_sentences(text: str) -> List[str]:
     return [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
 
@@ -64,6 +79,11 @@ def build_chunks(
     current_length = 0
 
     for page_no, unit in units:
+        if current and page_no != current[-1][0]:
+            chunks.append((current[0][0], "\n\n".join(text for _, text in current)))
+            current = []
+            current_length = 0
+
         separator_length = 2 if current else 0
         if current and current_length + separator_length + len(unit) > max_size:
             chunk_text = "\n\n".join(text for _, text in current)

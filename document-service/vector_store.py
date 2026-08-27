@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import os
 from typing import Dict, List, Optional
 
@@ -8,13 +9,25 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     FilterSelector,
+    Fusion,
+    FusionQuery,
     MatchValue,
     PointStruct,
+    Prefetch,
+    SparseVector,
+    SparseVectorParams,
     VectorParams,
 )
 
+from lexical import sparse_vector
+
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 COLLECTION = os.environ.get("QDRANT_COLLECTION", "vault")
+DENSE_VECTOR = "semantic"
+SPARSE_VECTOR = "lexical"
+INDEX_SCHEMA_VERSION = 2
+
+logger = logging.getLogger("ai_librarian.vector_store")
 
 client = QdrantClient(url=QDRANT_URL, timeout=10, check_compatibility=False)
 
@@ -24,15 +37,31 @@ def ensure_collection(vector_size: int):
     if COLLECTION not in collections:
         client.create_collection(
             collection_name=COLLECTION,
-            vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+            vectors_config={DENSE_VECTOR: VectorParams(size=vector_size, distance=Distance.COSINE)},
+            sparse_vectors_config={SPARSE_VECTOR: SparseVectorParams()},
         )
         return
+
     info = client.get_collection(COLLECTION)
-    configured_size = info.config.params.vectors.size
-    if configured_size != vector_size:
-        raise ValueError(
-            f"Qdrant collection '{COLLECTION}' expects {configured_size}-dimension vectors, "
-            f"but the embedding model returned {vector_size}; use a new collection or restore the original model"
+    vectors = info.config.params.vectors
+    sparse_vectors = info.config.params.sparse_vectors or {}
+    compatible = (
+        isinstance(vectors, dict)
+        and DENSE_VECTOR in vectors
+        and vectors[DENSE_VECTOR].size == vector_size
+        and SPARSE_VECTOR in sparse_vectors
+    )
+    if not compatible:
+        logger.warning(
+            "Recreating derived Qdrant collection %s for hybrid index schema %s",
+            COLLECTION,
+            INDEX_SCHEMA_VERSION,
+        )
+        client.delete_collection(COLLECTION)
+        client.create_collection(
+            collection_name=COLLECTION,
+            vectors_config={DENSE_VECTOR: VectorParams(size=vector_size, distance=Distance.COSINE)},
+            sparse_vectors_config={SPARSE_VECTOR: SparseVectorParams()},
         )
 
 
@@ -51,13 +80,19 @@ def upsert_chunks(chunks: List[dict], batch_size: int = 64):
     points = []
     for c in chunks:
         point_id = chunk_id_to_int(c["chunk_id"])
+        search_text = c.get("embedding_text") or c.get("text", "")
+        sparse_indices, sparse_values = sparse_vector(search_text)
         points.append(
             PointStruct(
                 id=point_id,
-                vector=c["embedding"],
+                vector={
+                    DENSE_VECTOR: c["embedding"],
+                    SPARSE_VECTOR: SparseVector(indices=sparse_indices, values=sparse_values),
+                },
                 payload={
                     "chunk_id": c.get("chunk_id"),
                     "text": c.get("text", ""),
+                    "embedding_text": search_text,
                     "document_id": c.get("document_id"),
                     "filename": c.get("filename"),
                     "page": c.get("page"),
@@ -73,8 +108,13 @@ def upsert_chunks(chunks: List[dict], batch_size: int = 64):
         client.upsert(collection_name=COLLECTION, points=points, wait=True)
 
 
-def search_vectors(vector: List[float], top_k: int = 5, filters: Optional[Dict] = None):
-    """Return top_k nearest points with payload and score.
+def search_vectors(
+    vector: List[float],
+    top_k: int = 5,
+    filters: Optional[Dict] = None,
+    query_text: Optional[str] = None,
+):
+    """Return fused semantic and exact-symbol matches.
 
     `filters` can be a dict like {"document_id": "<id>", "filename": "name.pdf"}
     """
@@ -91,13 +131,39 @@ def search_vectors(vector: List[float], top_k: int = 5, filters: Optional[Dict] 
         if must:
             query_filter = Filter(must=must)
 
-    results = client.query_points(
-        collection_name=COLLECTION,
-        query=vector,
-        limit=top_k,
-        with_payload=True,
-        query_filter=query_filter,
-    ).points
+    sparse_indices, sparse_values = sparse_vector(query_text or "")
+    if sparse_indices:
+        prefetch_limit = max(20, top_k * 4)
+        results = client.query_points(
+            collection_name=COLLECTION,
+            prefetch=[
+                Prefetch(
+                    query=vector,
+                    using=DENSE_VECTOR,
+                    filter=query_filter,
+                    limit=prefetch_limit,
+                ),
+                Prefetch(
+                    query=SparseVector(indices=sparse_indices, values=sparse_values),
+                    using=SPARSE_VECTOR,
+                    filter=query_filter,
+                    limit=prefetch_limit,
+                ),
+            ],
+            query=FusionQuery(fusion=Fusion.RRF),
+            limit=top_k,
+            with_payload=True,
+            query_filter=query_filter,
+        ).points
+    else:
+        results = client.query_points(
+            collection_name=COLLECTION,
+            query=vector,
+            using=DENSE_VECTOR,
+            limit=top_k,
+            with_payload=True,
+            query_filter=query_filter,
+        ).points
     out = []
     for r in results:
         out.append({"id": r.id, "score": r.score, "payload": r.payload})

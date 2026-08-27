@@ -1,6 +1,6 @@
 import pytest
 
-from chunking import chunk_document
+from chunking import chunk_document, normalize_for_embedding
 
 
 def test_chunks_never_exceed_max_size_for_long_unbroken_text():
@@ -21,8 +21,28 @@ def test_chunks_preserve_page_provenance_and_overlap():
     chunks = chunk_document(pages, max_size=50, overlap=10)
 
     assert chunks[0][0] == 1
-    assert chunks[-1][0] in {1, 2}
+    assert chunks[-1][0] == 2
     assert all(len(text) <= 50 for _, text in chunks)
+
+
+def test_chunks_do_not_cross_page_boundaries():
+    pages = [
+        {"page": 1, "text": "First page paragraph."},
+        {"page": 2, "text": "Second page paragraph."},
+    ]
+
+    assert chunk_document(pages, max_size=800, overlap=100) == [
+        (1, "First page paragraph."),
+        (2, "Second page paragraph."),
+    ]
+
+
+def test_markdown_normalization_keeps_mathematical_symbols():
+    markdown = "## Result\n\n**Derivative:** $∂f/∂x ≥ 0$ and [proof](https://example.test)."
+
+    normalized = normalize_for_embedding(markdown)
+
+    assert normalized == "Result Derivative: $∂f/∂x ≥ 0$ and proof."
 
 
 @pytest.mark.parametrize("max_size,overlap", [(0, 0), (100, -1), (100, 100)])

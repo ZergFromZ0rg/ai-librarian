@@ -372,6 +372,76 @@ button:disabled {
   color: #35443f;
   line-height: 1.58;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.search-result-text > :first-child {
+  margin-top: 0;
+}
+
+.search-result-text > :last-child {
+  margin-bottom: 0;
+}
+
+.search-result-text h1,
+.search-result-text h2,
+.search-result-text h3,
+.search-result-text h4 {
+  margin: 1em 0 0.4em;
+  color: #263b34;
+  line-height: 1.25;
+}
+
+.search-result-text p,
+.search-result-text ul,
+.search-result-text ol,
+.search-result-text blockquote,
+.search-result-text pre,
+.search-result-text table {
+  margin: 0.65em 0;
+}
+
+.search-result-text ul,
+.search-result-text ol {
+  padding-left: 1.5em;
+}
+
+.search-result-text blockquote {
+  border-left: 3px solid #9db8ae;
+  padding-left: 0.9em;
+  color: #60716b;
+}
+
+.search-result-text code {
+  border-radius: 5px;
+  background: #eef2ef;
+  padding: 0.1em 0.3em;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.search-result-text pre {
+  overflow-x: auto;
+  border-radius: 9px;
+  background: #eef2ef;
+  padding: 10px;
+}
+
+.search-result-text pre code {
+  padding: 0;
+}
+
+.search-result-text table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  white-space: normal;
+}
+
+.search-result-text th,
+.search-result-text td {
+  border: 1px solid #ccd6d1;
+  padding: 6px 9px;
+  text-align: left;
 }
 
 .question-box {

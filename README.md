@@ -1,6 +1,6 @@
 # AI Librarian
 
-AI Librarian is a self-hosted, local-first knowledge library for PDF documents. It extracts and chunks text, creates local semantic embeddings, stores them in Qdrant, and reranks relevant passages with page-level source references.
+AI Librarian is a self-hosted, local-first knowledge library for PDF documents. It extracts layout-aware Markdown, builds overlapping character-based chunks, and combines semantic and exact-symbol retrieval in Qdrant before reranking passages with page-level source references.
 
 No hosted AI API or generative model is required. After the container images and search models have been downloaded, document processing and search stay on your server.
 
@@ -12,6 +12,8 @@ No hosted AI API or generative model is required. After the container images and
 - Retry failed indexing jobs and recover queued work after a restart.
 - Avoid duplicate documents using a SHA-256 content hash.
 - Search concepts, passages, names, and ideas semantically across the full library.
+- Preserve headings, lists, tables, whitespace, Unicode symbols, and mathematical notation when the PDF text layer contains them.
+- Combine dense semantic search with sparse lexical matching for exact terms, formulas, and symbols.
 
 ## Architecture
 
@@ -20,9 +22,10 @@ Browser
   │
   ▼
 Nginx UI ── /api ──► FastAPI document service
-                         ├── PDF extraction and chunking
+                         ├── PyMuPDF4LLM layout extraction
+                         ├── 800-character chunks, 100-character overlap
                          ├── Sentence Transformer embeddings/reranking
-                         └── Qdrant semantic retrieval
+                         └── Qdrant dense + sparse hybrid retrieval
 ```
 
 Qdrant is private to the Compose network. Only the UI and API are published, and both bind to `127.0.0.1` by default.
@@ -47,6 +50,8 @@ docker compose up -d --build
 ```
 
 The first indexing request takes longer because the document service downloads its embedding model. The reranker is downloaded on the first reranked search. Model files are persisted under `data/models/`.
+
+When upgrading from pipeline version 1, existing stored PDFs are automatically re-extracted and reindexed using the layout-aware hybrid-search schema. The original PDFs remain unchanged. During this one-time migration, document badges move through `queued` and `indexing` again.
 
 Follow startup progress:
 
@@ -176,6 +181,8 @@ npm run build
 ## Current limitations
 
 - PDF is the only accepted document format.
-- Image-only scanned PDFs require OCR before upload.
+- Image-only scanned PDFs require OCR before upload; OCR remains disabled to avoid silently corrupting mathematical notation.
+- Layout extraction can preserve mathematical symbols only when the PDF exposes usable text or glyph information. Equations stored solely as images require a dedicated math-aware OCR system.
+- Chunking remains character-based: chunks are capped at 800 characters with 100-character overlap and never cross page boundaries.
 - The document service intentionally runs as one process because its bounded work queues are in-process. Moving queues to Redis or another durable worker system would be the next step for horizontal scaling.
 - Search returns relevant source passages; it does not generate or summarize answers.

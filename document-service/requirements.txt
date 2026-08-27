@@ -1,6 +1,7 @@
 fastapi==0.140.0
 uvicorn[standard]==0.52.4
 PyMuPDF==1.28.2
+pymupdf4llm==1.28.2
 python-multipart==0.0.32
 requests==2.32.5
 torch==2.13.0

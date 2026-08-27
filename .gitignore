@@ -1,6 +1,7 @@
 vault/
 *.pdf
 *.db
+*.ses
 manifest.json
 __pycache__/
 *.pyc

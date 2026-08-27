@@ -64,6 +64,7 @@ def service(tmp_path, monkeypatch):
                     "page": chunk["page"],
                     "chunk_index": chunk["chunk_index"],
                     "text": chunk["text"],
+                    "embedding_text": chunk.get("embedding_text", chunk["text"]),
                 },
             }
 
@@ -73,7 +74,7 @@ def service(tmp_path, monkeypatch):
         ]:
             del indexed[chunk_id]
 
-    def fake_search(vector, top_k=5, filters=None):
+    def fake_search(vector, top_k=5, filters=None, query_text=None):
         hits = []
         vector_norm = math.sqrt(sum(value * value for value in vector)) or 1
         for chunk_id, item in indexed.items():
@@ -155,3 +156,23 @@ def test_folder_ingestion_cannot_escape_configured_root(service, tmp_path):
 
     assert response.status_code == 403
     assert module.INGEST_ROOT not in outside.parents
+
+
+def test_stored_pdf_can_be_rebuilt_for_new_pipeline_version(service):
+    module, client, _indexed = service
+    upload = client.post(
+        "/documents",
+        files={"file": ("migration.pdf", make_pdf("A structured passage for migration."), "application/pdf")},
+    )
+    assert upload.status_code == 201
+    doc_id = upload.json()["document_id"]
+    metadata = wait_for_status(client, doc_id, "indexed")
+    stale = module.update_metadata(doc_id, pipeline_version=1, index_schema_version=1)
+
+    rebuilt = module.rebuild_document_artifacts(stale)
+    chunks = client.get(f"/documents/{doc_id}/chunks").json()
+
+    assert rebuilt["pipeline_version"] == module.PIPELINE_VERSION
+    assert rebuilt["index_schema_version"] == 0
+    assert chunks[0]["format"] == "markdown"
+    assert chunks[0]["embedding_text"]

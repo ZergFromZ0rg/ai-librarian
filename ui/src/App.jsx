@@ -1,4 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 const TERMINAL_JOB_STATES = new Set(["done", "partial", "error", "interrupted"]);
@@ -275,7 +277,11 @@ export default function App() {
                   <span>page {result.page}</span>
                   <span>score {(result.rerank_score ?? result.score)?.toFixed(3)}</span>
                 </div>
-                <div className="search-result-text">{result.text}</div>
+                <div className="search-result-text">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+                    {result.text}
+                  </ReactMarkdown>
+                </div>
               </article>
             ))}
             {searching && <div className="message assistant">Finding the most relevant passages…</div>}
