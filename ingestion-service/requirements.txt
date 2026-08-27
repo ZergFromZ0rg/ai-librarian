@@ -1,3 +1,0 @@
-qdrant-client==1.9.0
-requests==2.32.3
-pypdf==4.2.0

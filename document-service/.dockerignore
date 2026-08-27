@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv
+venv/
+env/
+.env
+data/
+qdrant_storage/
+*.sqlite3
+*.log

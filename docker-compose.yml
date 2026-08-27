@@ -1,58 +1,34 @@
+version: "3.8"
 
 services:
-
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    volumes:
-      - /home/zerg/ai-vault/_stack/ollama:/root/.ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-  openwebui:
-    image: ghcr.io/open-webui/open-webui:main
-    container_name: openwebui
-    restart: unless-stopped
-    ports:
-      - "2222:8080"
-    environment:
-      - OLLAMA_BASE_URL=http://ollama:11434
-    volumes:
-      - /home/zerg/ai-vault/_stack/openwebui:/app/backend/data
-      - /home/zerg/ai-vault:/home/zerg/ai-vault
-    depends_on:
-      - ollama
-
   qdrant:
     image: qdrant/qdrant:latest
     container_name: qdrant
-    restart: unless-stopped
     ports:
       - "6333:6333"
       - "6334:6334"
     volumes:
-      - /home/zerg/ai-vault/_stack/qdrant:/qdrant/storage
+      - ./qdrant_storage:/qdrant/storage
 
-  ingestion:
-    build: ./ingestion-service
-    container_name: ingestion
-    restart: unless-stopped
-    environment:
-      - OLLAMA_URL=http://ollama:11434
-      - QDRANT_URL=http://qdrant:6333
+  document-service:
+    build:
+      context: ./document-service
+      dockerfile: Dockerfile
+    container_name: document-service
+    ports:
+      - "8000:8000"
     volumes:
-      - /home/zerg/ai-vault:/home/zerg/ai-vault
+      - ./document-service:/app:rw
+      - ./document-service/data:/app/data:rw
+    environment:
+      - PORT=8000
+      - DATA_DIR=/app/data
+      - QDRANT_URL=http://qdrant:6333
     depends_on:
-      - ollama
       - qdrant
-
-networks:
-  default:
-    name: ai-vault-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
