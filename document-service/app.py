@@ -501,10 +501,10 @@ def start_workers() -> None:
     WORKER_THREADS = [
         threading.Thread(target=index_worker, daemon=True, name="index-worker"),
         threading.Thread(target=ingest_worker, daemon=True, name="ingest-worker"),
+        threading.Thread(target=recover_interrupted_work, daemon=True, name="recovery-worker"),
     ]
     for thread in WORKER_THREADS:
         thread.start()
-    recover_interrupted_work()
 
 
 def stop_workers() -> None:
