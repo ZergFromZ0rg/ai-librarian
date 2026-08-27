@@ -32,3 +32,15 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+    container_name: ai-librarian-ui
+    ports:
+      - "3000:80"
+    environment:
+      - VITE_API_BASE=http://document-service:8000
+    depends_on:
+      - document-service

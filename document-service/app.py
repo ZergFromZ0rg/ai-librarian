@@ -21,6 +21,11 @@ import concurrent.futures
 
 # background queue for async embedding/upsert jobs
 JOB_QUEUE = queue.Queue()
+INGEST_QUEUE = queue.Queue()
+
+# job status store for ingestion jobs
+JOB_STATUS = {}
+JOB_STATUS_LOCK = threading.Lock()
 
 # reranker executor and settings
 RERANK_MAX_WORKERS = int(os.environ.get("RERANK_MAX_WORKERS", "2"))
@@ -57,11 +62,77 @@ _worker_thread = threading.Thread(target=worker, daemon=True)
 _worker_thread.start()
 
 
-app = FastAPI()
+def ingest_worker():
+    while True:
+        job = INGEST_QUEUE.get()
+        if job is None:
+            break
+        job_id, folder, full = job
+        with JOB_STATUS_LOCK:
+            JOB_STATUS[job_id]["state"] = "running"
+        p = Path(folder)
+        files = sorted(p.glob("*.pdf")) if p.exists() else []
+        for pdf in files:
+            entry = {"file": pdf.name, "status": "pending"}
+            with JOB_STATUS_LOCK:
+                JOB_STATUS[job_id]["files"].append(entry)
+            try:
+                with JOB_STATUS_LOCK:
+                    entry["status"] = "processing"
+                doc_id = generate_id()
+                stored_name = f"{doc_id}{pdf.suffix}"
+                stored_path = DOCUMENTS_DIR / stored_name
+                # copy file into documents dir
+                with open(pdf, "rb") as src, open(stored_path, "wb") as dst:
+                    dst.write(src.read())
 
-# Configure CORS for the React UI (default: http://localhost:3000)
-_cors_origins = os.environ.get("CORS_ORIGINS", "http://localhost:3000")
-if _cors_origins:
+                pages = extract_pages(stored_path)
+                raw_chunks = chunk_document(pages, max_size=800, overlap=100)
+
+                chunks_out = []
+                for idx, (page_no, text_chunk) in enumerate(raw_chunks):
+                    chunk_obj = {
+                        "chunk_id": uuid.uuid4().hex[:12],
+                        "document_id": doc_id,
+                        "filename": pdf.name,
+                        "page": page_no,
+                        "chunk_index": idx,
+                        "text": text_chunk,
+                    }
+                    chunks_out.append(chunk_obj)
+
+                chunks_path = CHUNKS_DIR / f"{doc_id}.json"
+                chunks_path.write_text(json.dumps(chunks_out, ensure_ascii=False, indent=2))
+
+                metadata = {
+                    "document_id": doc_id,
+                    "filename": pdf.name,
+                    "file_type": "pdf",
+                    "uploaded_at": datetime.utcnow().isoformat() + "Z",
+                    "title": title_from_filename(pdf.name),
+                    "stored_filename": stored_name,
+                    "pages": len(pages),
+                    "chunks": len(chunks_out),
+                }
+                metadata_path = METADATA_DIR / f"{doc_id}.json"
+                metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2))
+
+                # enqueue embedding/upsert job
+                JOB_QUEUE.put((doc_id, str(chunks_path)))
+
+                with JOB_STATUS_LOCK:
+                    entry["status"] = "done"
+                    entry["document_id"] = doc_id
+            except Exception as e:
+                with JOB_STATUS_LOCK:
+                    entry["status"] = "error"
+                    entry["error"] = str(e)
+
+        with JOB_STATUS_LOCK:
+            JOB_STATUS[job_id]["state"] = "done"
+        INGEST_QUEUE.task_done()
+    _cors_origins = os.environ.get("CORS_ORIGINS", "http://localhost:3000")
+    if _cors_origins:
     _allow_origins = [o.strip() for o in _cors_origins.split(",") if o.strip()]
 else:
     _allow_origins = ["*"]
@@ -337,6 +408,32 @@ async def health():
         status["qdrant"] = None
 
     return JSONResponse(status)
+
+
+@app.get("/admin/ingest-status/{job_id}")
+async def ingest_status(job_id: str):
+    with JOB_STATUS_LOCK:
+        status = JOB_STATUS.get(job_id)
+    if not status:
+        raise HTTPException(status_code=404, detail="job not found")
+    return JSONResponse(status)
+
+
+@app.post("/admin/ingest-folder")
+async def ingest_folder(payload: dict):
+    folder = payload.get("folder")
+    full = bool(payload.get("full_pipeline", True))
+    if not folder:
+        raise HTTPException(status_code=400, detail="missing folder")
+    p = Path(folder)
+    if not p.exists() or not p.is_dir():
+        raise HTTPException(status_code=400, detail=f"folder not found: {folder}")
+
+    job_id = uuid.uuid4().hex[:12]
+    with JOB_STATUS_LOCK:
+        JOB_STATUS[job_id] = {"state": "queued", "folder": folder, "files": []}
+    INGEST_QUEUE.put((job_id, folder, full))
+    return JSONResponse({"job_id": job_id})
 
 
 if __name__ == "__main__":
