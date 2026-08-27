@@ -172,7 +172,6 @@ button:disabled {
 }
 
 .field-row input,
-.token-box input,
 .question-box textarea {
   min-width: 0;
   flex: 1;
@@ -185,7 +184,6 @@ button:disabled {
 }
 
 .field-row input:focus,
-.token-box input:focus,
 .question-box textarea:focus {
   border-color: #43816d;
   box-shadow: 0 0 0 3px rgba(67, 129, 109, 0.12);
@@ -391,13 +389,6 @@ button:disabled {
   resize: vertical;
 }
 
-.token-box {
-  display: flex;
-  gap: 8px;
-  max-width: 440px;
-  margin: 0 0 20px auto;
-}
-
 @media (max-width: 850px) {
   .app-shell {
     padding: 18px;
@@ -418,9 +409,5 @@ button:disabled {
 
   .chat-panel {
     min-height: 600px;
-  }
-
-  .token-box {
-    margin-left: 0;
   }
 }

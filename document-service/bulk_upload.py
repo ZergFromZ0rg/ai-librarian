@@ -1,20 +1,13 @@
 import argparse
-import os
 import time
 import shutil
 from pathlib import Path
 import requests
 
-
-def auth_headers(token=None):
-    value = token or os.environ.get("AI_LIBRARIAN_TOKEN")
-    return {"Authorization": f"Bearer {value}"} if value else {}
-
-
-def upload_file(url, path, wait=False, poll_interval=2, timeout=300, token=None):
+def upload_file(url, path, wait=False, poll_interval=2, timeout=300):
     with open(path, "rb") as f:
         files = {"file": (path.name, f, "application/pdf")}
-        r = requests.post(f"{url}/documents", files=files, headers=auth_headers(token), timeout=timeout)
+        r = requests.post(f"{url}/documents", files=files, timeout=timeout)
     if r.status_code not in (200, 201):
         print(f"Failed to upload {path.name}: {r.status_code} {r.text}")
         return None
@@ -26,9 +19,7 @@ def upload_file(url, path, wait=False, poll_interval=2, timeout=300, token=None)
     if wait and doc_id:
         start = time.time()
         while time.time() - start < timeout:
-            status_response = requests.get(
-                f"{url}/documents/{doc_id}", headers=auth_headers(token), timeout=10
-            )
+            status_response = requests.get(f"{url}/documents/{doc_id}", timeout=10)
             if status_response.status_code == 200:
                 status = status_response.json().get("indexing_status")
                 if status == "indexed":
@@ -42,7 +33,7 @@ def upload_file(url, path, wait=False, poll_interval=2, timeout=300, token=None)
     return doc_id
 
 
-def bulk_upload(folder, url="http://127.0.0.1:8000", wait=False, token=None):
+def bulk_upload(folder, url="http://127.0.0.1:8000", wait=False):
     p = Path(folder)
     if not p.exists() or not p.is_dir():
         print("Folder not found:", folder)
@@ -52,10 +43,10 @@ def bulk_upload(folder, url="http://127.0.0.1:8000", wait=False, token=None):
         print("No PDFs found in folder:", folder)
         return
     for pdf in pdfs:
-        upload_file(url, pdf, wait=wait, token=token)
+        upload_file(url, pdf, wait=wait)
 
 
-def watch_and_upload(folder, url="http://127.0.0.1:8000", poll_interval=5, move_after_upload=True, uploaded_dir_name="uploaded", token=None):
+def watch_and_upload(folder, url="http://127.0.0.1:8000", poll_interval=5, move_after_upload=True, uploaded_dir_name="uploaded"):
     p = Path(folder)
     if not p.exists() or not p.is_dir():
         print("Folder not found:", folder)
@@ -75,7 +66,7 @@ def watch_and_upload(folder, url="http://127.0.0.1:8000", poll_interval=5, move_
                 if pdf.parent == uploaded_dir:
                     continue
                 print(f"Found new PDF: {pdf.name}")
-                doc_id = upload_file(url, pdf, wait=False, token=token)
+                doc_id = upload_file(url, pdf, wait=False)
                 if doc_id:
                     seen.add(pdf.name)
                 if move_after_upload and doc_id:
@@ -94,15 +85,14 @@ def main():
     parser = argparse.ArgumentParser(description="Upload PDF files to AI Librarian")
     parser.add_argument("folder", type=Path)
     parser.add_argument("--url", default="http://127.0.0.1:8000")
-    parser.add_argument("--token", default=os.environ.get("AI_LIBRARIAN_TOKEN"))
     parser.add_argument("--wait", action="store_true")
     parser.add_argument("--watch", action="store_true")
     parser.add_argument("--move", action="store_true", help="move watched files into an uploaded subfolder")
     args = parser.parse_args()
     if args.watch:
-        watch_and_upload(args.folder, url=args.url, poll_interval=5, move_after_upload=args.move, token=args.token)
+        watch_and_upload(args.folder, url=args.url, poll_interval=5, move_after_upload=args.move)
         return
-    bulk_upload(args.folder, url=args.url, wait=args.wait, token=args.token)
+    bulk_upload(args.folder, url=args.url, wait=args.wait)
 
 
 if __name__ == "__main__":

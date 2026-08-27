@@ -12,7 +12,6 @@ No hosted AI API or generative model is required. After the container images and
 - Retry failed indexing jobs and recover queued work after a restart.
 - Avoid duplicate documents using a SHA-256 content hash.
 - Search concepts, passages, names, and ideas semantically across the full library.
-- Protect library endpoints with an optional bearer token.
 
 ## Architecture
 
@@ -43,12 +42,6 @@ cp .env.example .env
 mkdir -p data/app data/qdrant data/models library
 ```
 
-Edit `.env` before starting. Replace `API_TOKEN` with a long random value. One way to generate one is:
-
-```bash
-openssl rand -hex 32
-```
-
 ```bash
 docker compose up -d --build
 ```
@@ -62,7 +55,7 @@ docker compose ps
 docker compose logs -f document-service
 ```
 
-Open `http://127.0.0.1:3100`, enter the token from `.env`, and upload a PDF. Wait for its badge to change to `indexed` before searching.
+Open `http://127.0.0.1:3100` and upload a PDF. Wait for its badge to change to `indexed` before searching.
 
 ## Connecting to a remote server
 
@@ -83,7 +76,7 @@ UI_PORT=3100
 
 Then open `http://SERVER_LAN_IP:3100`. If port 3100 is already occupied, choose another unused `UI_PORT`; the container still listens internally on port 80.
 
-Keep `API_TOKEN` enabled, restrict ports 3100 and 8000 with the server firewall, and use a TLS-enabled reverse proxy before exposing the app beyond a trusted network. The token is stored in the browser's local storage, so do not use the UI from an untrusted machine.
+Restrict ports 3100 and 8000 with the server firewall. This application has no built-in authentication and should only be exposed on a trusted LAN, through Tailscale, or behind an authenticated TLS reverse proxy.
 
 ## Adding documents from a server folder
 
@@ -98,7 +91,6 @@ Absolute paths and paths outside `/library` are rejected. Folder imports scan PD
 | `BIND_ADDRESS` | `127.0.0.1` | Host interface used by published UI/API ports |
 | `UI_PORT` | `3100` | Browser UI port |
 | `API_PORT` | `8000` | Direct API and interactive docs port |
-| `API_TOKEN` | required by Compose | Protects document, search, and admin endpoints |
 | `MAX_UPLOAD_MB` | `100` | Per-file backend upload limit |
 | `EMBEDDING_BATCH_SIZE` | `32` | Chunks embedded in each indexing batch |
 | `RERANK_TIMEOUT` | `15` | Maximum reranker time in seconds |
@@ -148,12 +140,6 @@ Do not use `docker compose down --volumes` or delete `data/` unless you intend t
 
 Interactive API documentation is available at `http://127.0.0.1:8000/docs`.
 
-Protected endpoints accept:
-
-```text
-Authorization: Bearer <API_TOKEN>
-```
-
 Important endpoints:
 
 - `POST /documents` — upload a PDF
@@ -177,7 +163,7 @@ python3 -m venv .venv
 .venv/bin/python -m pytest -q
 ```
 
-The end-to-end test uses a generated PDF and deterministic in-memory embeddings. It covers upload, background indexing, Qdrant-compatible search, deduplication, deletion, failure persistence/retry, authentication, and folder containment without downloading AI models.
+The end-to-end test uses a generated PDF and deterministic in-memory embeddings. It covers upload, background indexing, Qdrant-compatible search, deduplication, deletion, failure persistence/retry, and folder containment without downloading AI models.
 
 Frontend:
 

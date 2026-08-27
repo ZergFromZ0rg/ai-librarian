@@ -33,7 +33,6 @@ def wait_for_status(client: TestClient, doc_id: str, expected: str, timeout: flo
 def service(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("INGEST_ROOT", str(tmp_path / "library"))
-    monkeypatch.setenv("API_TOKEN", "")
     monkeypatch.setenv("RERANK_TIMEOUT", "1")
 
     service_path = str(__file__).rsplit("/tests/", 1)[0]
@@ -156,12 +155,3 @@ def test_folder_ingestion_cannot_escape_configured_root(service, tmp_path):
 
     assert response.status_code == 403
     assert module.INGEST_ROOT not in outside.parents
-
-
-def test_token_protection_can_be_enabled(service, monkeypatch):
-    module, client, _indexed = service
-    monkeypatch.setattr(module, "API_TOKEN", "secret")
-
-    assert client.get("/documents").status_code == 401
-    assert client.get("/documents", headers={"Authorization": "Bearer wrong"}).status_code == 401
-    assert client.get("/documents", headers={"Authorization": "Bearer secret"}).status_code == 200

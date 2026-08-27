@@ -35,7 +35,6 @@ services:
       INGEST_ROOT: /library
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: vault
-      API_TOKEN: ${API_TOKEN:?Set a long random API_TOKEN in .env}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
       EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}

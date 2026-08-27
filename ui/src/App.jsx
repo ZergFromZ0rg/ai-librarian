@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 const TERMINAL_JOB_STATES = new Set(["done", "partial", "error", "interrupted"]);
@@ -13,9 +13,6 @@ async function parseResponse(response) {
 }
 
 export default function App() {
-  const [token, setToken] = useState(() => localStorage.getItem("ai-librarian-token") || "");
-  const [tokenDraft, setTokenDraft] = useState(token);
-  const [config, setConfig] = useState(null);
   const [health, setHealth] = useState(null);
   const [documents, setDocuments] = useState([]);
   const [folder, setFolder] = useState(".");
@@ -27,20 +24,12 @@ export default function App() {
   const [searching, setSearching] = useState(false);
   const [uploading, setUploading] = useState(false);
 
-  const headers = useMemo(
-    () => (token ? { Authorization: `Bearer ${token}` } : {}),
-    [token],
-  );
-
   const api = useCallback(
     async (path, options = {}) => {
-      const response = await fetch(`${API_BASE}${path}`, {
-        ...options,
-        headers: { ...headers, ...(options.headers || {}) },
-      });
+      const response = await fetch(`${API_BASE}${path}`, options);
       return parseResponse(response);
     },
-    [headers],
+    [],
   );
 
   const refreshDocuments = useCallback(async () => {
@@ -49,14 +38,10 @@ export default function App() {
       setDocuments(data.documents || []);
       setNoticeError(false);
     } catch (error) {
-      if (config?.auth_required && !token) {
-        setNotice("Enter the server token to open this library.");
-      } else {
-        setNotice(error.message);
-      }
+      setNotice(error.message);
       setNoticeError(true);
     }
-  }, [api, config?.auth_required, token]);
+  }, [api]);
 
   const refreshHealth = useCallback(async () => {
     try {
@@ -69,13 +54,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetch(`${API_BASE}/config`)
-      .then(parseResponse)
-      .then(setConfig)
-      .catch((error) => {
-        setNotice(error.message);
-        setNoticeError(true);
-      });
     refreshHealth();
   }, [refreshHealth]);
 
@@ -108,15 +86,6 @@ export default function App() {
     }, 2000);
     return () => window.clearInterval(timer);
   }, [api, job, refreshDocuments]);
-
-  function saveToken(event) {
-    event.preventDefault();
-    const cleaned = tokenDraft.trim();
-    localStorage.setItem("ai-librarian-token", cleaned);
-    setToken(cleaned);
-    setNotice(cleaned ? "Token saved in this browser." : "Token removed from this browser.");
-    setNoticeError(false);
-  }
 
   async function uploadFiles(fileList) {
     const files = Array.from(fileList || []);
@@ -222,19 +191,6 @@ export default function App() {
           {healthReady ? "Library ready" : health?.status || "Connecting"}
         </div>
       </header>
-
-      {config?.auth_required && (
-        <form className="token-box" onSubmit={saveToken}>
-          <input
-            aria-label="Server access token"
-            type="password"
-            value={tokenDraft}
-            onChange={(event) => setTokenDraft(event.target.value)}
-            placeholder="Server access token"
-          />
-          <button className="secondary" type="submit">Save token</button>
-        </form>
-      )}
 
       <div className="layout">
         <section className="panel library-panel">

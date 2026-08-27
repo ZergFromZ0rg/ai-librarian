@@ -6,7 +6,6 @@ import logging
 import os
 import queue
 import re
-import secrets
 import shutil
 import threading
 import uuid
@@ -16,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -49,7 +48,6 @@ INDEX_QUEUE_SIZE = int(os.environ.get("INDEX_QUEUE_SIZE", "100"))
 INGEST_QUEUE_SIZE = int(os.environ.get("INGEST_QUEUE_SIZE", "10"))
 RERANK_MAX_WORKERS = int(os.environ.get("RERANK_MAX_WORKERS", "2"))
 RERANK_TIMEOUT = float(os.environ.get("RERANK_TIMEOUT", "10"))
-API_TOKEN = os.environ.get("API_TOKEN", "").strip()
 DOC_ID_PATTERN = re.compile(r"^[a-f0-9]{12}$")
 
 for directory in (DOCUMENTS_DIR, METADATA_DIR, EXTRACTED_DIR, CHUNKS_DIR, JOBS_DIR, INGEST_ROOT):
@@ -506,19 +504,8 @@ app.add_middleware(
     allow_origins=cors_origins or [],
     allow_credentials="*" not in cors_origins,
     allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Content-Type"],
 )
-
-
-def require_api_token(authorization: Optional[str] = Header(default=None)) -> None:
-    if not API_TOKEN:
-        return
-    expected = f"Bearer {API_TOKEN}"
-    if authorization is None or not secrets.compare_digest(authorization, expected):
-        raise HTTPException(status_code=401, detail="missing or invalid API token", headers={"WWW-Authenticate": "Bearer"})
-
-
-AUTH = [Depends(require_api_token)]
 
 
 async def run_reranker(query: str, hits: List[dict]) -> List[dict]:
@@ -581,19 +568,18 @@ def format_hits(hits: List[dict], max_text_chars: int = 10_000) -> List[dict]:
 @app.get("/config")
 async def config():
     return {
-        "auth_required": bool(API_TOKEN),
         "ingest_root": str(INGEST_ROOT),
         "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
         "embedding_model": EMBEDDING_MODEL,
     }
 
 
-@app.get("/documents", dependencies=AUTH)
+@app.get("/documents")
 async def get_documents():
     return {"documents": await asyncio.to_thread(list_metadata)}
 
 
-@app.post("/documents", dependencies=AUTH)
+@app.post("/documents")
 async def upload_document(file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(status_code=400, detail="missing filename")
@@ -643,12 +629,12 @@ async def upload_document(file: UploadFile = File(...)):
     return JSONResponse(metadata, status_code=201)
 
 
-@app.get("/documents/{doc_id}", dependencies=AUTH)
+@app.get("/documents/{doc_id}")
 async def get_document(doc_id: str):
     return await asyncio.to_thread(read_metadata, doc_id)
 
 
-@app.get("/documents/{doc_id}/chunks", dependencies=AUTH)
+@app.get("/documents/{doc_id}/chunks")
 async def get_chunks(doc_id: str):
     validate_doc_id(doc_id)
     chunks_file = CHUNKS_DIR / f"{doc_id}.json"
@@ -660,7 +646,7 @@ async def get_chunks(doc_id: str):
         raise HTTPException(status_code=500, detail=f"failed to read chunks: {exc}") from exc
 
 
-@app.post("/documents/{doc_id}/retry", dependencies=AUTH)
+@app.post("/documents/{doc_id}/retry")
 async def retry_document(doc_id: str):
     metadata = await asyncio.to_thread(read_metadata, doc_id)
     if metadata.get("indexing_status") in {"queued", "indexing"}:
@@ -675,7 +661,7 @@ async def retry_document(doc_id: str):
     return await asyncio.to_thread(read_metadata, doc_id)
 
 
-@app.delete("/documents/{doc_id}", dependencies=AUTH)
+@app.delete("/documents/{doc_id}")
 async def delete_document(doc_id: str):
     metadata = await asyncio.to_thread(read_metadata, doc_id)
 
@@ -698,7 +684,7 @@ async def delete_document(doc_id: str):
     return JSONResponse(status_code=200, content={"deleted": doc_id})
 
 
-@app.post("/search", dependencies=AUTH)
+@app.post("/search")
 async def search(request: SearchRequest):
     try:
         hits = await retrieve(
@@ -715,7 +701,7 @@ async def search(request: SearchRequest):
     return {"query": request.query, "results": format_hits(hits, request.max_text_chars)}
 
 
-@app.get("/search", dependencies=AUTH)
+@app.get("/search")
 async def search_get(
     q: str = Query(..., min_length=1, max_length=1_000),
     top_k: int = Query(5, ge=1, le=50),
@@ -737,7 +723,7 @@ async def search_get(
     return await search(request)
 
 
-@app.get("/admin/reranker", dependencies=AUTH)
+@app.get("/admin/reranker")
 async def admin_reranker():
     info = model_info()
     pending = None
@@ -747,7 +733,7 @@ async def admin_reranker():
     return {"reranker": info, "executor": {"max_workers": RERANK_MAX_WORKERS, "pending_tasks": pending}}
 
 
-@app.get("/admin/ingest-status/{job_id}", dependencies=AUTH)
+@app.get("/admin/ingest-status/{job_id}")
 async def ingest_status(job_id: str):
     with JOB_STATUS_LOCK:
         status = JOB_STATUS.get(job_id) or load_job(job_id)
@@ -758,7 +744,7 @@ async def ingest_status(job_id: str):
     return status
 
 
-@app.post("/admin/ingest-folder", dependencies=AUTH)
+@app.post("/admin/ingest-folder")
 async def ingest_folder(request: IngestFolderRequest):
     folder = resolve_ingest_folder(request.folder)
     job_id = generate_id()
