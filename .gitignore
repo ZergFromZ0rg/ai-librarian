@@ -1,4 +1,5 @@
 vault/
+*.pdf
 *.db
 manifest.json
 __pycache__/
