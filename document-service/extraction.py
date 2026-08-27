@@ -1,6 +1,6 @@
 from typing import Dict, List
 
-import fitz
+import pymupdf
 import pymupdf4llm
 
 
@@ -10,7 +10,7 @@ def extract_pages(pdf_path: str) -> List[Dict]:
     OCR is intentionally disabled: scanned pages remain explicit ingestion errors
     instead of silently producing low-quality mathematical or symbolic text.
     """
-    with fitz.open(str(pdf_path)) as document:
+    with pymupdf.open(str(pdf_path)) as document:
         if document.needs_pass:
             raise ValueError("password-protected PDFs are not supported")
         extracted = pymupdf4llm.to_markdown(

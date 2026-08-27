@@ -1,6 +1,6 @@
 import pytest
 
-from chunking import chunk_document, normalize_for_embedding
+from chunking import chunk_document, normalize_for_embedding, trailing_overlap
 
 
 def test_chunks_never_exceed_max_size_for_long_unbroken_text():
@@ -43,6 +43,14 @@ def test_markdown_normalization_keeps_mathematical_symbols():
     normalized = normalize_for_embedding(markdown)
 
     assert normalized == "Result Derivative: $∂f/∂x ≥ 0$ and proof."
+
+
+def test_overlap_does_not_begin_midword():
+    text = "A complete sentence. Independent travel and study continued across Europe."
+
+    overlap = trailing_overlap(text, 25)
+
+    assert overlap == "continued across Europe."
 
 
 @pytest.mark.parametrize("max_size,overlap", [(0, 0), (100, -1), (100, 100)])

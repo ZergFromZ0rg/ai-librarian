@@ -21,6 +21,21 @@ def normalize_for_embedding(markdown: str) -> str:
     return text.strip()
 
 
+def trailing_overlap(text: str, max_chars: int) -> str:
+    """Return a bounded overlap beginning at a readable boundary."""
+    if max_chars <= 0 or not text:
+        return ""
+    window = text[-max_chars:]
+    minimum_tail = min(30, max_chars // 3)
+    sentence_boundary = re.search(r"(?<=[.!?])\s+|\n+", window)
+    if sentence_boundary and len(window) - sentence_boundary.end() >= minimum_tail:
+        return window[sentence_boundary.end() :].lstrip()
+    word_boundary = re.search(r"\s+", window)
+    if word_boundary:
+        return window[word_boundary.end() :].lstrip()
+    return window
+
+
 def split_into_sentences(text: str) -> List[str]:
     return [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
 
@@ -91,7 +106,7 @@ def build_chunks(
 
             available_overlap = max(0, max_size - len(unit) - 2)
             overlap_length = min(overlap, available_overlap)
-            overlap_text = chunk_text[-overlap_length:].lstrip() if overlap_length else ""
+            overlap_text = trailing_overlap(chunk_text, overlap_length)
             current = [(current[-1][0], overlap_text)] if overlap_text else []
             current_length = len(overlap_text)
 
