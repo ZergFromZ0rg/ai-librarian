@@ -59,12 +59,17 @@ def service(tmp_path, monkeypatch):
                 "vector": chunk["embedding"],
                 "payload": {
                     "chunk_id": chunk["chunk_id"],
+                    "group_id": chunk.get("group_id"),
                     "document_id": chunk["document_id"],
                     "filename": chunk["filename"],
                     "page": chunk["page"],
+                    "page_end": chunk.get("page_end", chunk["page"]),
                     "chunk_index": chunk["chunk_index"],
                     "text": chunk["text"],
+                    "retrieval_text": chunk.get("retrieval_text", chunk["text"]),
                     "embedding_text": chunk.get("embedding_text", chunk["text"]),
+                    "block_types": chunk.get("block_types", []),
+                    "protected_type": chunk.get("protected_type"),
                 },
             }
 
@@ -171,8 +176,45 @@ def test_stored_pdf_can_be_rebuilt_for_new_pipeline_version(service):
 
     rebuilt = module.rebuild_document_artifacts(stale)
     chunks = client.get(f"/documents/{doc_id}/chunks").json()
+    extracted = module.read_json(module.EXTRACTED_DIR / f"{doc_id}.json")
 
     assert rebuilt["pipeline_version"] == module.PIPELINE_VERSION
     assert rebuilt["index_schema_version"] == 0
+    assert extracted["format"] == "typed-markdown"
+    assert extracted["blocks"][0]["type"] == "paragraph"
     assert chunks[0]["format"] == "markdown"
     assert chunks[0]["embedding_text"]
+    assert chunks[0]["group_id"]
+
+
+def test_child_hits_are_coalesced_to_the_complete_parent_group(service):
+    module, _client, _indexed = service
+    hits = [
+        {
+            "id": "child-one",
+            "score": 0.9,
+            "payload": {
+                "chunk_id": "child-one",
+                "group_id": "parent",
+                "document_id": "doc",
+                "text": "Introduction\n\n$$x = 1$$\n\nExplanation",
+                "embedding_text": "x = 1",
+            },
+        },
+        {
+            "id": "child-two",
+            "score": 0.8,
+            "payload": {
+                "chunk_id": "child-two",
+                "group_id": "parent",
+                "document_id": "doc",
+                "text": "Introduction\n\n$$x = 1$$\n\nExplanation",
+                "embedding_text": "Explanation",
+            },
+        },
+    ]
+
+    grouped = module.coalesce_group_hits(hits)
+
+    assert len(grouped) == 1
+    assert grouped[0]["payload"]["text"].startswith("Introduction")

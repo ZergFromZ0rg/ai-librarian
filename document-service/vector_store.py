@@ -25,7 +25,7 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 COLLECTION = os.environ.get("QDRANT_COLLECTION", "vault")
 DENSE_VECTOR = "semantic"
 SPARSE_VECTOR = "lexical"
-INDEX_SCHEMA_VERSION = 2
+INDEX_SCHEMA_VERSION = 3
 
 logger = logging.getLogger("ai_librarian.vector_store")
 
@@ -91,12 +91,20 @@ def upsert_chunks(chunks: List[dict], batch_size: int = 64):
                 },
                 payload={
                     "chunk_id": c.get("chunk_id"),
+                    "group_id": c.get("group_id"),
                     "text": c.get("text", ""),
+                    "retrieval_text": c.get("retrieval_text", search_text),
                     "embedding_text": search_text,
                     "document_id": c.get("document_id"),
                     "filename": c.get("filename"),
                     "page": c.get("page"),
+                    "page_end": c.get("page_end", c.get("page")),
                     "chunk_index": c.get("chunk_index"),
+                    "group_index": c.get("group_index"),
+                    "retrieval_index": c.get("retrieval_index"),
+                    "retrieval_kind": c.get("retrieval_kind"),
+                    "block_types": c.get("block_types", []),
+                    "protected_type": c.get("protected_type"),
                 },
             )
         )

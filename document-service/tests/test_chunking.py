@@ -1,40 +1,203 @@
 import pytest
 
-from chunking import chunk_document, normalize_for_embedding, trailing_overlap
+from chunking import (
+    BLOCK_TYPES,
+    chunk_document,
+    count_tokens,
+    normalize_for_embedding,
+    parse_typed_blocks,
+)
 
 
-def test_chunks_never_exceed_max_size_for_long_unbroken_text():
-    pages = [{"page": 1, "text": "x" * 2_500}]
-
-    chunks = chunk_document(pages, max_size=800, overlap=100)
-
-    assert len(chunks) == 4
-    assert all(len(text) <= 800 for _, text in chunks)
-
-
-def test_chunks_preserve_page_provenance_and_overlap():
+def test_parser_emits_all_supported_block_types():
     pages = [
-        {"page": 1, "text": "First paragraph."},
-        {"page": 2, "text": "Second paragraph is long enough to force another chunk."},
+        {
+            "page": 1,
+            "text": """# Method
+
+The following equation defines the model:
+
+$$
+Ax = b
+$$
+
+Table 1: Evaluation results
+
+| Model | Score |
+| --- | --- |
+| Base | 0.8 |
+""",
+        }
     ]
 
-    chunks = chunk_document(pages, max_size=50, overlap=10)
+    blocks = parse_typed_blocks(pages)
 
-    assert chunks[0][0] == 1
-    assert chunks[-1][0] == 2
-    assert all(len(text) <= 50 for _, text in chunks)
+    assert {block.type for block in blocks} == BLOCK_TYPES
+    assert [block.type for block in blocks] == [
+        "heading",
+        "paragraph",
+        "equation",
+        "caption",
+        "table",
+    ]
 
 
-def test_chunks_do_not_cross_page_boundaries():
+def test_equation_is_bound_to_intro_and_cross_page_explanation():
+    pages = [
+        {
+            "page": 1,
+            "text": "In this problem, the following equation applies:\n\n$$\nAx = b\n$$",
+        },
+        {"page": 2, "text": "This equation can be solved by elimination."},
+    ]
+
+    groups = chunk_document(pages)
+
+    assert len(groups) == 1
+    assert groups[0]["protected_type"] == "equation"
+    assert groups[0]["block_types"] == ["paragraph", "equation", "paragraph"]
+    assert groups[0]["page"] == 1
+    assert groups[0]["page_end"] == 2
+    assert "Ax = b" in groups[0]["text"]
+    assert "solved by elimination" in groups[0]["text"]
+
+
+def test_table_is_bound_to_introduction_caption_and_explanation():
+    pages = [
+        {
+            "page": 3,
+            "text": """The comparison is shown below:
+
+Table 2: Accuracy by model
+
+| Model | Accuracy |
+| --- | --- |
+| Base | 91% |
+
+The proposed model performs best.
+""",
+        }
+    ]
+
+    groups = chunk_document(pages)
+
+    assert len(groups) == 1
+    assert groups[0]["protected_type"] == "table"
+    assert groups[0]["block_types"] == ["paragraph", "caption", "table", "paragraph"]
+    assert "| Model | Accuracy |" in groups[0]["text"]
+
+
+def test_normal_groups_do_not_cross_completed_page_boundaries():
     pages = [
         {"page": 1, "text": "First page paragraph."},
         {"page": 2, "text": "Second page paragraph."},
     ]
 
-    assert chunk_document(pages, max_size=800, overlap=100) == [
-        (1, "First page paragraph."),
-        (2, "Second page paragraph."),
+    groups = chunk_document(pages)
+
+    assert [(group["page"], group["page_end"]) for group in groups] == [(1, 1), (2, 2)]
+
+
+def test_unfinished_paragraph_can_continue_across_pages():
+    pages = [
+        {"page": 1, "text": "The derivation continues with"},
+        {"page": 2, "text": "the substitution used in the next step."},
     ]
+
+    groups = chunk_document(pages)
+
+    assert len(groups) == 1
+    assert groups[0]["page"] == 1
+    assert groups[0]["page_end"] == 2
+    assert "continues with\n\nthe substitution" in groups[0]["text"]
+
+
+def test_retrieval_children_respect_token_budget_for_long_unbroken_text():
+    pages = [{"page": 1, "text": "x" * 2_500}]
+
+    groups = chunk_document(
+        pages,
+        target_tokens=40,
+        soft_max_tokens=50,
+        hard_max_tokens=60,
+        overlap_tokens=10,
+    )
+
+    assert len(groups) == 1
+    assert len(groups[0]["retrieval_units"]) > 1
+    assert all(unit["token_count"] <= 60 for unit in groups[0]["retrieval_units"])
+
+
+def test_oversized_equation_group_repeats_anchor_in_context_bridges():
+    prefix = " ".join(f"intro{i}" for i in range(35))
+    suffix = " ".join(f"explain{i}" for i in range(35))
+    pages = [
+        {
+            "page": 1,
+            "text": f"{prefix}\n\n$$\nAx = b\n$$\n\n{suffix}",
+        }
+    ]
+
+    group = chunk_document(
+        pages,
+        target_tokens=20,
+        soft_max_tokens=24,
+        hard_max_tokens=28,
+        overlap_tokens=4,
+    )[0]
+    bridges = [unit for unit in group["retrieval_units"] if unit["kind"] == "bridge"]
+
+    assert len(bridges) > 2
+    assert all("Ax = b" in unit["text"] for unit in bridges)
+    assert all(unit["token_count"] <= 28 for unit in bridges)
+
+
+def test_large_table_repeats_header_in_each_table_child():
+    rows = "\n".join(f"| Model {index} | {index}% |" for index in range(20))
+    pages = [
+        {
+            "page": 1,
+            "text": (
+                "Table 1: Results\n\n"
+                "| Model | Accuracy |\n| --- | --- |\n"
+                f"{rows}"
+            ),
+        }
+    ]
+
+    group = chunk_document(
+        pages,
+        target_tokens=30,
+        soft_max_tokens=35,
+        hard_max_tokens=40,
+        overlap_tokens=4,
+    )[0]
+    table_children = [
+        unit["text"]
+        for unit in group["retrieval_units"]
+        if unit["kind"] in {"block", "bridge"} and "| Model" in unit["text"]
+    ]
+
+    assert len(table_children) > 1
+    assert all("| Model | Accuracy |" in text for text in table_children)
+
+
+def test_each_constituent_block_is_searchable_but_parent_text_is_preserved():
+    pages = [
+        {
+            "page": 1,
+            "text": "A paragraph about alpha.\n\nA separate paragraph about beta.",
+        }
+    ]
+
+    group = chunk_document(pages)[0]
+    child_texts = [unit["text"] for unit in group["retrieval_units"]]
+
+    assert group["text"] == (
+        "A paragraph about alpha.\n\nA separate paragraph about beta."
+    )
+    assert "A paragraph about alpha." in child_texts
+    assert "A separate paragraph about beta." in child_texts
 
 
 def test_markdown_normalization_keeps_mathematical_symbols():
@@ -45,15 +208,21 @@ def test_markdown_normalization_keeps_mathematical_symbols():
     assert normalized == "Result Derivative: $∂f/∂x ≥ 0$ and proof."
 
 
-def test_overlap_does_not_begin_midword():
-    text = "A complete sentence. Independent travel and study continued across Europe."
-
-    overlap = trailing_overlap(text, 25)
-
-    assert overlap == "continued across Europe."
+def test_token_estimator_splits_long_damaged_words():
+    assert count_tokens("ordinary words") == 2
+    assert count_tokens("x" * 80) == 10
 
 
-@pytest.mark.parametrize("max_size,overlap", [(0, 0), (100, -1), (100, 100)])
-def test_invalid_chunk_configuration_is_rejected(max_size, overlap):
+@pytest.mark.parametrize(
+    "target,soft,hard,overlap",
+    [(0, 10, 20, 0), (20, 10, 30, 0), (10, 20, 15, 0), (10, 20, 30, 10)],
+)
+def test_invalid_token_budgets_are_rejected(target, soft, hard, overlap):
     with pytest.raises(ValueError):
-        chunk_document([{"page": 1, "text": "text"}], max_size=max_size, overlap=overlap)
+        chunk_document(
+            [{"page": 1, "text": "text"}],
+            target_tokens=target,
+            soft_max_tokens=soft,
+            hard_max_tokens=hard,
+            overlap_tokens=overlap,
+        )

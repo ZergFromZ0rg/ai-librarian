@@ -164,7 +164,7 @@ export default function App() {
       const result = await api("/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: cleanQuery, top_k: 8, rerank: true, rerank_k: 20, max_text_chars: 2500 }),
+        body: JSON.stringify({ query: cleanQuery, top_k: 8, rerank: true, rerank_k: 20, max_text_chars: 20000 }),
       });
       setResults(result.results || []);
       setNotice(`Found ${result.results?.length || 0} relevant passages.`);
@@ -274,7 +274,11 @@ export default function App() {
               <article className="search-result" key={`${result.document_id}-${result.chunk_id}`}>
                 <div className="search-result-meta">
                   <strong>{result.document}</strong>
-                  <span>page {result.page}</span>
+                  <span>
+                    {result.page_end && result.page_end !== result.page
+                      ? `pages ${result.page}–${result.page_end}`
+                      : `page ${result.page}`}
+                  </span>
                   <span>score {(result.rerank_score ?? result.score)?.toFixed(3)}</span>
                 </div>
                 <div className="search-result-text">

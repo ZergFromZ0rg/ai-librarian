@@ -1,9 +1,88 @@
 import re
-from typing import List, Tuple
+from dataclasses import dataclass, replace
+from typing import Dict, Iterable, List, Sequence
 
 
-def split_into_paragraphs(text: str) -> List[str]:
-    return [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+BLOCK_TYPES = {"paragraph", "heading", "equation", "table", "caption"}
+TOKEN_PATTERN = re.compile(r"\w+|[^\w\s]", re.UNICODE)
+HEADING_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+\S")
+CAPTION_PATTERN = re.compile(
+    r"^\s*(?:\*{0,2})?(?:table|figure|fig\.?|equation|eq\.?)\s+"
+    r"(?:[A-Z]?\d+(?:[.:-]\d+)*|[IVXLCDM]+)\b",
+    re.IGNORECASE,
+)
+TABLE_SEPARATOR_PATTERN = re.compile(
+    r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$"
+)
+EQUATION_OPENERS = ("$$", "\\[", "\\begin{equation", "\\begin{align", "\\begin{gather")
+EQUATION_CLOSERS = {
+    "$$": "$$",
+    "\\[": "\\]",
+    "\\begin{equation": "\\end{equation",
+    "\\begin{align": "\\end{align",
+    "\\begin{gather": "\\end{gather",
+}
+MATH_SYMBOL_PATTERN = re.compile(r"[=<>≤≥≠≈∑∏∫√∞±∓×÷∂∇^_{}\\]")
+TERMINAL_PATTERN = re.compile(r"[.!?][\]\)\"'”’*]*\s*$")
+
+
+@dataclass(frozen=True)
+class Block:
+    block_id: str
+    type: str
+    text: str
+    page_start: int
+    page_end: int
+
+    def as_dict(self) -> Dict:
+        return {
+            "block_id": self.block_id,
+            "type": self.type,
+            "text": self.text,
+            "page": self.page_start,
+            "page_end": self.page_end,
+        }
+
+
+@dataclass(frozen=True)
+class Unit:
+    blocks: Sequence[Block]
+    protected_type: str | None = None
+
+    @property
+    def text(self) -> str:
+        return join_blocks(self.blocks)
+
+    @property
+    def page_start(self) -> int:
+        return min(block.page_start for block in self.blocks)
+
+    @property
+    def page_end(self) -> int:
+        return max(block.page_end for block in self.blocks)
+
+
+def _token_spans(text: str) -> List[tuple[int, int]]:
+    """Return conservative, dependency-free token-like character spans.
+
+    The embedding model performs the final WordPiece tokenization. Splitting
+    unusually long strings here keeps this estimator from treating a whole
+    URL, identifier, or damaged PDF word as one token.
+    """
+    spans: List[tuple[int, int]] = []
+    for match in TOKEN_PATTERN.finditer(text):
+        start, end = match.span()
+        if match.group(0).isalnum() and end - start > 12:
+            for part_start in range(start, end, 8):
+                spans.append((part_start, min(part_start + 8, end)))
+        else:
+            spans.append((start, end))
+    return spans
+
+
+def count_tokens(text: str) -> int:
+    """Estimate model tokens without loading the embedding model at upload time."""
+    return len(_token_spans(text))
 
 
 def normalize_for_embedding(markdown: str) -> str:
@@ -21,114 +100,485 @@ def normalize_for_embedding(markdown: str) -> str:
     return text.strip()
 
 
-def trailing_overlap(text: str, max_chars: int) -> str:
-    """Return a bounded overlap beginning at a readable boundary."""
-    if max_chars <= 0 or not text:
-        return ""
-    window = text[-max_chars:]
-    minimum_tail = min(30, max_chars // 3)
-    sentence_boundary = re.search(r"(?<=[.!?])\s+|\n+", window)
-    if sentence_boundary and len(window) - sentence_boundary.end() >= minimum_tail:
-        return window[sentence_boundary.end() :].lstrip()
-    word_boundary = re.search(r"\s+", window)
-    if word_boundary:
-        return window[word_boundary.end() :].lstrip()
-    return window
+def _looks_like_table_row(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.count("|") >= 2 and not stripped.startswith("$$")
 
 
-def split_into_sentences(text: str) -> List[str]:
-    return [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
+def _display_math_opener(line: str) -> str | None:
+    stripped = line.strip()
+    return next((opener for opener in EQUATION_OPENERS if stripped.startswith(opener)), None)
 
 
-def split_oversized_text(text: str, max_size: int) -> List[str]:
-    """Split text into bounded pieces, preferring sentence and word boundaries."""
-    if len(text) <= max_size:
-        return [text]
+def _looks_like_plain_equation(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped or len(stripped) > 2_000:
+        return False
+    if any(marker in stripped for marker in ("$$", "\\[", "\\]", "\\begin{", "\\end{")):
+        return True
+    words = re.findall(r"[A-Za-z]{3,}", stripped)
+    symbols = MATH_SYMBOL_PATTERN.findall(stripped)
+    lines = [line for line in stripped.splitlines() if line.strip()]
+    return bool(symbols) and len(lines) <= 12 and len(symbols) >= max(1, len(words) // 2)
 
-    pieces = []
-    current = ""
-    sentences = split_into_sentences(text)
-    if len(sentences) == 1:
-        sentences = text.split()
 
-    for unit in sentences:
-        separator = " " if current else ""
-        candidate = f"{current}{separator}{unit}"
-        if len(candidate) <= max_size:
-            current = candidate
+def _classify_text_block(text: str) -> str:
+    stripped = text.strip()
+    if HEADING_PATTERN.match(stripped):
+        return "heading"
+    if CAPTION_PATTERN.match(stripped):
+        return "caption"
+    if _looks_like_plain_equation(stripped):
+        return "equation"
+    return "paragraph"
+
+
+def _parse_page(page_number: int, markdown: str) -> List[Block]:
+    lines = markdown.splitlines()
+    raw_blocks: List[tuple[str, str]] = []
+    paragraph: List[str] = []
+    index = 0
+
+    def flush_paragraph() -> None:
+        text = "\n".join(paragraph).strip()
+        paragraph.clear()
+        if text:
+            raw_blocks.append((_classify_text_block(text), text))
+
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+        if not stripped:
+            flush_paragraph()
+            index += 1
             continue
-        if current:
-            pieces.append(current)
-            current = ""
-        while len(unit) > max_size:
-            pieces.append(unit[:max_size])
-            unit = unit[max_size:]
-        current = unit
-    if current:
-        pieces.append(current)
-    return pieces
+
+        opener = _display_math_opener(line)
+        if opener:
+            flush_paragraph()
+            equation_lines = [line]
+            closer = EQUATION_CLOSERS[opener]
+            if stripped != opener and closer in stripped[len(opener) :]:
+                raw_blocks.append(("equation", line.strip()))
+                index += 1
+                continue
+            index += 1
+            while index < len(lines):
+                equation_lines.append(lines[index])
+                if closer in lines[index]:
+                    index += 1
+                    break
+                index += 1
+            raw_blocks.append(("equation", "\n".join(equation_lines).strip()))
+            continue
+
+        if stripped.lower().startswith("<table"):
+            flush_paragraph()
+            table_lines = [line]
+            index += 1
+            while index < len(lines):
+                table_lines.append(lines[index])
+                if "</table>" in lines[index].lower():
+                    index += 1
+                    break
+                index += 1
+            raw_blocks.append(("table", "\n".join(table_lines).strip()))
+            continue
+
+        if _looks_like_table_row(line):
+            table_lines = []
+            cursor = index
+            while cursor < len(lines) and _looks_like_table_row(lines[cursor]):
+                table_lines.append(lines[cursor])
+                cursor += 1
+            is_table = len(table_lines) >= 2 and (
+                any(TABLE_SEPARATOR_PATTERN.match(candidate) for candidate in table_lines)
+                or len(table_lines) >= 3
+            )
+            if is_table:
+                flush_paragraph()
+                raw_blocks.append(("table", "\n".join(table_lines).strip()))
+                index = cursor
+                continue
+
+        if HEADING_PATTERN.match(stripped) or CAPTION_PATTERN.match(stripped):
+            flush_paragraph()
+            raw_blocks.append((_classify_text_block(stripped), stripped))
+            index += 1
+            continue
+
+        paragraph.append(line)
+        index += 1
+
+    flush_paragraph()
+    return [
+        Block(
+            block_id=f"p{page_number}-b{block_index}",
+            type=block_type,
+            text=text,
+            page_start=page_number,
+            page_end=page_number,
+        )
+        for block_index, (block_type, text) in enumerate(raw_blocks)
+    ]
 
 
-def make_units_from_pages(pages: List[dict], max_size: int = 800) -> List[Tuple[int, str]]:
-    units = []
-    for page in pages:
-        page_no = page.get("page")
-        for paragraph in split_into_paragraphs(page.get("text", "")):
-            for piece in split_oversized_text(paragraph, max_size):
-                units.append((page_no, piece))
+def _continues_on_next_page(previous: Block, current: Block) -> bool:
+    if previous.type != "paragraph" or current.type != "paragraph":
+        return False
+    if current.page_start != previous.page_end + 1:
+        return False
+    previous_text = previous.text.rstrip()
+    current_text = current.text.lstrip()
+    if not previous_text or not current_text or TERMINAL_PATTERN.search(previous_text):
+        return False
+    if previous_text.endswith(("-", "—", ",", ";", ":")):
+        return True
+    return current_text[0].islower() or bool(
+        re.match(r"^(?:and|or|but|because|which|where|therefore|thus|so)\b", current_text, re.I)
+    )
+
+
+def _merge_cross_page_paragraphs(blocks: Sequence[Block]) -> List[Block]:
+    merged: List[Block] = []
+    for block in blocks:
+        if merged and _continues_on_next_page(merged[-1], block):
+            previous = merged[-1]
+            if previous.text.rstrip().endswith("-") and block.text.lstrip()[:1].islower():
+                text = previous.text.rstrip()[:-1] + block.text.lstrip()
+            else:
+                text = f"{previous.text.rstrip()}\n\n{block.text.lstrip()}"
+            merged[-1] = replace(previous, text=text, page_end=block.page_end)
+        else:
+            merged.append(block)
+    return merged
+
+
+def parse_typed_blocks(pages: Sequence[Dict]) -> List[Block]:
+    """Parse page Markdown into typed blocks, retaining page provenance."""
+    blocks: List[Block] = []
+    for fallback_page, page in enumerate(pages, start=1):
+        page_number = int(page.get("page") or fallback_page)
+        blocks.extend(_parse_page(page_number, page.get("text", "")))
+    return _merge_cross_page_paragraphs(blocks)
+
+
+def join_blocks(blocks: Iterable[Block]) -> str:
+    return "\n\n".join(block.text.strip() for block in blocks if block.text.strip()).strip()
+
+
+def _is_structural_anchor(block: Block) -> bool:
+    return block.type in {"equation", "table"}
+
+
+def bind_structural_context(blocks: Sequence[Block]) -> List[Unit]:
+    """Bind equations/tables to their adjacent prose and captions.
+
+    Parsing happens across the whole document, so an equation at the bottom of
+    one page can retain explanatory prose from the next page.
+    """
+    if not blocks:
+        return []
+    consumed = set()
+    protected: Dict[int, Unit] = {}
+
+    for anchor_index, anchor in enumerate(blocks):
+        if anchor_index in consumed or not _is_structural_anchor(anchor):
+            continue
+        member_indices = [anchor_index]
+        protected_type = anchor.type
+
+        cursor = anchor_index - 1
+        if cursor >= 0 and cursor not in consumed and blocks[cursor].type == "caption":
+            member_indices.insert(0, cursor)
+            cursor -= 1
+        if cursor >= 0 and cursor not in consumed and blocks[cursor].type == "paragraph":
+            member_indices.insert(0, cursor)
+
+        cursor = anchor_index + 1
+        while cursor < len(blocks) and cursor not in consumed and blocks[cursor].type == anchor.type:
+            member_indices.append(cursor)
+            cursor += 1
+        if cursor < len(blocks) and cursor not in consumed and blocks[cursor].type == "caption":
+            member_indices.append(cursor)
+            cursor += 1
+        if cursor < len(blocks) and cursor not in consumed and blocks[cursor].type == "paragraph":
+            member_indices.append(cursor)
+
+        member_indices = sorted(set(member_indices))
+        unit = Unit(tuple(blocks[index] for index in member_indices), protected_type)
+        protected[min(member_indices)] = unit
+        consumed.update(member_indices)
+
+    units: List[Unit] = []
+    for index in range(len(blocks)):
+        if index in protected:
+            units.append(protected[index])
+        elif index not in consumed:
+            units.append(Unit((blocks[index],)))
     return units
 
 
-def build_chunks(
-    units: List[Tuple[int, str]],
-    max_size: int = 800,
-    overlap: int = 100,
-) -> List[Tuple[int, str]]:
-    if max_size < 1:
-        raise ValueError("max_size must be positive")
-    if overlap < 0 or overlap >= max_size:
-        raise ValueError("overlap must be between zero and max_size - 1")
+def _split_token_windows(text: str, max_tokens: int, overlap_tokens: int) -> List[str]:
+    spans = _token_spans(text)
+    if not spans:
+        return []
+    if len(spans) <= max_tokens:
+        return [text.strip()]
+    windows = []
+    step = max(1, max_tokens - overlap_tokens)
+    for start in range(0, len(spans), step):
+        end = min(start + max_tokens, len(spans))
+        window = text[spans[start][0] : spans[end - 1][1]].strip()
+        if window:
+            windows.append(window)
+        if end == len(spans):
+            break
+    return windows
 
-    chunks = []
-    current: List[Tuple[int, str]] = []
-    current_length = 0
 
-    for page_no, unit in units:
-        if current and page_no != current[-1][0]:
-            chunks.append((current[0][0], "\n\n".join(text for _, text in current)))
-            current = []
-            current_length = 0
+def _split_table_windows(text: str, max_tokens: int, overlap_tokens: int) -> List[str]:
+    """Split a large GFM table while repeating its header in every child."""
+    lines = [line for line in text.splitlines() if line.strip()]
+    if (
+        len(lines) < 3
+        or not _looks_like_table_row(lines[0])
+        or not TABLE_SEPARATOR_PATTERN.match(lines[1])
+    ):
+        return _split_token_windows(text, max_tokens, overlap_tokens)
 
-        separator_length = 2 if current else 0
-        if current and current_length + separator_length + len(unit) > max_size:
-            chunk_text = "\n\n".join(text for _, text in current)
-            chunks.append((current[0][0], chunk_text))
+    header = "\n".join(lines[:2])
+    header_tokens = count_tokens(header)
+    if header_tokens >= max_tokens:
+        return _split_token_windows(text, max_tokens, overlap_tokens)
+    row_budget = max_tokens - header_tokens
+    windows = []
+    current_rows: List[str] = []
+    current_tokens = 0
 
-            available_overlap = max(0, max_size - len(unit) - 2)
-            overlap_length = min(overlap, available_overlap)
-            overlap_text = trailing_overlap(chunk_text, overlap_length)
-            current = [(current[-1][0], overlap_text)] if overlap_text else []
-            current_length = len(overlap_text)
+    def flush_rows() -> None:
+        nonlocal current_rows, current_tokens
+        if current_rows:
+            windows.append(f"{header}\n" + "\n".join(current_rows))
+        current_rows = []
+        current_tokens = 0
 
-        if current:
-            current_length += 2
-        current.append((page_no, unit))
-        current_length += len(unit)
+    for row in lines[2:]:
+        row_tokens = count_tokens(row)
+        if row_tokens > row_budget:
+            flush_rows()
+            for piece in _split_token_windows(row, row_budget, min(overlap_tokens, row_budget - 1)):
+                windows.append(f"{header}\n{piece}")
+            continue
+        if current_rows and current_tokens + row_tokens > row_budget:
+            previous_row = current_rows[-1] if overlap_tokens and len(current_rows) > 1 else None
+            flush_rows()
+            if previous_row and count_tokens(previous_row) + row_tokens <= row_budget:
+                current_rows.append(previous_row)
+                current_tokens = count_tokens(previous_row)
+        current_rows.append(row)
+        current_tokens += row_tokens
+    flush_rows()
+    return _deduplicate_texts(windows)
 
-    if current:
-        chunks.append((current[0][0], "\n\n".join(text for _, text in current)))
 
-    return chunks
+def _split_block_windows(block: Block, max_tokens: int, overlap_tokens: int) -> List[str]:
+    if block.type == "table":
+        return _split_table_windows(block.text, max_tokens, overlap_tokens)
+    return _split_token_windows(block.text, max_tokens, overlap_tokens)
+
+
+def _deduplicate_texts(texts: Iterable[str]) -> List[str]:
+    unique = []
+    seen = set()
+    for text in texts:
+        cleaned = text.strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            unique.append(cleaned)
+    return unique
+
+
+def _protected_bridge_units(
+    blocks: Sequence[Block],
+    anchor_type: str,
+    target_tokens: int,
+    overlap_tokens: int,
+) -> List[str]:
+    anchors = [block for block in blocks if block.type == anchor_type]
+    if not anchors:
+        return []
+    anchor_text = join_blocks(anchors)
+    anchor_tokens = count_tokens(anchor_text)
+    if anchor_tokens >= target_tokens:
+        if anchor_type == "table" and len(anchors) == 1:
+            return _split_table_windows(anchor_text, target_tokens, overlap_tokens)
+        return _split_token_windows(anchor_text, target_tokens, overlap_tokens)
+
+    context_budget = max(1, target_tokens - anchor_tokens - 2)
+    context_overlap = min(overlap_tokens, max(0, context_budget - 1))
+    bridges: List[str] = [anchor_text]
+    first_anchor = next(index for index, block in enumerate(blocks) if block.type == anchor_type)
+    last_anchor = max(index for index, block in enumerate(blocks) if block.type == anchor_type)
+    prefix = join_blocks(blocks[:first_anchor])
+    suffix = join_blocks(blocks[last_anchor + 1 :])
+
+    for context in _split_token_windows(prefix, context_budget, context_overlap):
+        bridges.append(f"{context}\n\n{anchor_text}")
+    for context in _split_token_windows(suffix, context_budget, context_overlap):
+        bridges.append(f"{anchor_text}\n\n{context}")
+    return _deduplicate_texts(bridges)
+
+
+def _build_retrieval_units(
+    blocks: Sequence[Block],
+    protected_type: str | None,
+    target_tokens: int,
+    soft_max_tokens: int,
+    overlap_tokens: int,
+) -> List[Dict]:
+    parent_text = join_blocks(blocks)
+    candidate_texts: List[tuple[str, str]] = []
+    if count_tokens(parent_text) <= soft_max_tokens:
+        candidate_texts.append(("group", parent_text))
+
+    for block in blocks:
+        pieces = _split_block_windows(block, target_tokens, overlap_tokens)
+        candidate_texts.extend(("block", piece) for piece in pieces)
+
+    if protected_type:
+        candidate_texts.extend(
+            ("bridge", text)
+            for text in _protected_bridge_units(
+                blocks, protected_type, target_tokens, overlap_tokens
+            )
+        )
+
+    units = []
+    seen = set()
+    for kind, text in candidate_texts:
+        normalized = text.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        units.append(
+            {
+                "kind": kind,
+                "text": normalized,
+                "token_count": count_tokens(normalized),
+            }
+        )
+    return units
+
+
+def _make_group(
+    blocks: Sequence[Block],
+    protected_type: str | None,
+    target_tokens: int,
+    soft_max_tokens: int,
+    overlap_tokens: int,
+) -> Dict:
+    text = join_blocks(blocks)
+    return {
+        "text": text,
+        "page": min(block.page_start for block in blocks),
+        "page_end": max(block.page_end for block in blocks),
+        "token_count": count_tokens(text),
+        "block_types": [block.type for block in blocks],
+        "blocks": [block.as_dict() for block in blocks],
+        "protected_type": protected_type,
+        "retrieval_units": _build_retrieval_units(
+            blocks,
+            protected_type,
+            target_tokens,
+            soft_max_tokens,
+            overlap_tokens,
+        ),
+    }
+
+
+def build_semantic_groups(
+    blocks: Sequence[Block],
+    target_tokens: int = 180,
+    soft_max_tokens: int = 220,
+    hard_max_tokens: int = 240,
+    overlap_tokens: int = 32,
+) -> List[Dict]:
+    """Pack protected structural units into token-budgeted parent groups."""
+    if target_tokens < 1:
+        raise ValueError("target_tokens must be positive")
+    if soft_max_tokens < target_tokens:
+        raise ValueError("soft_max_tokens must be at least target_tokens")
+    if hard_max_tokens < soft_max_tokens:
+        raise ValueError("hard_max_tokens must be at least soft_max_tokens")
+    if overlap_tokens < 0 or overlap_tokens >= target_tokens:
+        raise ValueError("overlap_tokens must be between zero and target_tokens - 1")
+
+    units = bind_structural_context(blocks)
+    groups: List[Dict] = []
+    pending: List[Block] = []
+    pending_tokens = 0
+    pending_page_end = None
+
+    def flush_pending() -> None:
+        nonlocal pending, pending_tokens, pending_page_end
+        if pending:
+            groups.append(
+                _make_group(
+                    tuple(pending), None, target_tokens, soft_max_tokens, overlap_tokens
+                )
+            )
+        pending = []
+        pending_tokens = 0
+        pending_page_end = None
+
+    for unit in units:
+        if unit.protected_type:
+            flush_pending()
+            groups.append(
+                _make_group(
+                    unit.blocks,
+                    unit.protected_type,
+                    target_tokens,
+                    soft_max_tokens,
+                    overlap_tokens,
+                )
+            )
+            continue
+
+        unit_tokens = count_tokens(unit.text)
+        separator_tokens = 0 if not pending else 1
+        crosses_page = pending_page_end is not None and unit.page_start > pending_page_end
+        if pending and (crosses_page or pending_tokens + separator_tokens + unit_tokens > target_tokens):
+            flush_pending()
+            separator_tokens = 0
+        pending.extend(unit.blocks)
+        pending_tokens += separator_tokens + unit_tokens
+        pending_page_end = unit.page_end
+        if pending_tokens >= soft_max_tokens:
+            flush_pending()
+
+    flush_pending()
+
+    for group in groups:
+        for retrieval_unit in group["retrieval_units"]:
+            if retrieval_unit["token_count"] > hard_max_tokens:
+                raise AssertionError("retrieval unit exceeds the hard token budget")
+    return groups
 
 
 def chunk_document(
-    pages: List[dict],
-    max_size: int = 800,
-    overlap: int = 100,
-) -> List[Tuple[int, str]]:
-    if max_size < 1:
-        raise ValueError("max_size must be positive")
-    if overlap < 0 or overlap >= max_size:
-        raise ValueError("overlap must be between zero and max_size - 1")
-    units = make_units_from_pages(pages, max_size=max_size)
-    return build_chunks(units, max_size=max_size, overlap=overlap)
+    pages: Sequence[Dict],
+    target_tokens: int = 180,
+    soft_max_tokens: int = 220,
+    hard_max_tokens: int = 240,
+    overlap_tokens: int = 32,
+) -> List[Dict]:
+    blocks = parse_typed_blocks(pages)
+    return build_semantic_groups(
+        blocks,
+        target_tokens=target_tokens,
+        soft_max_tokens=soft_max_tokens,
+        hard_max_tokens=hard_max_tokens,
+        overlap_tokens=overlap_tokens,
+    )

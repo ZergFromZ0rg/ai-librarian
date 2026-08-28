@@ -1,6 +1,6 @@
 # AI Librarian
 
-AI Librarian is a self-hosted, local-first knowledge library for PDF documents. It extracts layout-aware Markdown, builds overlapping character-based chunks, and combines semantic and exact-symbol retrieval in Qdrant before reranking passages with page-level source references.
+AI Librarian is a self-hosted, local-first knowledge library for PDF documents. It extracts layout-aware Markdown, parses typed document blocks, builds structure-aware token-budgeted passages, and combines semantic and exact-symbol retrieval in Qdrant before reranking passages with page-level source references.
 
 No hosted AI API or generative model is required. After the container images and search models have been downloaded, document processing and search stay on your server.
 
@@ -13,6 +13,8 @@ No hosted AI API or generative model is required. After the container images and
 - Avoid duplicate documents using a SHA-256 content hash.
 - Search concepts, passages, names, and ideas semantically across the full library.
 - Preserve headings, lists, tables, whitespace, Unicode symbols, and mathematical notation when the PDF text layer contains them.
+- Keep equations and tables attached to their introductions, captions, and explanations, including continuations across page boundaries.
+- Index smaller child blocks for precise matching while returning their complete parent passage for context.
 - Combine dense semantic search with sparse lexical matching for exact terms, formulas, and symbols.
 
 ## Architecture
@@ -23,7 +25,8 @@ Browser
   ▼
 Nginx UI ── /api ──► FastAPI document service
                          ├── PyMuPDF4LLM layout extraction
-                         ├── 800-character chunks, 100-character overlap
+                         ├── Typed paragraph/heading/equation/table/caption blocks
+                         ├── 180-token target, protected groups, 32-token overlap
                          ├── Sentence Transformer embeddings/reranking
                          └── Qdrant dense + sparse hybrid retrieval
 ```
@@ -51,7 +54,7 @@ docker compose up -d --build
 
 The first indexing request takes longer because the document service downloads its embedding model. The reranker is downloaded on the first reranked search. Model files are persisted under `data/models/`.
 
-When upgrading from pipeline version 1, existing stored PDFs are automatically re-extracted and reindexed using the layout-aware hybrid-search schema. The original PDFs remain unchanged. During this one-time migration, document badges move through `queued` and `indexing` again.
+When upgrading from an older pipeline version, existing stored PDFs are automatically re-extracted and reindexed using the current structure-aware hybrid-search schema. The original PDFs remain unchanged. During this one-time migration, document badges move through `queued` and `indexing` again.
 
 Follow startup progress:
 
@@ -99,6 +102,10 @@ Absolute paths and paths outside `/library` are rejected. Folder imports scan PD
 | `MAX_UPLOAD_MB` | `100` | Per-file backend upload limit |
 | `EMBEDDING_BATCH_SIZE` | `32` | Chunks embedded in each indexing batch |
 | `RERANK_TIMEOUT` | `15` | Maximum reranker time in seconds |
+| `CHUNK_TARGET_TOKENS` | `180` | Preferred token budget for a searchable passage |
+| `CHUNK_SOFT_MAX_TOKENS` | `220` | Size allowed for an intact semantic group before child splitting |
+| `CHUNK_HARD_MAX_TOKENS` | `240` | Maximum estimated tokens in an embedding child |
+| `CHUNK_OVERLAP_TOKENS` | `32` | Context repeated between children of an oversized block |
 | `CORS_ORIGINS` | local development origins | Allowed origins for direct API development |
 
 If `MAX_UPLOAD_MB` is raised above 100, also update `client_max_body_size` in `ui/nginx.conf`.
@@ -109,7 +116,7 @@ Persistent state lives under:
 
 ```text
 data/
-  app/       original PDFs, extracted text, chunks, metadata, and job state
+  app/       original PDFs, typed extracted blocks, semantic groups, metadata, and job state
   qdrant/    vector database storage
   models/    embedding and reranker cache
 library/     optional read-only PDF import source
@@ -183,6 +190,6 @@ npm run build
 - PDF is the only accepted document format.
 - Image-only scanned PDFs require OCR before upload; OCR remains disabled to avoid silently corrupting mathematical notation.
 - Layout extraction can preserve mathematical symbols only when the PDF exposes usable text or glyph information. Equations stored solely as images require a dedicated math-aware OCR system.
-- Chunking remains character-based: chunks are capped at 800 characters with 100-character overlap and never cross page boundaries.
+- Token counts use a conservative local estimator so uploads do not have to load the embedding model. The lower 240-token hard budget leaves room for differences in the model's final WordPiece tokenization.
 - The document service intentionally runs as one process because its bounded work queues are in-process. Moving queues to Redis or another durable worker system would be the next step for horizontal scaling.
 - Search returns relevant source passages; it does not generate or summarize answers.

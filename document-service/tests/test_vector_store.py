@@ -11,13 +11,17 @@ def test_vector_upsert_filter_search_and_delete(monkeypatch):
     chunks = [
         {
             "chunk_id": "chunk-one",
+            "group_id": "group-one",
             "document_id": "aaaaaaaaaaaa",
             "filename": "one.pdf",
             "page": 1,
+            "page_end": 2,
             "chunk_index": 0,
             "text": "**Absurd freedom**\n\nThe derivative is ∂f/∂x.",
             "embedding_text": "Absurd freedom The derivative is ∂f/∂x.",
             "embedding": [1.0, 0.0, 0.0],
+            "block_types": ["paragraph", "equation", "paragraph"],
+            "protected_type": "equation",
         },
         {
             "chunk_id": "chunk-two",
@@ -35,6 +39,9 @@ def test_vector_upsert_filter_search_and_delete(monkeypatch):
 
     hits = vector_store.search_vectors([1.0, 0.0, 0.0], top_k=2, query_text="∂f/∂x")
     assert hits[0]["payload"]["chunk_id"] == "chunk-one"
+    assert hits[0]["payload"]["group_id"] == "group-one"
+    assert hits[0]["payload"]["page_end"] == 2
+    assert hits[0]["payload"]["protected_type"] == "equation"
     assert hits[0]["payload"]["text"].startswith("**Absurd freedom**")
     filtered = vector_store.search_vectors(
         [1.0, 0.0, 0.0],

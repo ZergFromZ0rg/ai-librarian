@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from chunking import chunk_document, normalize_for_embedding
+from chunking import build_semantic_groups, normalize_for_embedding, parse_typed_blocks
 from embeddings import DEFAULT_MODEL as EMBEDDING_MODEL
 from embeddings import embed_texts
 from extraction import extract_pages
@@ -49,8 +49,12 @@ INDEX_QUEUE_SIZE = int(os.environ.get("INDEX_QUEUE_SIZE", "100"))
 INGEST_QUEUE_SIZE = int(os.environ.get("INGEST_QUEUE_SIZE", "10"))
 RERANK_MAX_WORKERS = int(os.environ.get("RERANK_MAX_WORKERS", "2"))
 RERANK_TIMEOUT = float(os.environ.get("RERANK_TIMEOUT", "10"))
+CHUNK_TARGET_TOKENS = int(os.environ.get("CHUNK_TARGET_TOKENS", "180"))
+CHUNK_SOFT_MAX_TOKENS = int(os.environ.get("CHUNK_SOFT_MAX_TOKENS", "220"))
+CHUNK_HARD_MAX_TOKENS = int(os.environ.get("CHUNK_HARD_MAX_TOKENS", "240"))
+CHUNK_OVERLAP_TOKENS = int(os.environ.get("CHUNK_OVERLAP_TOKENS", "32"))
 DOC_ID_PATTERN = re.compile(r"^[a-f0-9]{12}$")
-PIPELINE_VERSION = 3
+PIPELINE_VERSION = 5
 
 for directory in (DOCUMENTS_DIR, METADATA_DIR, EXTRACTED_DIR, CHUNKS_DIR, JOBS_DIR, INGEST_ROOT):
     directory.mkdir(parents=True, exist_ok=True)
@@ -63,7 +67,7 @@ class SearchRequest(BaseModel):
     filename: Optional[str] = Field(default=None, max_length=255)
     rerank: bool = False
     rerank_k: int = Field(default=20, ge=1, le=50)
-    max_text_chars: int = Field(default=1_500, ge=100, le=10_000)
+    max_text_chars: int = Field(default=20_000, ge=100, le=50_000)
 
 
 class IngestFolderRequest(BaseModel):
@@ -294,30 +298,60 @@ def hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def build_document_artifacts(stored_path: Path, filename: str, doc_id: str) -> tuple[List[dict], List[dict]]:
+def build_document_artifacts(
+    stored_path: Path, filename: str, doc_id: str
+) -> tuple[List[dict], List[dict], int]:
     pages = extract_pages(stored_path)
     if not any(page.get("text", "").strip() for page in pages):
         raise ValueError("the PDF contains no extractable text; scanned PDFs require OCR")
-    raw_chunks = chunk_document(pages, max_size=800, overlap=100)
-    chunks = [
-        {
-            "chunk_id": uuid.uuid4().hex[:12],
-            "document_id": doc_id,
-            "filename": filename,
-            "page": page_no,
-            "chunk_index": index,
-            "text": text,
-            "embedding_text": normalize_for_embedding(text),
-            "format": "markdown",
-        }
-        for index, (page_no, text) in enumerate(raw_chunks)
-    ]
+    blocks = parse_typed_blocks(pages)
+    groups = build_semantic_groups(
+        blocks,
+        target_tokens=CHUNK_TARGET_TOKENS,
+        soft_max_tokens=CHUNK_SOFT_MAX_TOKENS,
+        hard_max_tokens=CHUNK_HARD_MAX_TOKENS,
+        overlap_tokens=CHUNK_OVERLAP_TOKENS,
+    )
+    chunks = []
+    for group_index, group in enumerate(groups):
+        group_id = uuid.uuid4().hex[:12]
+        for retrieval_index, retrieval_unit in enumerate(group["retrieval_units"]):
+            retrieval_text = retrieval_unit["text"]
+            chunks.append(
+                {
+                    "chunk_id": uuid.uuid4().hex[:12],
+                    "group_id": group_id,
+                    "document_id": doc_id,
+                    "filename": filename,
+                    "page": group["page"],
+                    "page_end": group["page_end"],
+                    "chunk_index": len(chunks),
+                    "group_index": group_index,
+                    "retrieval_index": retrieval_index,
+                    "retrieval_kind": retrieval_unit["kind"],
+                    "text": group["text"],
+                    "retrieval_text": retrieval_text,
+                    "embedding_text": normalize_for_embedding(retrieval_text),
+                    "token_count": retrieval_unit["token_count"],
+                    "group_token_count": group["token_count"],
+                    "block_types": group["block_types"],
+                    "protected_type": group["protected_type"],
+                    "format": "markdown",
+                }
+            )
     if not chunks:
         raise ValueError("the PDF produced no searchable text chunks")
 
-    atomic_write_json(EXTRACTED_DIR / f"{doc_id}.json", pages)
+    atomic_write_json(
+        EXTRACTED_DIR / f"{doc_id}.json",
+        {
+            "format": "typed-markdown",
+            "pages": pages,
+            "blocks": [block.as_dict() for block in blocks],
+        },
+    )
     atomic_write_json(CHUNKS_DIR / f"{doc_id}.json", chunks)
-    return pages, chunks
+    return pages, chunks, len(groups)
 
 
 def rebuild_document_artifacts(metadata: dict) -> dict:
@@ -325,11 +359,14 @@ def rebuild_document_artifacts(metadata: dict) -> dict:
     stored_path = DOCUMENTS_DIR / metadata["stored_filename"]
     if not stored_path.exists():
         raise FileNotFoundError("stored PDF is missing; upload the document again")
-    pages, chunks = build_document_artifacts(stored_path, metadata["filename"], doc_id)
+    pages, chunks, group_count = build_document_artifacts(
+        stored_path, metadata["filename"], doc_id
+    )
     return update_metadata(
         doc_id,
         pages=len(pages),
-        chunks=len(chunks),
+        chunks=group_count,
+        retrieval_units=len(chunks),
         pipeline_version=PIPELINE_VERSION,
         index_schema_version=0,
         indexing_status="queued",
@@ -340,7 +377,7 @@ def rebuild_document_artifacts(metadata: dict) -> dict:
 def create_document(stored_path: Path, filename: str, content_sha256: str) -> dict:
     doc_id = stored_path.stem
     try:
-        pages, chunks = build_document_artifacts(stored_path, filename, doc_id)
+        pages, chunks, group_count = build_document_artifacts(stored_path, filename, doc_id)
 
         now = utc_now()
         metadata = {
@@ -353,7 +390,8 @@ def create_document(stored_path: Path, filename: str, content_sha256: str) -> di
             "uploaded_at": now,
             "updated_at": now,
             "pages": len(pages),
-            "chunks": len(chunks),
+            "chunks": group_count,
+            "retrieval_units": len(chunks),
             "indexing_status": "queued",
             "indexing_error": None,
             "embedding_model": EMBEDDING_MODEL,
@@ -552,7 +590,8 @@ async def run_reranker(query: str, hits: List[dict]) -> List[dict]:
     if not hits or RERANK_EXECUTOR is None:
         return hits
     passages = [
-        hit.get("payload", {}).get("embedding_text") or hit.get("payload", {}).get("text", "")
+        hit.get("payload", {}).get("text")
+        or hit.get("payload", {}).get("embedding_text", "")
         for hit in hits
     ]
     loop = asyncio.get_running_loop()
@@ -570,6 +609,29 @@ async def run_reranker(query: str, hits: List[dict]) -> List[dict]:
     return sorted(hits, key=lambda hit: hit.get("rerank_score", float("-inf")), reverse=True)
 
 
+def coalesce_group_hits(hits: List[dict]) -> List[dict]:
+    """Keep the strongest child hit while returning each parent group once."""
+    grouped = {}
+    order = []
+    for hit in hits:
+        payload = hit.get("payload") or {}
+        key = (
+            payload.get("document_id"),
+            payload.get("group_id") or payload.get("chunk_id") or hit.get("id"),
+        )
+        if key not in grouped:
+            grouped[key] = hit
+            order.append(key)
+            continue
+        hit_score = hit.get("score")
+        grouped_score = grouped[key].get("score")
+        if (hit_score if hit_score is not None else float("-inf")) > (
+            grouped_score if grouped_score is not None else float("-inf")
+        ):
+            grouped[key] = hit
+    return [grouped[key] for key in order]
+
+
 async def retrieve(
     query: str,
     top_k: int,
@@ -579,8 +641,15 @@ async def retrieve(
     rerank_k: int,
 ) -> List[dict]:
     query_vector = await asyncio.to_thread(lambda: embed_texts([query])[0])
-    filters = {key: value for key, value in {"document_id": document_id, "filename": filename}.items() if value}
-    candidate_count = max(top_k, rerank_k) if rerank_enabled else top_k
+    filters = {
+        key: value
+        for key, value in {"document_id": document_id, "filename": filename}.items()
+        if value
+    }
+    desired_groups = max(top_k, rerank_k) if rerank_enabled else top_k
+    # A parent group can have several independently searchable child blocks.
+    # Fetch extra candidates so those siblings do not crowd out other groups.
+    candidate_count = min(400, max(desired_groups * 8, 40))
     hits = await asyncio.to_thread(
         search_vectors,
         query_vector,
@@ -588,12 +657,13 @@ async def retrieve(
         filters or None,
         query,
     )
+    hits = coalesce_group_hits(hits)
     if rerank_enabled:
-        hits = await run_reranker(query, hits)
+        hits = await run_reranker(query, hits[:rerank_k])
     return hits[:top_k]
 
 
-def format_hits(hits: List[dict], max_text_chars: int = 10_000) -> List[dict]:
+def format_hits(hits: List[dict], max_text_chars: int = 20_000) -> List[dict]:
     formatted = []
     for hit in hits:
         payload = hit.get("payload") or {}
@@ -603,9 +673,13 @@ def format_hits(hits: List[dict], max_text_chars: int = 10_000) -> List[dict]:
         formatted.append(
             {
                 "chunk_id": payload.get("chunk_id"),
+                "group_id": payload.get("group_id"),
                 "document_id": payload.get("document_id"),
                 "document": payload.get("filename") or payload.get("document_id"),
                 "page": payload.get("page"),
+                "page_end": payload.get("page_end") or payload.get("page"),
+                "block_types": payload.get("block_types") or [],
+                "protected_type": payload.get("protected_type"),
                 "score": hit.get("score"),
                 "rerank_score": hit.get("rerank_score"),
                 "text": text,
@@ -622,6 +696,12 @@ async def config():
         "embedding_model": EMBEDDING_MODEL,
         "pipeline_version": PIPELINE_VERSION,
         "index_schema_version": INDEX_SCHEMA_VERSION,
+        "chunking": {
+            "target_tokens": CHUNK_TARGET_TOKENS,
+            "soft_max_tokens": CHUNK_SOFT_MAX_TOKENS,
+            "hard_max_tokens": CHUNK_HARD_MAX_TOKENS,
+            "overlap_tokens": CHUNK_OVERLAP_TOKENS,
+        },
     }
 
 
@@ -763,7 +843,7 @@ async def search_get(
     top_k: int = Query(5, ge=1, le=50),
     document_id: Optional[str] = Query(default=None, pattern=r"^[a-f0-9]{12}$"),
     filename: Optional[str] = Query(default=None, max_length=255),
-    max_text_chars: int = Query(1_500, ge=100, le=10_000),
+    max_text_chars: int = Query(20_000, ge=100, le=50_000),
     rerank_enabled: bool = Query(False, alias="rerank"),
     rerank_k: int = Query(20, ge=1, le=50),
 ):
