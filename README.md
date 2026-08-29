@@ -166,8 +166,11 @@ Important endpoints:
 - `DELETE /documents/{id}` — delete stored files and vectors
 - `POST /search` — semantic retrieval
 - `POST /admin/ingest-folder` — import the mounted library folder
+- `GET /admin/search-log` — recent queries with their returned pages and scores
 - `GET /health/live` — process liveness
 - `GET /health/ready` — Qdrant readiness, indexing backlog, and ingest queue depth
+
+Every search appends one JSON line to `data/app/logs/search.jsonl` (rotated, stays on the server): the query, the candidate budget, latency, and each returned hit's page and dense/rerank scores. It is meant for tuning retrieval quality — inspect it with `GET /admin/search-log` or read the file directly. Set `SEARCH_LOG=off` in `.env` to disable.
 
 ## Development and tests
 

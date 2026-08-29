@@ -3,11 +3,13 @@ import concurrent.futures
 import hashlib
 import json
 import logging
+import logging.handlers
 import os
 import queue
 import re
 import shutil
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -73,7 +75,14 @@ METADATA_DIR = DATA_DIR / "metadata"
 EXTRACTED_DIR = DATA_DIR / "extracted"
 CHUNKS_DIR = DATA_DIR / "chunks"
 JOBS_DIR = DATA_DIR / "jobs"
+LOGS_DIR = DATA_DIR / "logs"
 INGEST_ROOT = Path(os.environ.get("INGEST_ROOT", str(DATA_DIR / "inbox"))).resolve()
+
+SEARCH_LOG_ENABLED = os.environ.get("SEARCH_LOG", "on").strip().lower() not in {
+    "off", "0", "false", "no", ""
+}
+SEARCH_LOG_MAX_BYTES = int(os.environ.get("SEARCH_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+SEARCH_LOG_BACKUPS = int(os.environ.get("SEARCH_LOG_BACKUPS", "3"))
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "100")) * 1024 * 1024
 EMBEDDING_BATCH_SIZE = int(os.environ.get("EMBEDDING_BATCH_SIZE", "32"))
@@ -91,8 +100,94 @@ CHUNK_OVERLAP_TOKENS = int(os.environ.get("CHUNK_OVERLAP_TOKENS", "32"))
 DOC_ID_PATTERN = re.compile(r"^[a-f0-9]{12}$")
 PIPELINE_VERSION = 8
 
-for directory in (DOCUMENTS_DIR, METADATA_DIR, EXTRACTED_DIR, CHUNKS_DIR, JOBS_DIR, INGEST_ROOT):
+for directory in (
+    DOCUMENTS_DIR, METADATA_DIR, EXTRACTED_DIR, CHUNKS_DIR, JOBS_DIR, LOGS_DIR, INGEST_ROOT
+):
     directory.mkdir(parents=True, exist_ok=True)
+
+
+search_logger = logging.getLogger("ai_librarian.search")
+
+
+def _configure_search_log() -> None:
+    """One JSON line per query at ``DATA_DIR/logs/search.jsonl`` (rotated).
+
+    Local-only diagnostics for tuning retrieval: the query, the candidate
+    budget, and each returned hit's page and dense/rerank scores — enough to
+    reproduce and explain a result after the fact. Never leaves the server.
+    Disable with ``SEARCH_LOG=off``.
+    """
+    for handler in list(search_logger.handlers):
+        handler.close()
+    search_logger.handlers.clear()
+    search_logger.propagate = False
+    search_logger.setLevel(logging.INFO)
+    if not SEARCH_LOG_ENABLED:
+        search_logger.addHandler(logging.NullHandler())
+        return
+    handler = logging.handlers.RotatingFileHandler(
+        LOGS_DIR / "search.jsonl",
+        maxBytes=SEARCH_LOG_MAX_BYTES,
+        backupCount=SEARCH_LOG_BACKUPS,
+        encoding="utf-8",
+        delay=True,  # do not create the file until the first query
+    )
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    search_logger.addHandler(handler)
+
+
+_configure_search_log()
+
+
+def _rounded(value, places: int = 4):
+    return round(value, places) if isinstance(value, (int, float)) else None
+
+
+def record_search(
+    request: "SearchRequest",
+    hits: List[dict],
+    candidate_count: int,
+    latency_ms: float,
+) -> None:
+    """Append one search-log line. Never raises into the request path."""
+    if not SEARCH_LOG_ENABLED:
+        return
+    try:
+        filters = {
+            key: value
+            for key, value in {
+                "document_id": request.document_id,
+                "filename": request.filename,
+            }.items()
+            if value
+        }
+        entry = {
+            "ts": utc_now(),
+            "query": request.query,
+            "top_k": request.top_k,
+            "rerank": request.rerank,
+            "rerank_k": request.rerank_k if request.rerank else None,
+            "filters": filters or None,
+            "candidate_count": candidate_count,
+            "result_count": len(hits),
+            "latency_ms": round(latency_ms, 1),
+            "hits": [
+                {
+                    "document_id": (hit.get("payload") or {}).get("document_id"),
+                    "filename": (hit.get("payload") or {}).get("filename"),
+                    "page": (hit.get("payload") or {}).get("page"),
+                    "group_id": (hit.get("payload") or {}).get("group_id"),
+                    "retrieval_kind": (hit.get("payload") or {}).get("retrieval_kind"),
+                    "dense_score": _rounded(hit.get("score")),
+                    "rerank_score": _rounded(hit.get("rerank_score")),
+                }
+                for hit in hits
+            ],
+        }
+        search_logger.info(json.dumps(entry, ensure_ascii=False))
+    except Exception:
+        logger.exception("Could not write search-log entry")
+
 
 STORE = MetadataStore(DATA_DIR / "library.db")
 _imported = STORE.import_legacy(METADATA_DIR)
@@ -741,7 +836,7 @@ async def retrieve(
     filename: Optional[str],
     rerank_enabled: bool,
     rerank_k: int,
-) -> List[dict]:
+) -> tuple[List[dict], int]:
     query_vector = await asyncio.to_thread(lambda: embed_texts([query])[0])
     filters = {
         key: value
@@ -762,7 +857,7 @@ async def retrieve(
     hits = coalesce_group_hits(hits)
     if rerank_enabled:
         hits = await run_reranker(query, hits[:rerank_k])
-    return hits[:top_k]
+    return hits[:top_k], candidate_count
 
 
 _TERMINAL_PUNCTUATION = tuple(".!?\"')”’»…")
@@ -1030,8 +1125,9 @@ async def delete_document(doc_id: str):
 
 @app.post("/search")
 async def search(request: SearchRequest):
+    started = time.monotonic()
     try:
-        hits = await retrieve(
+        hits, candidate_count = await retrieve(
             request.query,
             request.top_k,
             request.document_id,
@@ -1042,6 +1138,7 @@ async def search(request: SearchRequest):
     except Exception as exc:
         logger.exception("Search failed")
         raise HTTPException(status_code=503, detail=f"search failed: {exc}") from exc
+    record_search(request, hits, candidate_count, (time.monotonic() - started) * 1000)
     return {"query": request.query, "results": format_hits(hits, request.max_text_chars)}
 
 
@@ -1065,6 +1162,27 @@ async def search_get(
         rerank_k=rerank_k,
     )
     return await search(request)
+
+
+@app.get("/admin/search-log")
+async def admin_search_log(limit: int = Query(50, ge=1, le=500)):
+    """The most recent search-log entries, newest first."""
+    path = LOGS_DIR / "search.jsonl"
+    if not SEARCH_LOG_ENABLED or not path.exists():
+        return {"enabled": SEARCH_LOG_ENABLED, "entries": []}
+
+    def tail() -> List[dict]:
+        lines = path.read_text(encoding="utf-8").splitlines()[-limit:]
+        entries = []
+        for line in lines:
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        entries.reverse()
+        return entries
+
+    return {"enabled": True, "entries": await asyncio.to_thread(tail)}
 
 
 @app.get("/admin/reranker")

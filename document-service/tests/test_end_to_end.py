@@ -1,4 +1,5 @@
 import importlib
+import json
 import logging
 import math
 import sys
@@ -175,6 +176,47 @@ def test_upload_index_search_deduplicate_and_delete(service):
     assert deleted.status_code == 200
     assert client.get(f"/documents/{doc_id}").status_code == 404
     assert not indexed
+
+
+def test_search_is_logged_with_scored_hits(service):
+    module, client, _indexed = service
+    upload = client.post(
+        "/documents",
+        files={"file": ("essay.pdf", make_pdf("Camus writes about absurd life and freedom."), "application/pdf")},
+    )
+    doc_id = upload.json()["document_id"]
+    wait_for_status(client, doc_id, "indexed")
+
+    assert client.post("/search", json={"query": "absurd freedom", "rerank": False}).status_code == 200
+
+    log_path = module.LOGS_DIR / "search.jsonl"
+    lines = log_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["query"] == "absurd freedom"
+    assert entry["rerank"] is False
+    assert entry["candidate_count"] >= entry["result_count"] >= 1
+    assert isinstance(entry["latency_ms"], (int, float))
+    assert entry["hits"][0]["document_id"] == doc_id
+    assert entry["hits"][0]["dense_score"] is not None
+
+    recent = client.get("/admin/search-log").json()
+    assert recent["enabled"] is True
+    assert recent["entries"][0]["query"] == "absurd freedom"
+
+
+def test_search_log_can_be_disabled(service, monkeypatch):
+    module, client, _indexed = service
+    monkeypatch.setattr(module, "SEARCH_LOG_ENABLED", False)
+    upload = client.post(
+        "/documents",
+        files={"file": ("essay.pdf", make_pdf("Camus writes about absurd life and freedom."), "application/pdf")},
+    )
+    wait_for_status(client, upload.json()["document_id"], "indexed")
+    client.post("/search", json={"query": "absurd freedom"})
+
+    assert not (module.LOGS_DIR / "search.jsonl").exists()
+    assert client.get("/admin/search-log").json() == {"enabled": False, "entries": []}
 
 
 def test_stored_pdf_and_rendered_pages_are_served(service):

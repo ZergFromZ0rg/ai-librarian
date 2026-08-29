@@ -32,6 +32,7 @@ services:
     environment:
       PORT: "8000"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SEARCH_LOG: ${SEARCH_LOG:-on}
       DATA_DIR: /app/data
       INGEST_ROOT: /library
       QDRANT_URL: http://qdrant:6333
