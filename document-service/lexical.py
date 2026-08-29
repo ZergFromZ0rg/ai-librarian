@@ -5,7 +5,6 @@ import unicodedata
 from collections import Counter
 from typing import List, Tuple
 
-
 TERM_PATTERN = re.compile(r"\w+(?:[’'-]\w+)*|[^\w\s]", re.UNICODE)
 SPACE_GROUP_PATTERN = re.compile(r"\S+", re.UNICODE)
 

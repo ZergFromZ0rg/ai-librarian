@@ -205,6 +205,77 @@ def test_indexing_error_is_persisted_and_retryable(service, monkeypatch):
     wait_for_status(client, doc_id, "indexed")
 
 
+def test_folder_ingestion_indexes_each_file_and_reports_progress(service, tmp_path):
+    module, client, _indexed = service
+    library = tmp_path / "library"
+    library.mkdir(exist_ok=True)
+    for name in ("one.pdf", "two.pdf"):
+        (library / name).write_bytes(make_pdf(f"Absurd freedom in {name}."))
+
+    response = client.post("/admin/ingest-folder", json={"folder": "."})
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+
+    deadline = time.time() + 5
+    job = None
+    while time.time() < deadline:
+        job = client.get(f"/admin/ingest-status/{job_id}").json()
+        if job["state"] in {"done", "partial", "error"}:
+            break
+        time.sleep(0.05)
+
+    assert job["state"] == "done"
+    assert len(job["files"]) == 2
+    assert {entry["status"] for entry in job["files"]} == {"indexed"}
+
+
+def test_upload_rejects_non_pdf_and_empty_files(service):
+    _module, client, _indexed = service
+    non_pdf = client.post("/documents", files={"file": ("notes.txt", b"hello", "text/plain")})
+    assert non_pdf.status_code == 400
+    empty = client.post("/documents", files={"file": ("empty.pdf", b"", "application/pdf")})
+    assert empty.status_code == 400
+
+
+def test_upload_rejects_a_file_over_the_size_limit(service, monkeypatch):
+    module, client, _indexed = service
+    monkeypatch.setattr(module, "MAX_UPLOAD_BYTES", 16)
+    response = client.post(
+        "/documents",
+        files={"file": ("big.pdf", make_pdf("This PDF is comfortably over sixteen bytes."), "application/pdf")},
+    )
+    assert response.status_code == 413
+
+
+def test_retry_conflicts_while_indexing_is_already_underway(service):
+    module, client, _indexed = service
+    upload = client.post(
+        "/documents",
+        files={"file": ("ok.pdf", make_pdf("Absurd freedom essay."), "application/pdf")},
+    )
+    doc_id = upload.json()["document_id"]
+    wait_for_status(client, doc_id, "indexed")
+
+    module.update_metadata(doc_id, indexing_status="indexing")
+    assert client.post(f"/documents/{doc_id}/retry").status_code == 409
+
+
+def test_unknown_and_malformed_document_ids_return_404(service):
+    _module, client, _indexed = service
+    missing = "abcdef012345"
+    assert client.get(f"/documents/{missing}").status_code == 404
+    assert client.get(f"/documents/{missing}/chunks").status_code == 404
+    assert client.post(f"/documents/{missing}/retry").status_code == 404
+    assert client.delete(f"/documents/{missing}").status_code == 404
+    assert client.get("/documents/NOTHEXVALUE1").status_code == 404
+
+
+def test_search_rejects_invalid_input(service):
+    _module, client, _indexed = service
+    assert client.post("/search", json={"query": ""}).status_code == 422
+    assert client.get("/search", params={"q": "camus", "document_id": "not-a-real-id"}).status_code == 422
+
+
 def test_folder_ingestion_cannot_escape_configured_root(service, tmp_path):
     module, client, _indexed = service
     outside = tmp_path / "outside"
@@ -224,7 +295,7 @@ def test_stored_pdf_can_be_rebuilt_for_new_pipeline_version(service):
     )
     assert upload.status_code == 201
     doc_id = upload.json()["document_id"]
-    metadata = wait_for_status(client, doc_id, "indexed")
+    wait_for_status(client, doc_id, "indexed")
     stale = module.update_metadata(doc_id, pipeline_version=1, index_schema_version=1)
 
     rebuilt = module.rebuild_document_artifacts(stale)
@@ -238,6 +309,31 @@ def test_stored_pdf_can_be_rebuilt_for_new_pipeline_version(service):
     assert chunks[0]["format"] == "markdown"
     assert chunks[0]["embedding_text"]
     assert chunks[0]["group_id"]
+
+
+def test_restart_requeues_the_whole_library_without_failing_documents(service):
+    module, client, _indexed = service
+    doc_ids = []
+    for number in range(8):
+        upload = client.post(
+            "/documents",
+            files={"file": (f"book{number}.pdf", make_pdf(f"Absurd passage {number} about freedom."), "application/pdf")},
+        )
+        assert upload.status_code == 201
+        doc_ids.append(upload.json()["document_id"])
+    for doc_id in doc_ids:
+        wait_for_status(client, doc_id, "indexed")
+
+    # Simulate an index-schema bump followed by a restart: every document is
+    # stale and must be re-embedded. The worker pulls them from the database, so
+    # none may be marked "error" for lack of queue space.
+    for doc_id in doc_ids:
+        module.update_metadata(doc_id, index_schema_version=0, indexing_status="indexed")
+    module.recover_interrupted_work()
+
+    for doc_id in doc_ids:
+        metadata = wait_for_status(client, doc_id, "indexed", timeout=5)
+        assert metadata["indexing_error"] is None
 
 
 def test_child_hits_are_coalesced_to_the_complete_parent_group(service):

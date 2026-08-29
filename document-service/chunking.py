@@ -2,7 +2,6 @@ import re
 from dataclasses import dataclass, replace
 from typing import Dict, Iterable, List, Sequence
 
-
 BLOCK_TYPES = {"paragraph", "heading", "equation", "table", "caption"}
 TOKEN_PATTERN = re.compile(r"\w+|[^\w\s]", re.UNICODE)
 HEADING_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+\S")
@@ -562,10 +561,33 @@ def build_semantic_groups(
 
     _attach_lead_ins(groups)
     for group in groups:
-        for retrieval_unit in group["retrieval_units"]:
-            if retrieval_unit["token_count"] > hard_max_tokens:
-                raise AssertionError("retrieval unit exceeds the hard token budget")
+        _enforce_hard_budget(group, hard_max_tokens, overlap_tokens)
     return groups
+
+
+def _enforce_hard_budget(group: Dict, hard_max_tokens: int, overlap_tokens: int) -> None:
+    """Guarantee every retrieval unit fits the hard token budget.
+
+    ``count_tokens`` is a dependency-free *estimate* of the embedding model's
+    tokenisation. A block that the estimator scores just over budget (an
+    undelimited table, a formula shredded by a broken font) must never be a
+    reason to reject the whole document: split any such unit further instead.
+    """
+    fitted: List[Dict] = []
+    seen = {unit["text"] for unit in group["retrieval_units"]}
+    for unit in group["retrieval_units"]:
+        if unit["token_count"] <= hard_max_tokens:
+            fitted.append(unit)
+            continue
+        window_overlap = min(overlap_tokens, max(0, hard_max_tokens - 1))
+        for piece in _split_token_windows(unit["text"], hard_max_tokens, window_overlap):
+            if not piece or piece in seen:
+                continue
+            seen.add(piece)
+            fitted.append(
+                {"kind": unit["kind"], "text": piece, "token_count": count_tokens(piece)}
+            )
+    group["retrieval_units"] = fitted
 
 
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+(?=[A-Z(“\"'¿¡])")

@@ -167,7 +167,7 @@ Important endpoints:
 - `POST /search` — semantic retrieval
 - `POST /admin/ingest-folder` — import the mounted library folder
 - `GET /health/live` — process liveness
-- `GET /health/ready` — Qdrant readiness and worker queue status
+- `GET /health/ready` — Qdrant readiness, indexing backlog, and ingest queue depth
 
 ## Development and tests
 
@@ -177,18 +177,22 @@ Backend:
 cd document-service
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/ruff check .
 .venv/bin/python -m pytest -q
 ```
 
-The end-to-end test uses a generated PDF and deterministic in-memory embeddings. It covers upload, background indexing, Qdrant-compatible search, deduplication, deletion, failure persistence/retry, and folder containment without downloading AI models.
+The end-to-end test uses a generated PDF and deterministic in-memory embeddings. It covers upload, background indexing, Qdrant-compatible search, deduplication, deletion, failure persistence/retry, restart re-queueing, and folder containment without downloading AI models. `ruff check` lints for likely bugs and import hygiene (config in `pyproject.toml`); both run in CI.
 
 Frontend:
 
 ```bash
 cd ui
 npm ci
+npm test
 npm run build
 ```
+
+`npm test` runs the Vitest unit tests (currently the search-result match highlighter).
 
 ## Current limitations
 
@@ -196,5 +200,5 @@ npm run build
 - Image-only scanned PDFs require OCR before upload; OCR remains disabled to avoid silently corrupting mathematical notation.
 - Layout extraction can preserve mathematical symbols only when the PDF exposes usable text or glyph information. Equations stored solely as images require a dedicated math-aware OCR system.
 - Token counts use a conservative local estimator so uploads do not have to load the embedding model. The lower 240-token hard budget leaves room for differences in the model's final WordPiece tokenization.
-- The document service intentionally runs as one process because its bounded work queues are in-process. Moving queues to Redis or another durable worker system would be the next step for horizontal scaling.
+- The document service intentionally runs as one process. The indexing backlog is durable (the worker pulls `queued` documents straight from SQLite, so a restart or a full-library re-index never loses or fails work), but the folder-import queue is still in-process. Moving to Redis or another external worker system would be the next step for horizontal scaling.
 - Search returns relevant source passages; it does not generate or summarize answers.

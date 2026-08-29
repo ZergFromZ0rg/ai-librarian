@@ -79,6 +79,23 @@ def test_delete_removes_the_record(store):
     store.delete("abc123abc123")  # idempotent
 
 
+def test_claim_for_indexing_takes_the_oldest_queued_document(store):
+    store.create(make_record("aaaaaaaaaaaa", updated_at="2026-01-01T00:00:00Z"))
+    store.create(make_record("bbbbbbbbbbbb", updated_at="2026-01-02T00:00:00Z"))
+    store.create(make_record("cccccccccccc", indexing_status="indexed"))
+
+    first = store.claim_for_indexing("2026-03-01T00:00:00Z")
+    assert first["document_id"] == "aaaaaaaaaaaa"
+    assert first["indexing_status"] == "indexing"
+
+    second = store.claim_for_indexing("2026-03-01T00:00:01Z")
+    assert second["document_id"] == "bbbbbbbbbbbb"
+
+    # Nothing left queued; the two claimed rows are now 'indexing'.
+    assert store.claim_for_indexing("2026-03-01T00:00:02Z") is None
+    assert store.count_indexing_backlog() == 2
+
+
 def test_import_legacy_loads_json_once(tmp_path):
     metadata_dir = tmp_path / "metadata"
     metadata_dir.mkdir()

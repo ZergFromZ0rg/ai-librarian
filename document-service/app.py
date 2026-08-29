@@ -23,8 +23,7 @@ from pydantic import BaseModel, Field
 
 from chunking import build_semantic_groups, normalize_for_embedding, parse_typed_blocks
 from database import MetadataStore
-from embeddings import DEFAULT_MODEL as EMBEDDING_MODEL
-from embeddings import embed_texts
+from embeddings import DEFAULT_MODEL as EMBEDDING_MODEL, embed_texts
 from extraction import assess_text_layer, extract_pages
 from reranker import model_info, rerank
 from vector_store import (
@@ -47,8 +46,11 @@ INGEST_ROOT = Path(os.environ.get("INGEST_ROOT", str(DATA_DIR / "inbox"))).resol
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "100")) * 1024 * 1024
 EMBEDDING_BATCH_SIZE = int(os.environ.get("EMBEDDING_BATCH_SIZE", "32"))
-INDEX_QUEUE_SIZE = int(os.environ.get("INDEX_QUEUE_SIZE", "100"))
 INGEST_QUEUE_SIZE = int(os.environ.get("INGEST_QUEUE_SIZE", "10"))
+# The index worker pulls ``queued`` documents from the database rather than
+# draining an in-memory backlog. This is only a fallback re-check interval in
+# case a wake-up signal is ever missed.
+INDEX_POLL_SECONDS = float(os.environ.get("INDEX_POLL_SECONDS", "30"))
 RERANK_MAX_WORKERS = int(os.environ.get("RERANK_MAX_WORKERS", "2"))
 RERANK_TIMEOUT = float(os.environ.get("RERANK_TIMEOUT", "10"))
 CHUNK_TARGET_TOKENS = int(os.environ.get("CHUNK_TARGET_TOKENS", "180"))
@@ -84,19 +86,32 @@ class IngestFolderRequest(BaseModel):
 @dataclass(frozen=True)
 class IndexTask:
     document_id: str
-    chunks_path: str
     ingest_job_id: Optional[str] = None
     ingest_file_index: Optional[int] = None
 
 
-INDEX_QUEUE = queue.Queue(maxsize=INDEX_QUEUE_SIZE)
+# A coalescing wake-up channel for the index worker: a single slot is enough
+# because the worker always drains every ``queued`` document once woken.
+INDEX_SIGNAL = queue.Queue(maxsize=1)
 INGEST_QUEUE = queue.Queue(maxsize=INGEST_QUEUE_SIZE)
+SHUTDOWN = threading.Event()
+# document_id -> (ingest_job_id, ingest_file_index) for documents that came in
+# through a folder-ingest job, so the worker can report progress back to it.
+INGEST_LINKS = {}
+INGEST_LINKS_LOCK = threading.Lock()
 JOB_STATUS = {}
 JOB_STATUS_LOCK = threading.RLock()
 DOCUMENT_LOCKS = {}
 DOCUMENT_LOCKS_LOCK = threading.Lock()
 WORKER_THREADS = []
 RERANK_EXECUTOR = None
+
+
+def signal_index_worker() -> None:
+    try:
+        INDEX_SIGNAL.put_nowait(True)
+    except queue.Full:
+        pass
 
 
 def utc_now() -> str:
@@ -202,79 +217,112 @@ def refresh_ingest_job(job_id: str) -> None:
         save_job(job)
 
 
-def update_ingest_entry(task: IndexTask, status: str, error: Optional[str] = None) -> None:
-    if task.ingest_job_id is None or task.ingest_file_index is None:
+_TERMINAL_INGEST_STATUSES = {"indexed", "duplicate", "error"}
+
+
+def update_ingest_entry(document_id: str, status: str, error: Optional[str] = None) -> None:
+    with INGEST_LINKS_LOCK:
+        link = INGEST_LINKS.get(document_id)
+        if link and status in _TERMINAL_INGEST_STATUSES:
+            INGEST_LINKS.pop(document_id, None)
+    if not link:
         return
+    job_id, file_index = link
     with JOB_STATUS_LOCK:
-        job = JOB_STATUS.get(task.ingest_job_id)
-        if not job or task.ingest_file_index >= len(job["files"]):
+        job = JOB_STATUS.get(job_id)
+        if not job or file_index >= len(job["files"]):
             return
-        entry = job["files"][task.ingest_file_index]
+        entry = job["files"][file_index]
         entry["status"] = status
         if error:
             entry["error"] = error
         else:
             entry.pop("error", None)
         save_job(job)
-    refresh_ingest_job(task.ingest_job_id)
+    refresh_ingest_job(job_id)
 
 
-def enqueue_index(task: IndexTask, update_status: bool = True) -> None:
-    if update_status:
-        update_metadata(task.document_id, indexing_status="queued", indexing_error=None)
-    try:
-        INDEX_QUEUE.put(task, timeout=2)
-    except queue.Full as exc:
-        message = "indexing queue is full; retry this document later"
-        update_metadata(task.document_id, indexing_status="error", indexing_error=message)
-        update_ingest_entry(task, "error", message)
-        raise RuntimeError(message) from exc
+def enqueue_index(task: IndexTask) -> None:
+    """Mark a document ``queued`` and wake the worker.
+
+    The worker owns the backlog (it pulls ``queued`` rows from the database), so
+    this never blocks and never fails a document for lack of queue space. The
+    folder-ingest progress link is registered before the status flips to
+    ``queued`` so the worker cannot claim the document before it is trackable.
+    """
+    if task.ingest_job_id is not None and task.ingest_file_index is not None:
+        with INGEST_LINKS_LOCK:
+            INGEST_LINKS[task.document_id] = (task.ingest_job_id, task.ingest_file_index)
+    update_metadata(task.document_id, indexing_status="queued", indexing_error=None)
+    signal_index_worker()
+
+
+def _index_one_document(metadata: dict) -> None:
+    """Embed and upsert one already-claimed (``indexing``) document."""
+    doc_id = metadata["document_id"]
+    with get_document_lock(doc_id):
+        try:
+            if metadata.get("pipeline_version") != PIPELINE_VERSION:
+                # Queued before an extraction-pipeline upgrade: rebuild its
+                # blocks and chunks from the stored PDF before embedding.
+                rebuild_document_artifacts(metadata)
+                update_metadata(doc_id, indexing_status="indexing", indexing_error=None)
+            update_ingest_entry(doc_id, "indexing")
+            chunks = read_json(CHUNKS_DIR / f"{doc_id}.json")
+            delete_document_vectors(doc_id)
+            vector_dim = 0
+            for start in range(0, len(chunks), EMBEDDING_BATCH_SIZE):
+                batch = chunks[start : start + EMBEDDING_BATCH_SIZE]
+                vectors = embed_texts([chunk.get("embedding_text") or chunk["text"] for chunk in batch])
+                indexed_batch = [{**chunk, "embedding": vector} for chunk, vector in zip(batch, vectors)]
+                if indexed_batch:
+                    vector_dim = len(indexed_batch[0]["embedding"])
+                    upsert_chunks(indexed_batch)
+            update_metadata(
+                doc_id,
+                indexing_status="indexed",
+                indexing_error=None,
+                indexed_at=utc_now(),
+                embedding_model=EMBEDDING_MODEL,
+                vector_dim=vector_dim,
+                index_schema_version=INDEX_SCHEMA_VERSION,
+            )
+            update_ingest_entry(doc_id, "indexed")
+        except Exception as exc:
+            message = str(exc) or exc.__class__.__name__
+            logger.exception("Indexing failed for document %s", doc_id)
+            try:
+                delete_document_vectors(doc_id)
+            except Exception:
+                logger.exception("Could not clean partial vectors for %s", doc_id)
+            try:
+                update_metadata(doc_id, indexing_status="error", indexing_error=message)
+            except Exception:
+                logger.exception("Could not persist indexing error for %s", doc_id)
+            update_ingest_entry(doc_id, "error", message)
 
 
 def index_worker() -> None:
-    while True:
-        task = INDEX_QUEUE.get()
+    """Drain every ``queued`` document whenever woken.
+
+    Pulling work from the database (rather than a bounded in-memory queue) means
+    a restart that re-queues the entire library cannot overflow anything or
+    mark documents as failed for lack of space.
+    """
+    while not SHUTDOWN.is_set():
         try:
-            if task is None:
-                return
-            with get_document_lock(task.document_id):
-                update_metadata(task.document_id, indexing_status="indexing", indexing_error=None)
-                update_ingest_entry(task, "indexing")
-                chunks = read_json(Path(task.chunks_path))
-                delete_document_vectors(task.document_id)
-                vector_dim = 0
-                for start in range(0, len(chunks), EMBEDDING_BATCH_SIZE):
-                    batch = chunks[start : start + EMBEDDING_BATCH_SIZE]
-                    vectors = embed_texts([chunk.get("embedding_text") or chunk["text"] for chunk in batch])
-                    indexed_batch = [{**chunk, "embedding": vector} for chunk, vector in zip(batch, vectors)]
-                    if indexed_batch:
-                        vector_dim = len(indexed_batch[0]["embedding"])
-                        upsert_chunks(indexed_batch)
-                update_metadata(
-                    task.document_id,
-                    indexing_status="indexed",
-                    indexing_error=None,
-                    indexed_at=utc_now(),
-                    embedding_model=EMBEDDING_MODEL,
-                    vector_dim=vector_dim,
-                    index_schema_version=INDEX_SCHEMA_VERSION,
-                )
-                update_ingest_entry(task, "indexed")
-        except Exception as exc:
-            if task is not None:
-                message = str(exc) or exc.__class__.__name__
-                logger.exception("Indexing failed for document %s", task.document_id)
-                try:
-                    delete_document_vectors(task.document_id)
-                except Exception:
-                    logger.exception("Could not clean partial vectors for %s", task.document_id)
-                try:
-                    update_metadata(task.document_id, indexing_status="error", indexing_error=message)
-                except Exception:
-                    logger.exception("Could not persist indexing error for %s", task.document_id)
-                update_ingest_entry(task, "error", message)
-        finally:
-            INDEX_QUEUE.task_done()
+            INDEX_SIGNAL.get(timeout=INDEX_POLL_SECONDS)
+        except queue.Empty:
+            pass
+        while not SHUTDOWN.is_set():
+            try:
+                claimed = STORE.claim_for_indexing(utc_now())
+            except Exception:
+                logger.exception("Could not claim the next document for indexing")
+                break
+            if claimed is None:
+                break
+            _index_one_document(claimed)
 
 
 def hash_file(path: Path) -> str:
@@ -383,7 +431,10 @@ def create_document(stored_path: Path, filename: str, content_sha256: str) -> di
             "pages": len(pages),
             "chunks": group_count,
             "retrieval_units": len(chunks),
-            "indexing_status": "queued",
+            # "pending" until enqueue_index flips it to "queued": the index
+            # worker only claims "queued" rows, so a folder-ingest job always
+            # has its progress link registered before the worker can pick it up.
+            "indexing_status": "pending",
             "indexing_error": None,
             "embedding_model": EMBEDDING_MODEL,
             "vector_dim": 0,
@@ -455,13 +506,7 @@ def ingest_worker() -> None:
                         save_job(JOB_STATUS[job_id])
                     if not duplicate:
                         enqueue_index(
-                            IndexTask(
-                                metadata["document_id"],
-                                str(CHUNKS_DIR / f"{metadata['document_id']}.json"),
-                                job_id,
-                                file_index,
-                            ),
-                            update_status=False,
+                            IndexTask(metadata["document_id"], job_id, file_index)
                         )
                 except Exception as exc:
                     logger.exception("Folder ingestion failed for %s", pdf)
@@ -492,36 +537,56 @@ def recover_interrupted_work() -> None:
                 job["state"] = "interrupted"
                 job["error"] = "the service restarted; document indexing resumes separately"
                 save_job(job)
-            JOB_STATUS[job["job_id"]] = job
+            with JOB_STATUS_LOCK:
+                JOB_STATUS[job["job_id"]] = job
         except Exception:
             logger.exception("Could not recover job %s", path)
 
+    # Mark everything that needs (re)indexing as ``queued`` and let the worker
+    # pull it. The pipeline rebuild for stale documents happens in the worker,
+    # so a crash partway through recovery leaves consistent database state.
+    requeued = 0
     for metadata in list_metadata():
         doc_id = metadata.get("document_id")
+        if not doc_id:
+            continue
         try:
-            if metadata.get("pipeline_version") != PIPELINE_VERSION:
-                metadata = rebuild_document_artifacts(metadata)
+            stale_pipeline = metadata.get("pipeline_version") != PIPELINE_VERSION
             needs_index = (
-                metadata.get("indexing_status") in {"queued", "indexing"}
+                stale_pipeline
+                or metadata.get("indexing_status") in {"pending", "queued", "indexing"}
                 or metadata.get("index_schema_version") != INDEX_SCHEMA_VERSION
                 or metadata.get("embedding_model") != EMBEDDING_MODEL
             )
-            chunks_path = CHUNKS_DIR / f"{doc_id}.json"
-            if needs_index and doc_id and chunks_path.exists():
-                enqueue_index(IndexTask(doc_id, str(chunks_path)), update_status=True)
+            if not needs_index:
+                continue
+            source_ready = (
+                (DOCUMENTS_DIR / metadata["stored_filename"]).exists()
+                if stale_pipeline
+                else (CHUNKS_DIR / f"{doc_id}.json").exists()
+            )
+            if not source_ready:
+                continue
+            if metadata.get("indexing_status") != "queued":
+                update_metadata(doc_id, indexing_status="queued", indexing_error=None)
+            requeued += 1
         except Exception as exc:
-            logger.exception("Could not migrate or recover indexing for %s", doc_id)
-            if doc_id:
-                try:
-                    update_metadata(doc_id, indexing_status="error", indexing_error=str(exc))
-                except Exception:
-                    logger.exception("Could not persist migration error for %s", doc_id)
+            logger.exception("Could not queue %s for indexing after restart", doc_id)
+            try:
+                update_metadata(doc_id, indexing_status="error", indexing_error=str(exc))
+            except Exception:
+                logger.exception("Could not persist recovery error for %s", doc_id)
+
+    if requeued:
+        logger.info("Re-queued %d document(s) for indexing after restart", requeued)
+    signal_index_worker()
 
 
 def start_workers() -> None:
     global WORKER_THREADS, RERANK_EXECUTOR
     if any(thread.is_alive() for thread in WORKER_THREADS):
         return
+    SHUTDOWN.clear()
     RERANK_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
         max_workers=RERANK_MAX_WORKERS,
         thread_name_prefix="reranker",
@@ -537,11 +602,12 @@ def start_workers() -> None:
 
 def stop_workers() -> None:
     global RERANK_EXECUTOR
-    for work_queue in (INDEX_QUEUE, INGEST_QUEUE):
-        try:
-            work_queue.put_nowait(None)
-        except queue.Full:
-            logger.warning("Could not enqueue worker shutdown signal")
+    SHUTDOWN.set()
+    signal_index_worker()
+    try:
+        INGEST_QUEUE.put_nowait(None)
+    except queue.Full:
+        logger.warning("Could not enqueue ingest worker shutdown signal")
     for thread in WORKER_THREADS:
         thread.join(timeout=5)
     if RERANK_EXECUTOR is not None:
@@ -761,10 +827,7 @@ async def upload_document(file: UploadFile = File(...)):
     except Exception as exc:
         logger.exception("Document ingestion failed for %s", file.filename)
         raise HTTPException(status_code=422, detail=f"document ingestion failed: {exc}") from exc
-    try:
-        enqueue_index(IndexTask(doc_id, str(CHUNKS_DIR / f"{doc_id}.json")), update_status=False)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    enqueue_index(IndexTask(doc_id))
     return JSONResponse(metadata, status_code=201)
 
 
@@ -892,10 +955,7 @@ async def retry_document(doc_id: str):
     chunks_path = CHUNKS_DIR / f"{doc_id}.json"
     if not chunks_path.exists():
         raise HTTPException(status_code=409, detail="document chunks are missing; upload the document again")
-    try:
-        enqueue_index(IndexTask(doc_id, str(chunks_path)))
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    enqueue_index(IndexTask(doc_id))
     return await asyncio.to_thread(read_metadata, doc_id)
 
 
@@ -1021,7 +1081,7 @@ async def health_ready():
     payload = {
         "status": "ready" if qdrant_ok else "degraded",
         "qdrant": qdrant_ok,
-        "index_queue": INDEX_QUEUE.qsize(),
+        "index_backlog": await asyncio.to_thread(STORE.count_indexing_backlog),
         "ingest_queue": INGEST_QUEUE.qsize(),
     }
     return JSONResponse(payload, status_code=200 if qdrant_ok else 503)

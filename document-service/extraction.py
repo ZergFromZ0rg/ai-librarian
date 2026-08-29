@@ -1,7 +1,7 @@
-from difflib import SequenceMatcher
 import logging
 import re
 import unicodedata
+from difflib import SequenceMatcher
 from typing import Dict, List, Optional, Tuple
 
 import pymupdf

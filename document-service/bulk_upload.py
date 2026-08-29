@@ -1,8 +1,10 @@
 import argparse
-import time
 import shutil
+import time
 from pathlib import Path
+
 import requests
+
 
 def upload_file(url, path, wait=False, poll_interval=2, timeout=300):
     with open(path, "rb") as f:

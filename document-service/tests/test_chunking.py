@@ -2,6 +2,7 @@ import pytest
 
 from chunking import (
     BLOCK_TYPES,
+    _enforce_hard_budget,
     chunk_document,
     count_tokens,
     lead_in_from,
@@ -228,6 +229,22 @@ def test_markdown_normalization_keeps_mathematical_symbols():
     normalized = normalize_for_embedding(markdown)
 
     assert normalized == "Result Derivative: $∂f/∂x ≥ 0$ and proof."
+
+
+def test_enforce_hard_budget_splits_over_budget_units_instead_of_raising():
+    long_text = " ".join(f"word{index}" for index in range(200))
+    group = {
+        "retrieval_units": [
+            {"kind": "block", "text": long_text, "token_count": count_tokens(long_text)},
+        ]
+    }
+
+    _enforce_hard_budget(group, hard_max_tokens=40, overlap_tokens=5)
+
+    units = group["retrieval_units"]
+    assert len(units) > 1
+    assert all(unit["token_count"] <= 40 for unit in units)
+    assert all(unit["kind"] == "block" for unit in units)
 
 
 def test_token_estimator_splits_long_damaged_words():

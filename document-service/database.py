@@ -164,6 +164,41 @@ class MetadataStore:
             )
             self._conn.commit()
 
+    # --------------------------------------------------------- indexing queue
+    def claim_for_indexing(self, now: str) -> Optional[dict]:
+        """Atomically take the oldest ``queued`` document and mark it ``indexing``.
+
+        The index worker calls this in a loop instead of draining an in-memory
+        queue, so a restart that re-queues the whole library can never overflow
+        a bounded queue and mark documents as failed.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT document_id FROM documents WHERE indexing_status = 'queued' "
+                "ORDER BY updated_at LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            document_id = row["document_id"]
+            self._conn.execute(
+                "UPDATE documents SET indexing_status = 'indexing', "
+                "indexing_error = NULL, updated_at = ? WHERE document_id = ?",
+                (now, document_id),
+            )
+            self._conn.commit()
+            claimed = self._conn.execute(
+                "SELECT * FROM documents WHERE document_id = ?", (document_id,)
+            ).fetchone()
+        return _row_to_dict(claimed)
+
+    def count_indexing_backlog(self) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM documents "
+                "WHERE indexing_status IN ('queued', 'indexing')"
+            ).fetchone()
+        return int(row[0]) if row else 0
+
     # -------------------------------------------------------------- migration
     def import_legacy(self, metadata_dir) -> int:
         """One-time import of ``<metadata_dir>/*.json`` records.
