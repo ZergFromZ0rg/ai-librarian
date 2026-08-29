@@ -116,11 +116,16 @@ Persistent state lives under:
 
 ```text
 data/
-  app/       original PDFs, typed extracted blocks, semantic groups, metadata, and job state
+  app/       original PDFs, typed extracted blocks, semantic groups, folder-ingest
+             job state, and library.db (SQLite document-metadata index)
   qdrant/    vector database storage
   models/    embedding and reranker cache
 library/     optional read-only PDF import source
 ```
+
+On first start after upgrading, any existing `data/app/metadata/*.json` records are
+imported into `data/app/library.db` automatically. The JSON files are left in place
+and can be deleted once the import is confirmed.
 
 Stop the stack before taking a filesystem-level backup:
 

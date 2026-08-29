@@ -1,0 +1,14 @@
+# Dependencies needed to run the automated test suite.
+#
+# torch and sentence-transformers (in requirements.txt) are intentionally left
+# out: every test that would reach them monkeypatches embed_texts / rerank, so
+# installing ~1 GB of ML wheels on each CI run would be pure waste.
+#
+# Keep the shared pins in sync with requirements.txt / requirements-dev.txt.
+fastapi==0.140.0
+python-multipart==0.0.32
+PyMuPDF==1.28.2
+pymupdf4llm==1.28.2
+qdrant-client==1.19.0
+httpx==0.28.1
+pytest==9.1.1

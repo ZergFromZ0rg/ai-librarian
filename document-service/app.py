@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from chunking import build_semantic_groups, normalize_for_embedding, parse_typed_blocks
+from database import MetadataStore
 from embeddings import DEFAULT_MODEL as EMBEDDING_MODEL
 from embeddings import embed_texts
 from extraction import extract_pages
@@ -59,6 +60,11 @@ PIPELINE_VERSION = 5
 for directory in (DOCUMENTS_DIR, METADATA_DIR, EXTRACTED_DIR, CHUNKS_DIR, JOBS_DIR, INGEST_ROOT):
     directory.mkdir(parents=True, exist_ok=True)
 
+STORE = MetadataStore(DATA_DIR / "library.db")
+_imported = STORE.import_legacy(METADATA_DIR)
+if _imported:
+    logger.info("Imported %d legacy metadata records into %s", _imported, DATA_DIR / "library.db")
+
 
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=1_000)
@@ -86,7 +92,6 @@ INDEX_QUEUE = queue.Queue(maxsize=INDEX_QUEUE_SIZE)
 INGEST_QUEUE = queue.Queue(maxsize=INGEST_QUEUE_SIZE)
 JOB_STATUS = {}
 JOB_STATUS_LOCK = threading.RLock()
-FILE_LOCK = threading.RLock()
 DOCUMENT_LOCKS = {}
 DOCUMENT_LOCKS_LOCK = threading.Lock()
 WORKER_THREADS = []
@@ -123,47 +128,28 @@ def validate_doc_id(doc_id: str) -> str:
     return doc_id
 
 
-def metadata_path(doc_id: str) -> Path:
-    return METADATA_DIR / f"{doc_id}.json"
-
-
 def read_metadata(doc_id: str) -> dict:
     validate_doc_id(doc_id)
-    path = metadata_path(doc_id)
-    if not path.exists():
+    metadata = STORE.get(doc_id)
+    if metadata is None:
         raise HTTPException(status_code=404, detail="document not found")
-    with FILE_LOCK:
-        return read_json(path)
+    return metadata
 
 
 def update_metadata(doc_id: str, **changes) -> dict:
-    path = metadata_path(doc_id)
-    with FILE_LOCK:
-        if not path.exists():
-            raise FileNotFoundError(f"metadata for {doc_id} does not exist")
-        metadata = read_json(path)
-        metadata.update(changes)
-        metadata["updated_at"] = utc_now()
-        atomic_write_json(path, metadata)
-        return metadata
+    changes["updated_at"] = utc_now()
+    try:
+        return STORE.update(doc_id, changes)
+    except KeyError as exc:
+        raise FileNotFoundError(f"metadata for {doc_id} does not exist") from exc
 
 
 def list_metadata() -> List[dict]:
-    documents = []
-    with FILE_LOCK:
-        for path in METADATA_DIR.glob("*.json"):
-            try:
-                documents.append(read_json(path))
-            except (OSError, json.JSONDecodeError):
-                logger.exception("Could not read metadata file %s", path)
-    return sorted(documents, key=lambda item: item.get("uploaded_at", ""), reverse=True)
+    return STORE.list_all()
 
 
 def find_duplicate(content_sha256: str) -> Optional[dict]:
-    for metadata in list_metadata():
-        if metadata.get("content_sha256") == content_sha256:
-            return metadata
-    return None
+    return STORE.find_by_hash(content_sha256)
 
 
 def get_document_lock(doc_id: str) -> threading.Lock:
@@ -399,13 +385,12 @@ def create_document(stored_path: Path, filename: str, content_sha256: str) -> di
             "pipeline_version": PIPELINE_VERSION,
             "index_schema_version": 0,
         }
-        atomic_write_json(metadata_path(doc_id), metadata)
-        return metadata
+        return STORE.create(metadata)
     except Exception:
         stored_path.unlink(missing_ok=True)
         (EXTRACTED_DIR / f"{doc_id}.json").unlink(missing_ok=True)
         (CHUNKS_DIR / f"{doc_id}.json").unlink(missing_ok=True)
-        metadata_path(doc_id).unlink(missing_ok=True)
+        STORE.delete(doc_id)
         raise
 
 
@@ -808,9 +793,9 @@ async def delete_document(doc_id: str):
                 DOCUMENTS_DIR / metadata["stored_filename"],
                 EXTRACTED_DIR / f"{doc_id}.json",
                 CHUNKS_DIR / f"{doc_id}.json",
-                metadata_path(doc_id),
             ):
                 path.unlink(missing_ok=True)
+            STORE.delete(doc_id)
 
     try:
         await asyncio.to_thread(delete_all)

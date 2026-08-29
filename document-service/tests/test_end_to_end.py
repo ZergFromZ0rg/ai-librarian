@@ -100,6 +100,7 @@ def service(tmp_path, monkeypatch):
     with TestClient(module.app) as client:
         yield module, client, indexed
 
+    module.STORE.close()
     sys.path.remove(service_path)
 
 
