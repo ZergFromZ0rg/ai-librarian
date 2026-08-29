@@ -31,6 +31,7 @@ services:
       - ./data/models:/models
     environment:
       PORT: "8000"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DATA_DIR: /app/data
       INGEST_ROOT: /library
       QDRANT_URL: http://qdrant:6333

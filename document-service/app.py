@@ -39,6 +39,32 @@ from vector_store import (
     upsert_chunks,
 )
 
+
+def _configure_logging() -> None:
+    """Give the ``ai_librarian`` logger tree a formatted stderr handler.
+
+    Under ``uvicorn app:app`` uvicorn configures only its own loggers, so without
+    this the service's ``logger.info`` breadcrumbs (pages skipped, re-queue
+    counts, recovered glyph maps) are dropped and only unformatted WARNING+
+    reaches the container logs. ``propagate = False`` keeps uvicorn's own output
+    untouched and avoids double lines.
+    """
+    level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S%z",
+        )
+    )
+    service_logger = logging.getLogger("ai_librarian")
+    service_logger.handlers.clear()
+    service_logger.addHandler(handler)
+    service_logger.setLevel(getattr(logging, level, logging.INFO))
+    service_logger.propagate = False
+
+
+_configure_logging()
 logger = logging.getLogger("ai_librarian")
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "./data")).resolve()
@@ -1110,4 +1136,9 @@ async def health_ready():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", "8000")), log_level="info")
+    uvicorn.run(
+        "app:app",
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", "8000")),
+        log_level=os.environ.get("LOG_LEVEL", "info").lower(),
+    )

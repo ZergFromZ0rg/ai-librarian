@@ -1,4 +1,5 @@
 import importlib
+import logging
 import math
 import sys
 import time
@@ -348,6 +349,25 @@ def test_stored_pdf_can_be_rebuilt_for_new_pipeline_version(service):
     assert chunks[0]["format"] == "markdown"
     assert chunks[0]["embedding_text"]
     assert chunks[0]["group_id"]
+
+
+def test_service_logger_is_configured_and_emits_info(service):
+    import io
+
+    service_logger = logging.getLogger("ai_librarian")
+    assert service_logger.handlers, "the ai_librarian logger has no handler"
+    assert service_logger.level <= logging.INFO
+    assert service_logger.propagate is False
+
+    sink = io.StringIO()
+    probe = logging.StreamHandler(sink)
+    service_logger.addHandler(probe)
+    try:
+        # a child module logger must reach the handler at INFO
+        logging.getLogger("ai_librarian.extraction").info("ops-breadcrumb-42")
+    finally:
+        service_logger.removeHandler(probe)
+    assert "ops-breadcrumb-42" in sink.getvalue()
 
 
 def test_restart_requeues_the_whole_library_without_failing_documents(service):

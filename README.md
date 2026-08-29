@@ -141,7 +141,7 @@ docker compose start
 # Show service state
 docker compose ps
 
-# Follow application logs
+# Follow application logs (timestamped; set LOG_LEVEL=DEBUG in .env for more)
 docker compose logs -f document-service ui qdrant
 
 # Restart services without deleting data
