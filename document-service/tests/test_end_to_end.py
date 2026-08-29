@@ -152,6 +152,29 @@ def test_upload_index_search_deduplicate_and_delete(service):
     assert not indexed
 
 
+def test_stored_pdf_and_rendered_pages_are_served(service):
+    _module, client, _indexed = service
+    upload = client.post(
+        "/documents",
+        files={"file": ("source.pdf", make_pdf("Camus writes about the absurd and revolt.", pages=3), "application/pdf")},
+    )
+    doc_id = upload.json()["document_id"]
+
+    pdf = client.get(f"/documents/{doc_id}/file")
+    assert pdf.status_code == 200
+    assert pdf.headers["content-type"] == "application/pdf"
+    assert pdf.content[:4] == b"%PDF"
+
+    page = client.get(f"/documents/{doc_id}/page/1", params={"highlight": "Camus writes about the absurd"})
+    assert page.status_code == 200
+    assert page.headers["content-type"] == "image/png"
+    assert page.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+    assert client.get(f"/documents/{doc_id}/page/99").status_code == 404
+    assert client.get(f"/documents/{doc_id}/page/0").status_code == 404
+    assert client.get("/documents/ffffffffffff/file").status_code == 404
+
+
 def test_pdf_with_a_corrupt_ocr_text_layer_is_rejected(service):
     _module, client, _indexed = service
     response = client.post(

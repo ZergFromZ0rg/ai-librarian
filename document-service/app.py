@@ -15,9 +15,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
+import pymupdf
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from chunking import build_semantic_groups, normalize_for_embedding, parse_typed_blocks
@@ -782,6 +783,100 @@ async def get_chunks(doc_id: str):
         return await asyncio.to_thread(read_json, chunks_file)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"failed to read chunks: {exc}") from exc
+
+
+def _stored_pdf_path(doc_id: str) -> Path:
+    metadata = read_metadata(doc_id)
+    stored = DOCUMENTS_DIR / metadata["stored_filename"]
+    if not stored.exists():
+        raise HTTPException(status_code=404, detail="the stored PDF is missing")
+    return stored
+
+
+def _highlight_quads(page, phrase: str):
+    """Best-effort quads for the passage on a rendered page.
+
+    The stored passage is repaired text and will not match the PDF's raw text
+    layer verbatim, so fall back from the whole phrase to its longest sentence,
+    then to a run of distinctive words.
+    """
+    phrase = " ".join(phrase.split())
+    if not phrase:
+        return []
+    # Whole phrase first, then the longest runs of plain letters and spaces —
+    # those survive text-layer damage (accents, ligatures, mis-decoded symbols)
+    # far better than punctuation-bearing spans.
+    candidates = [phrase]
+    candidates += sorted(
+        (run.strip() for run in re.split(r"[^A-Za-z ]+", phrase) if len(run.strip()) >= 12),
+        key=len,
+        reverse=True,
+    )
+    for candidate in candidates:
+        if len(candidate) < 8:
+            continue
+        try:
+            quads = page.search_for(candidate, quads=True)
+        except Exception:
+            quads = []
+        if quads:
+            return quads[:80]
+    return []
+
+
+@app.get("/documents/{doc_id}/file")
+async def get_document_file(doc_id: str):
+    stored = await asyncio.to_thread(_stored_pdf_path, doc_id)
+    metadata = await asyncio.to_thread(read_metadata, doc_id)
+    return FileResponse(
+        stored,
+        media_type="application/pdf",
+        content_disposition_type="inline",
+        filename=metadata.get("filename") or f"{doc_id}.pdf",
+    )
+
+
+@app.get("/documents/{doc_id}/page/{page}")
+async def get_document_page(
+    doc_id: str,
+    page: int,
+    highlight: str = Query(default="", max_length=2_000),
+    zoom: float = Query(default=2.0, ge=1.0, le=4.0),
+):
+    stored = await asyncio.to_thread(_stored_pdf_path, doc_id)
+    if page < 1:
+        raise HTTPException(status_code=404, detail="page out of range")
+
+    def render() -> bytes:
+        with pymupdf.open(stored) as source:
+            if page > source.page_count:
+                raise HTTPException(status_code=404, detail="page out of range")
+            single = pymupdf.open()
+            try:
+                single.insert_pdf(source, from_page=page - 1, to_page=page - 1)
+                rendered = single[0]
+                if highlight:
+                    quads = _highlight_quads(rendered, highlight)
+                    if quads:
+                        annotation = rendered.add_highlight_annot(quads)
+                        annotation.set_colors(stroke=(1.0, 0.86, 0.35))
+                        annotation.update()
+                return single[0].get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)).tobytes("png")
+            finally:
+                single.close()
+
+    try:
+        image = await asyncio.to_thread(render)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Could not render page %s of %s", page, doc_id)
+        raise HTTPException(status_code=500, detail=f"could not render page: {exc}") from exc
+    return Response(
+        content=image,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 @app.post("/documents/{doc_id}/retry")

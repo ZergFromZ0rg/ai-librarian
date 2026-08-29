@@ -71,6 +71,108 @@ async function parseResponse(response) {
   return data;
 }
 
+// A lightbox over a server-rendered page image with the matched passage
+// highlighted, plus a link out to the raw PDF at the same page.
+function SourceViewer({ source, onClose }) {
+  const { documentId, documentName, page: startPage, matched, snippet } = source;
+  const [page, setPage] = useState(startPage);
+  const [pageCount, setPageCount] = useState(null);
+  const [status, setStatus] = useState("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/documents/${documentId}`)
+      .then((response) => (response.ok ? response.json() : null))
+      .then((meta) => {
+        if (!cancelled && meta && meta.pages) setPageCount(meta.pages);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [documentId]);
+
+  const step = useCallback(
+    (delta) =>
+      setPage((current) => {
+        const next = current + delta;
+        if (next < 1) return current;
+        if (pageCount && next > pageCount) return current;
+        return next;
+      }),
+    [pageCount],
+  );
+
+  useEffect(() => {
+    const onKey = (event) => {
+      if (event.key === "Escape") onClose();
+      else if (event.key === "ArrowLeft") step(-1);
+      else if (event.key === "ArrowRight") step(1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, step]);
+
+  const highlight = (matched || snippet || "").slice(0, 600);
+  const imageSrc = `${API_BASE}/documents/${documentId}/page/${page}?highlight=${encodeURIComponent(highlight)}`;
+
+  useEffect(() => {
+    setStatus("loading");
+  }, [imageSrc]);
+
+  return (
+    <div className="source-overlay" onClick={onClose}>
+      <div className="source-panel" onClick={(event) => event.stopPropagation()}>
+        <div className="source-bar">
+          <strong className="source-title" title={documentName}>
+            {documentName}
+          </strong>
+          <div className="source-nav">
+            <button type="button" onClick={() => step(-1)} disabled={page <= 1} aria-label="Previous page">
+              ‹
+            </button>
+            <span>
+              page {page}
+              {pageCount ? ` / ${pageCount}` : ""}
+            </span>
+            <button
+              type="button"
+              onClick={() => step(1)}
+              disabled={pageCount ? page >= pageCount : false}
+              aria-label="Next page"
+            >
+              ›
+            </button>
+          </div>
+          <a
+            className="source-open"
+            href={`${API_BASE}/documents/${documentId}/file#page=${page}`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Open PDF ↗
+          </a>
+          <button type="button" className="source-close" onClick={onClose} aria-label="Close">
+            ×
+          </button>
+        </div>
+        <div className="source-view">
+          {status === "loading" && <div className="source-status">Rendering page…</div>}
+          {status === "error" && <div className="source-status error">Could not render this page.</div>}
+          <img
+            key={imageSrc}
+            src={imageSrc}
+            alt={`${documentName}, page ${page}`}
+            onLoad={() => setStatus("ready")}
+            onError={() => setStatus("error")}
+            style={status === "error" ? { display: "none" } : undefined}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [health, setHealth] = useState(null);
   const [documents, setDocuments] = useState([]);
@@ -82,6 +184,7 @@ export default function App() {
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [source, setSource] = useState(null);
 
   const api = useCallback(
     async (path, options = {}) => {
@@ -339,6 +442,21 @@ export default function App() {
                         : `page ${result.page}`}
                     </span>
                     <span>score {(result.rerank_score ?? result.score)?.toFixed(3)}</span>
+                    <button
+                      type="button"
+                      className="source-link"
+                      onClick={() =>
+                        setSource({
+                          documentId: result.document_id,
+                          documentName: result.document,
+                          page: result.page,
+                          matched: result.matched,
+                          snippet: result.text,
+                        })
+                      }
+                    >
+                      view source ↗
+                    </button>
                   </div>
                   {result.lead_in && (
                     <p className="search-result-leadin">…{result.lead_in}</p>
@@ -357,6 +475,7 @@ export default function App() {
             })}
             {searching && <div className="message assistant">Finding the most relevant passages…</div>}
           </div>
+          {source && <SourceViewer source={source} onClose={() => setSource(null)} />}
           <form className="question-box" onSubmit={searchLibrary}>
             <textarea
               value={query}
