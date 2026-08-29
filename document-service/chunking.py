@@ -560,11 +560,40 @@ def build_semantic_groups(
 
     flush_pending()
 
+    _attach_lead_ins(groups)
     for group in groups:
         for retrieval_unit in group["retrieval_units"]:
             if retrieval_unit["token_count"] > hard_max_tokens:
                 raise AssertionError("retrieval unit exceeds the hard token budget")
     return groups
+
+
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+(?=[A-Z(“\"'¿¡])")
+
+
+def lead_in_from(text: str, max_chars: int = 220) -> str:
+    """The tail of ``text`` — a sentence or two — for display as run-in context
+    before the following passage, so a result never opens mid-thought."""
+    collapsed = re.sub(r"\s+", " ", text).strip()
+    if len(collapsed) <= max_chars:
+        return collapsed
+    window = collapsed[-max_chars:]
+    boundary = _SENTENCE_BOUNDARY.search(window)
+    if boundary:
+        window = window[boundary.end():]
+    else:
+        window = window.lstrip()
+        space = window.find(" ")
+        if 0 < space < 40:
+            window = window[space + 1:]
+    return window.strip()
+
+
+def _attach_lead_ins(groups: List[Dict]) -> None:
+    previous = ""
+    for group in groups:
+        group["lead_in"] = lead_in_from(previous) if previous else ""
+        previous = group["text"]
 
 
 def chunk_document(

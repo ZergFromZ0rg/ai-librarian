@@ -1,10 +1,16 @@
 from difflib import SequenceMatcher
+import logging
 import re
 import unicodedata
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pymupdf
 import pymupdf4llm
+
+from glyphs import build_glyph_repairs
+from layout import recover_dropped_text
+
+logger = logging.getLogger("ai_librarian.extraction")
 
 
 # Some older scholarly PDFs embed this operator font without a ToUnicode map.
@@ -26,6 +32,63 @@ KNOWN_GLYPH_MAPS = {
     "AdvP4C4E74": {"ð": "(", "Þ": ")"},
     "AdvP4C4E51": {"=": "/"},
 }
+
+# Subsetted math fonts routinely ship the series-continuation dots with no
+# ToUnicode entry, so PyMuPDF emits a run of U+FFFD where "⋯" belongs. Merge
+# neighbouring replacement characters (optionally space-separated, never across
+# a line break) into a single ellipsis so the passage stays readable and
+# searchable instead of carrying "�" noise into the index.
+REPLACEMENT_RUN_PATTERN = re.compile("�(?:[ \t]*�)+")
+# Unmapped glyphs in symbol fonts (radical strokes, brace pieces) often decode
+# to C0 control characters. They are always extraction noise, never content.
+CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _collapse_replacement_runs(text: str) -> str:
+    return REPLACEMENT_RUN_PATTERN.sub("⋯", CONTROL_CHARACTERS.sub("", text))
+
+
+# pymupdf4llm emits <sup>/<sub> when the PDF marks a span as super/subscripted.
+# The UI sanitises HTML away and the embedding normaliser would too, so those
+# tags currently reach the reader as baseline digits ("z<sup>3</sup>" -> "z3").
+# Rewrite them here: transliterate to real Unicode super/subscripts when every
+# character has one, otherwise fall back to plain "x^(a+b)" / "H_(2)O" so the
+# exponent is never silently flattened.
+SUPERSCRIPT_MAP = {
+    "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶",
+    "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻", "−": "⁻", "=": "⁼",
+    "(": "⁽", ")": "⁾", "a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ",
+    "f": "ᶠ", "g": "ᵍ", "h": "ʰ", "i": "ⁱ", "j": "ʲ", "k": "ᵏ", "l": "ˡ",
+    "m": "ᵐ", "n": "ⁿ", "o": "ᵒ", "p": "ᵖ", "r": "ʳ", "s": "ˢ", "t": "ᵗ",
+    "u": "ᵘ", "v": "ᵛ", "w": "ʷ", "x": "ˣ", "y": "ʸ", "z": "ᶻ",
+}
+SUBSCRIPT_MAP = {
+    "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆",
+    "7": "₇", "8": "₈", "9": "₉", "+": "₊", "-": "₋", "−": "₋", "=": "₌",
+    "(": "₍", ")": "₎", "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ",
+    "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ", "p": "ₚ", "r": "ᵣ",
+    "s": "ₛ", "t": "ₜ", "u": "ᵤ", "v": "ᵥ", "x": "ₓ",
+}
+SCRIPT_TAG_PATTERN = re.compile(r"<(sup|sub)>(.*?)</\1>", re.DOTALL | re.IGNORECASE)
+_INNER_TAG_PATTERN = re.compile(r"<[^>]+>")
+_EMPHASIS_PATTERN = re.compile(r"\*\*|__|[*_`]")
+
+
+def _rewrite_scripts(markdown: str) -> str:
+    def replace(match: "re.Match[str]") -> str:
+        kind = match.group(1).lower()
+        content = _EMPHASIS_PATTERN.sub("", _INNER_TAG_PATTERN.sub("", match.group(2))).strip()
+        if not content:
+            return ""
+        table = SUPERSCRIPT_MAP if kind == "sup" else SUBSCRIPT_MAP
+        marker = "^" if kind == "sup" else "_"
+        if all(character in table for character in content):
+            return "".join(table[character] for character in content)
+        if len(content) == 1 or (content.startswith("(") and content.endswith(")")):
+            return f"{marker}{content}"
+        return f"{marker}({content})"
+
+    return SCRIPT_TAG_PATTERN.sub(replace, markdown)
 
 REVERSED_DIACRITICS = {
     "´": "\u0301",
@@ -105,8 +168,14 @@ def _repair_diacritics(text: str) -> str:
     )
 
 
-def repair_extracted_text(markdown: str, layout: Dict) -> str:
-    """Repair font-encoding errors and missing visual word spaces."""
+def repair_extracted_text(markdown: str, layout: Dict, glyph_maps: Dict | None = None) -> str:
+    """Repair font-encoding errors and missing visual word spaces.
+
+    ``glyph_maps`` supplies extra ``{font_name: {wrong_char: symbol}}`` entries
+    recovered by shape from this document (see ``glyphs.build_glyph_repairs``);
+    the hand-written ``KNOWN_GLYPH_MAPS`` take precedence over them.
+    """
+    combined_maps = {**(glyph_maps or {}), **KNOWN_GLYPH_MAPS}
     visible, markdown_offsets = _visible_markdown(markdown)
     raw, raw_metadata = _raw_characters(layout)
     raw_to_visible = {}
@@ -123,7 +192,7 @@ def repair_extracted_text(markdown: str, layout: Dict) -> str:
         markdown_offset = markdown_offsets[visible_offset]
         character = raw[raw_offset]
 
-        for font_name, glyph_map in KNOWN_GLYPH_MAPS.items():
+        for font_name, glyph_map in combined_maps.items():
             if font_name in metadata["font"] and character in glyph_map:
                 replacements[markdown_offset] = glyph_map[character]
                 break
@@ -146,7 +215,54 @@ def repair_extracted_text(markdown: str, layout: Dict) -> str:
         if offset in insertions:
             repaired.append(" ")
         repaired.append(replacements.get(offset, character))
-    return _repair_diacritics("".join(repaired))
+    return _rewrite_scripts(_repair_diacritics(_collapse_replacement_runs("".join(repaired))))
+
+
+_WORD_TOKEN = re.compile(r"[A-Za-z]{2,}")
+_HAS_VOWEL = re.compile(r"[aeiouy]")
+_TRIPLED_LETTER = re.compile(r"(.)\1\1")
+
+
+def _page_text_is_garbled(text: str) -> Optional[bool]:
+    """Whether a page's words carry the fingerprints of a bad OCR text layer:
+    m/n/u misread as "ii", vowels dropped, letters tripled. ``None`` when the
+    page has too little prose to judge."""
+    tokens = [token.lower() for token in _WORD_TOKEN.findall(text)]
+    if len(tokens) < 40:
+        return None
+    count = len(tokens)
+    ii_runs = sum("ii" in token for token in tokens)
+    vowelless = sum(len(token) >= 4 and not _HAS_VOWEL.search(token) for token in tokens)
+    tripled = sum(bool(_TRIPLED_LETTER.search(token)) for token in tokens)
+    return (
+        ii_runs / count > 0.012
+        or vowelless / count > 0.03
+        or tripled / count > 0.015
+    )
+
+
+def assess_text_layer(pages: List[Dict]) -> Optional[str]:
+    """Return a rejection reason if the extracted text is largely OCR garbage.
+
+    Some PDFs are scans carrying a baked-in OCR layer too corrupt to index.
+    Re-running OCR is intentionally out of scope (see ``extract_pages``), so
+    such a document is refused at ingestion with an explanation.
+    """
+    verdicts = [
+        verdict
+        for page in pages
+        if (verdict := _page_text_is_garbled(page.get("text", ""))) is not None
+    ]
+    if len(verdicts) < 5:
+        return None
+    garbled_fraction = sum(verdicts) / len(verdicts)
+    if garbled_fraction >= 0.08:
+        return (
+            "this PDF's text layer appears to be corrupted "
+            f"({garbled_fraction:.0%} of pages are unreadable) — it is most likely a "
+            "scan with a poor OCR layer; re-OCR the file and upload it again"
+        )
+    return None
 
 
 def extract_pages(pdf_path: str) -> List[Dict]:
@@ -188,18 +304,27 @@ def extract_pages(pdf_path: str) -> List[Dict]:
             if fallback:
                 fallbacks[index] = fallback[0]
 
+        # Identify the document's mis-encoded symbol-font glyphs once, by shape.
+        try:
+            glyph_maps = build_glyph_repairs(document)
+        except Exception:
+            logger.exception("Glyph shape recovery failed; continuing without it")
+            glyph_maps = {}
+
         # Repair one page at a time so large books do not retain hundreds of
         # raw character-layout dictionaries in memory.
         for index, original_page in enumerate(extracted):
             page = fallbacks.get(index, original_page)
             metadata = page.get("metadata") or {}
-            layout = document[index].get_text("rawdict", sort=True)
+            source_page = document[index]
+            markdown = recover_dropped_text(
+                source_page, (page.get("text") or "").strip()
+            )
+            layout = source_page.get_text("rawdict", sort=True)
             pages.append(
                 {
                     "page": int(metadata.get("page_number") or index + 1),
-                    "text": repair_extracted_text(
-                        (page.get("text") or "").strip(), layout
-                    ),
+                    "text": repair_extracted_text(markdown, layout, glyph_maps),
                     "format": "markdown",
                 }
             )

@@ -6,6 +6,7 @@
 #
 # Keep the shared pins in sync with requirements.txt / requirements-dev.txt.
 fastapi==0.140.0
+numpy==2.4.0
 python-multipart==0.0.32
 PyMuPDF==1.28.2
 pymupdf4llm==1.28.2

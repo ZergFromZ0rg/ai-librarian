@@ -24,7 +24,7 @@ from chunking import build_semantic_groups, normalize_for_embedding, parse_typed
 from database import MetadataStore
 from embeddings import DEFAULT_MODEL as EMBEDDING_MODEL
 from embeddings import embed_texts
-from extraction import extract_pages
+from extraction import assess_text_layer, extract_pages
 from reranker import model_info, rerank
 from vector_store import (
     INDEX_SCHEMA_VERSION,
@@ -55,7 +55,7 @@ CHUNK_SOFT_MAX_TOKENS = int(os.environ.get("CHUNK_SOFT_MAX_TOKENS", "220"))
 CHUNK_HARD_MAX_TOKENS = int(os.environ.get("CHUNK_HARD_MAX_TOKENS", "240"))
 CHUNK_OVERLAP_TOKENS = int(os.environ.get("CHUNK_OVERLAP_TOKENS", "32"))
 DOC_ID_PATTERN = re.compile(r"^[a-f0-9]{12}$")
-PIPELINE_VERSION = 5
+PIPELINE_VERSION = 6
 
 for directory in (DOCUMENTS_DIR, METADATA_DIR, EXTRACTED_DIR, CHUNKS_DIR, JOBS_DIR, INGEST_ROOT):
     directory.mkdir(parents=True, exist_ok=True)
@@ -290,6 +290,9 @@ def build_document_artifacts(
     pages = extract_pages(stored_path)
     if not any(page.get("text", "").strip() for page in pages):
         raise ValueError("the PDF contains no extractable text; scanned PDFs require OCR")
+    garbled_reason = assess_text_layer(pages)
+    if garbled_reason:
+        raise ValueError(garbled_reason)
     blocks = parse_typed_blocks(pages)
     groups = build_semantic_groups(
         blocks,
@@ -316,6 +319,7 @@ def build_document_artifacts(
                     "retrieval_index": retrieval_index,
                     "retrieval_kind": retrieval_unit["kind"],
                     "text": group["text"],
+                    "lead_in": group.get("lead_in", ""),
                     "retrieval_text": retrieval_text,
                     "embedding_text": normalize_for_embedding(retrieval_text),
                     "token_count": retrieval_unit["token_count"],
@@ -648,13 +652,29 @@ async def retrieve(
     return hits[:top_k]
 
 
+_TERMINAL_PUNCTUATION = tuple(".!?\"')”’»…")
+
+
 def format_hits(hits: List[dict], max_text_chars: int = 20_000) -> List[dict]:
     formatted = []
     for hit in hits:
         payload = hit.get("payload") or {}
-        text = payload.get("text") or ""
-        if len(text) > max_text_chars:
-            text = text[: max_text_chars - 3] + "..."
+        text = (payload.get("text") or "").strip()
+        truncated = len(text) > max_text_chars
+        if truncated:
+            text = text[: max_text_chars - 1].rstrip() + "…"
+        elif text and not text.endswith(_TERMINAL_PUNCTUATION):
+            # The passage ends mid-sentence because the paragraph runs into the
+            # next group; signal that rather than implying it stops here.
+            text = f"{text} …"
+
+        # The sub-passage that actually won retrieval, for the UI to highlight.
+        # Empty when the whole group matched (nothing more specific to mark).
+        matched = (payload.get("retrieval_text") or "").strip()
+        group_text = (payload.get("text") or "").strip()
+        if not matched or matched == group_text or len(matched) >= len(group_text) * 0.9:
+            matched = ""
+
         formatted.append(
             {
                 "chunk_id": payload.get("chunk_id"),
@@ -667,6 +687,8 @@ def format_hits(hits: List[dict], max_text_chars: int = 20_000) -> List[dict]:
                 "protected_type": payload.get("protected_type"),
                 "score": hit.get("score"),
                 "rerank_score": hit.get("rerank_score"),
+                "lead_in": (payload.get("lead_in") or "").strip(),
+                "matched": matched,
                 "text": text,
             }
         )

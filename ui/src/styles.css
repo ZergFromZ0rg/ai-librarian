@@ -368,11 +368,27 @@ button:disabled {
   color: #315648;
 }
 
+.search-result-leadin {
+  margin: 0 0 10px;
+  color: #9aa39e;
+  font-size: 0.86rem;
+  line-height: 1.5;
+  font-style: italic;
+  overflow-wrap: anywhere;
+}
+
 .search-result-text {
   color: #35443f;
   line-height: 1.58;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.search-result-text .passage-match {
+  background: rgba(219, 168, 99, 0.32);
+  border-radius: 3px;
+  padding: 0.05em 0.12em;
+  color: inherit;
 }
 
 .search-result-text > :first-child {

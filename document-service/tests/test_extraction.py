@@ -1,4 +1,25 @@
-from extraction import repair_extracted_text
+from extraction import (
+    _collapse_replacement_runs,
+    _page_text_is_garbled,
+    _rewrite_scripts,
+    assess_text_layer,
+    repair_extracted_text,
+)
+
+_GARBLED = (
+    "Matheinatics as we kilow it has beeil created and used by huinan beiilgs "
+    "niatheniaticians physicists computer scieiltists and ecoilomists al1 meinbers "
+    "of the species Horno sapieils this inay be ail obvious fact but it has ail "
+    "iinportant coilsequeilce for the study of the iiiiiid the coilceptual systein "
+    "is systeinatic aild ilot arbitrary iii geileral"
+)
+_CLEAN = (
+    "Mathematics as we know it has been created and used by human beings "
+    "mathematicians physicists computer scientists and economists all members "
+    "of the species Homo sapiens this may be an obvious fact but it has an "
+    "important consequence for the study of the mind the conceptual system "
+    "is systematic and not arbitrary in general and worth restating here"
+)
 
 
 def _span(text, font, positions, size=10):
@@ -33,6 +54,52 @@ def test_repairs_known_math_font_without_changing_regular_digits():
     }
 
     assert repair_extracted_text("v 1 f 5 e 12", layout) == "v + f = e 12"
+
+
+def test_collapses_runs_of_undecodable_glyphs_into_an_ellipsis():
+    # Three unmapped glyphs where the series-continuation dots belong.
+    assert (
+        repair_extracted_text("z 2 z5 / 5! 2 ��� for z", {"blocks": []})
+        == "z 2 z5 / 5! 2 ⋯ for z"
+    )
+    # Space-separated run, but not across a line break, and lone marks are left alone.
+    assert _collapse_replacement_runs("a � � b") == "a ⋯ b"
+    assert _collapse_replacement_runs("a �\nb � c") == "a �\nb � c"
+
+
+def test_rewrites_superscript_and_subscript_tags():
+    # every character has a Unicode form -> transliterate inline
+    assert _rewrite_scripts("z<sup>3</sup> and e<sup>n+1</sup>") == "z³ and eⁿ⁺¹"
+    assert _rewrite_scripts("H<sub>2</sub>O, x<sub>0</sub>") == "H₂O, x₀"
+    # mixed / unsupported content -> readable plain-text fallback, never dropped
+    assert _rewrite_scripts("x<sup>(a+bq)</sup>") == "x^(a+bq)"
+    assert _rewrite_scripts("A<sub>Q</sub>") == "A_Q"
+    # emphasis and stray tags inside the script run are stripped first
+    assert _rewrite_scripts("y<sup>**2**</sup>") == "y²"
+    assert _rewrite_scripts("n<sup></sup>") == "n"
+    # runs through the full repair pipeline
+    assert repair_extracted_text("z<sup>3</sup> / 3!", {"blocks": []}) == "z³ / 3!"
+
+
+def test_garbled_page_detection_separates_ocr_mush_from_clean_prose():
+    assert _page_text_is_garbled(_GARBLED) is True
+    assert _page_text_is_garbled(_CLEAN) is False
+    assert _page_text_is_garbled("only a handful of words here") is None
+
+
+def test_assess_text_layer_rejects_a_mostly_corrupt_document():
+    pages = [{"text": _CLEAN} for _ in range(9)] + [{"text": _GARBLED} for _ in range(3)]
+    reason = assess_text_layer(pages)
+    assert reason and "corrupted" in reason
+
+
+def test_assess_text_layer_accepts_a_clean_document_with_a_stray_bad_page():
+    pages = [{"text": _CLEAN} for _ in range(20)] + [{"text": _GARBLED}]
+    assert assess_text_layer(pages) is None
+
+
+def test_assess_text_layer_abstains_without_enough_prose():
+    assert assess_text_layer([{"text": "Table 1"}, {"text": "see figure 2"}]) is None
 
 
 def test_repairs_visual_word_spacing_and_reversed_accents():

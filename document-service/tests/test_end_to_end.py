@@ -8,13 +8,29 @@ import pytest
 from fastapi.testclient import TestClient
 
 
-def make_pdf(text: str) -> bytes:
+def make_pdf(text: str, pages: int = 1) -> bytes:
     document = fitz.open()
-    page = document.new_page()
-    page.insert_text((72, 72), text)
+    for _ in range(pages):
+        page = document.new_page()
+        y = 72
+        for line in text.split("\n"):
+            page.insert_text((72, y), line)
+            y += 14
     content = document.tobytes()
     document.close()
     return content
+
+
+_OCR_MUSH = "\n".join(
+    [
+        "Matheinatics as we kilow it has beeil created and used by huinan beiilgs "
+        "niatheniaticians physicists computer scieiltists and ecoilomists al1 meinbers",
+        "of the species Horno sapieils this inay be ail obvious fact but it has ail "
+        "iinportant coilsequeilce for the study of the iiiiiid the coilceptual systein",
+        "is systeinatic aild ilot arbitrary iii geileral and this pattern repeats "
+        "throughout the volume across every chapter and every sectioil without relief",
+    ]
+)
 
 
 def wait_for_status(client: TestClient, doc_id: str, expected: str, timeout: float = 3) -> dict:
@@ -119,8 +135,11 @@ def test_upload_index_search_deduplicate_and_delete(service):
 
     search = client.post("/search", json={"query": "absurd freedom", "rerank": False})
     assert search.status_code == 200
-    assert search.json()["results"][0]["document"] == "essay.pdf"
-    assert search.json()["results"][0]["chunk_id"]
+    top = search.json()["results"][0]
+    assert top["document"] == "essay.pdf"
+    assert top["chunk_id"]
+    # the display contract: every result carries run-in context and match fields
+    assert "lead_in" in top and "matched" in top
 
     duplicate = client.post("/documents", files={"file": ("copy.pdf", pdf, "application/pdf")})
     assert duplicate.status_code == 200
@@ -131,6 +150,16 @@ def test_upload_index_search_deduplicate_and_delete(service):
     assert deleted.status_code == 200
     assert client.get(f"/documents/{doc_id}").status_code == 404
     assert not indexed
+
+
+def test_pdf_with_a_corrupt_ocr_text_layer_is_rejected(service):
+    _module, client, _indexed = service
+    response = client.post(
+        "/documents",
+        files={"file": ("scan.pdf", make_pdf(_OCR_MUSH, pages=8), "application/pdf")},
+    )
+    assert response.status_code == 422
+    assert "corrupted" in response.json()["detail"]
 
 
 def test_indexing_error_is_persisted_and_retryable(service, monkeypatch):

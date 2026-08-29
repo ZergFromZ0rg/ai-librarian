@@ -4,6 +4,7 @@ from chunking import (
     BLOCK_TYPES,
     chunk_document,
     count_tokens,
+    lead_in_from,
     normalize_for_embedding,
     parse_typed_blocks,
 )
@@ -110,6 +111,27 @@ def test_unfinished_paragraph_can_continue_across_pages():
     assert groups[0]["page"] == 1
     assert groups[0]["page_end"] == 2
     assert "continues with\n\nthe substitution" in groups[0]["text"]
+
+
+def test_lead_in_is_the_sentence_tail_of_the_previous_group():
+    long_tail = "Earlier discussion fills the first passage. " * 8
+    pages = [
+        {"page": 1, "text": long_tail + "It ends on a clean final sentence here."},
+        {"page": 2, "text": "The next passage begins on a fresh page."},
+    ]
+
+    groups = chunk_document(pages)
+
+    assert groups[0]["lead_in"] == ""
+    assert groups[1]["lead_in"]
+    assert groups[1]["lead_in"] in groups[0]["text"]
+    assert len(groups[1]["lead_in"]) <= 220
+    # trimmed to a sentence start, not a mid-word cut
+    assert groups[1]["lead_in"][0].isupper()
+
+
+def test_lead_in_from_returns_short_text_whole():
+    assert lead_in_from("A single short sentence.") == "A single short sentence."
 
 
 def test_retrieval_children_respect_token_budget_for_long_unbroken_text():

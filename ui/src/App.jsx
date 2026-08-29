@@ -5,6 +5,63 @@ import remarkGfm from "remark-gfm";
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 const TERMINAL_JOB_STATES = new Set(["done", "partial", "error", "interrupted"]);
 
+// Wrap the passage sub-string that actually won retrieval in <mark>, so the
+// reader can see which part of a long passage the match hinged on. Whitespace
+// is matched flexibly because the stored passage and the retrieval unit are
+// wrapped differently; a match split across inline markup is simply left alone.
+function makeMatchHighlighter(matched) {
+  const needle = (matched || "").trim().slice(0, 400);
+  if (needle.length < 12) return null;
+  const pattern = needle
+    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\s+/g, "\\s+");
+  let regex;
+  try {
+    regex = new RegExp(pattern, "i");
+  } catch (_error) {
+    return null;
+  }
+  const splitNode = (value) => {
+    const match = regex.exec(value);
+    if (!match) return null;
+    const start = match.index;
+    const end = start + match[0].length;
+    const pieces = [];
+    if (start > 0) pieces.push({ type: "text", value: value.slice(0, start) });
+    pieces.push({
+      type: "element",
+      tagName: "mark",
+      properties: { className: ["passage-match"] },
+      children: [{ type: "text", value: value.slice(start, end) }],
+    });
+    if (end < value.length) pieces.push({ type: "text", value: value.slice(end) });
+    return pieces;
+  };
+  return () => (tree) => {
+    let done = false;
+    const walk = (node) => {
+      if (done || !node.children) return;
+      const next = [];
+      for (const child of node.children) {
+        if (done || child.type !== "text") {
+          if (child.type === "element") walk(child);
+          next.push(child);
+          continue;
+        }
+        const pieces = splitNode(child.value);
+        if (pieces) {
+          next.push(...pieces);
+          done = true;
+        } else {
+          next.push(child);
+        }
+      }
+      node.children = next;
+    };
+    walk(tree);
+  };
+}
+
 async function parseResponse(response) {
   const contentType = response.headers.get("content-type") || "";
   const data = contentType.includes("application/json") ? await response.json() : { detail: await response.text() };
@@ -270,24 +327,34 @@ export default function App() {
                 </div>
               </div>
             )}
-            {results.map((result) => (
-              <article className="search-result" key={`${result.document_id}-${result.chunk_id}`}>
-                <div className="search-result-meta">
-                  <strong>{result.document}</strong>
-                  <span>
-                    {result.page_end && result.page_end !== result.page
-                      ? `pages ${result.page}–${result.page_end}`
-                      : `page ${result.page}`}
-                  </span>
-                  <span>score {(result.rerank_score ?? result.score)?.toFixed(3)}</span>
-                </div>
-                <div className="search-result-text">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
-                    {result.text}
-                  </ReactMarkdown>
-                </div>
-              </article>
-            ))}
+            {results.map((result) => {
+              const highlighter = makeMatchHighlighter(result.matched);
+              return (
+                <article className="search-result" key={`${result.document_id}-${result.chunk_id}`}>
+                  <div className="search-result-meta">
+                    <strong>{result.document}</strong>
+                    <span>
+                      {result.page_end && result.page_end !== result.page
+                        ? `pages ${result.page}–${result.page_end}`
+                        : `page ${result.page}`}
+                    </span>
+                    <span>score {(result.rerank_score ?? result.score)?.toFixed(3)}</span>
+                  </div>
+                  {result.lead_in && (
+                    <p className="search-result-leadin">…{result.lead_in}</p>
+                  )}
+                  <div className="search-result-text">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      rehypePlugins={highlighter ? [highlighter] : []}
+                      skipHtml
+                    >
+                      {result.text}
+                    </ReactMarkdown>
+                  </div>
+                </article>
+              );
+            })}
             {searching && <div className="message assistant">Finding the most relevant passages…</div>}
           </div>
           <form className="question-box" onSubmit={searchLibrary}>

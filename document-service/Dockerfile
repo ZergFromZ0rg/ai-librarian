@@ -12,6 +12,7 @@ RUN python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
     && python -m pip install -r requirements.txt
 
 COPY *.py ./
+COPY fonts ./fonts
 
 RUN mkdir -p /app/data /models/huggingface
 
