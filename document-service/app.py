@@ -55,7 +55,7 @@ CHUNK_SOFT_MAX_TOKENS = int(os.environ.get("CHUNK_SOFT_MAX_TOKENS", "220"))
 CHUNK_HARD_MAX_TOKENS = int(os.environ.get("CHUNK_HARD_MAX_TOKENS", "240"))
 CHUNK_OVERLAP_TOKENS = int(os.environ.get("CHUNK_OVERLAP_TOKENS", "32"))
 DOC_ID_PATTERN = re.compile(r"^[a-f0-9]{12}$")
-PIPELINE_VERSION = 6
+PIPELINE_VERSION = 7
 
 for directory in (DOCUMENTS_DIR, METADATA_DIR, EXTRACTED_DIR, CHUNKS_DIR, JOBS_DIR, INGEST_ROOT):
     directory.mkdir(parents=True, exist_ok=True)

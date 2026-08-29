@@ -62,9 +62,13 @@ def test_collapses_runs_of_undecodable_glyphs_into_an_ellipsis():
         repair_extracted_text("z 2 z5 / 5! 2 ��� for z", {"blocks": []})
         == "z 2 z5 / 5! 2 ⋯ for z"
     )
-    # Space-separated run, but not across a line break, and lone marks are left alone.
+    # A run collapses to an ellipsis, even when space-separated, but never
+    # across a line break.
     assert _collapse_replacement_runs("a � � b") == "a ⋯ b"
-    assert _collapse_replacement_runs("a �\nb � c") == "a �\nb � c"
+    assert _collapse_replacement_runs("first line �\n� second line").startswith("first line �")
+    # A lone mark between words or numbers is a dash the font could not encode.
+    assert _collapse_replacement_runs("pages 132�151") == "pages 132–151"
+    assert _collapse_replacement_runs("the Euler�Mayer letters") == "the Euler–Mayer letters"
 
 
 def test_rewrites_superscript_and_subscript_tags():
@@ -79,6 +83,26 @@ def test_rewrites_superscript_and_subscript_tags():
     assert _rewrite_scripts("n<sup></sup>") == "n"
     # runs through the full repair pipeline
     assert repair_extracted_text("z<sup>3</sup> / 3!", {"blocks": []}) == "z³ / 3!"
+
+
+def test_repairs_dropped_dashes_in_ranges_and_names():
+    assert repair_extracted_text(
+        "Gazette, 8 (1915), 132�151, and 9 (1916), 303�305", {"blocks": []}
+    ) == "Gazette, 8 (1915), 132–151, and 9 (1916), 303–305"
+    assert repair_extracted_text(
+        "Leonhard Euler (1707 1783) was Swiss", {"blocks": []}
+    ) == "Leonhard Euler (1707–1783) was Swiss"
+
+
+def test_repairs_misplaced_cedilla_and_shifted_acute():
+    assert repair_extracted_text("the academician Franc¸ois Arago", {"blocks": []}) == (
+        "the academician François Arago"
+    )
+    assert repair_extracted_text("the Parisian Acadeḿie des Sciences", {"blocks": []}) == (
+        "the Parisian Académie des Sciences"
+    )
+    # Polish is left alone: acute stays on ć even though a vowel precedes it.
+    assert "być" in repair_extracted_text("the word być here", {"blocks": []})
 
 
 def test_garbled_page_detection_separates_ocr_mush_from_clean_prose():

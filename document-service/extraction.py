@@ -39,13 +39,23 @@ KNOWN_GLYPH_MAPS = {
 # a line break) into a single ellipsis so the passage stays readable and
 # searchable instead of carrying "�" noise into the index.
 REPLACEMENT_RUN_PATTERN = re.compile("�(?:[ \t]*�)+")
+# A lone replacement character between two words or numbers is almost always a
+# dash the font could not encode ("132�151", "Euler-Mayer (1751�1755)").
+LONE_REPLACEMENT_DASH = re.compile(r"(?<=[\w)])[ \t]*�[ \t]*(?=[\w(])")
+# A range of years whose dash was dropped entirely, leaving only a space —
+# common for birth–death dates in a history text ("(1707 1783)").
+YEAR_RANGE = re.compile(r"\((\d{3,4})\s+(\d{3,4})\)")
 # Unmapped glyphs in symbol fonts (radical strokes, brace pieces) often decode
 # to C0 control characters. They are always extraction noise, never content.
 CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def _collapse_replacement_runs(text: str) -> str:
-    return REPLACEMENT_RUN_PATTERN.sub("⋯", CONTROL_CHARACTERS.sub("", text))
+    text = CONTROL_CHARACTERS.sub("", text)
+    text = REPLACEMENT_RUN_PATTERN.sub("⋯", text)
+    text = LONE_REPLACEMENT_DASH.sub("–", text)
+    text = YEAR_RANGE.sub(r"(\1–\2)", text)
+    return text
 
 
 # pymupdf4llm emits <sup>/<sub> when the PDF marks a span as super/subscripted.
@@ -101,6 +111,14 @@ REVERSED_DIACRITICS = {
 }
 
 
+_CEDILLA_AFTER_LETTER = re.compile("([cCsStTgGkKlLnNrR])[¸̧ˋ]")
+# An acute that landed on a following consonant it can never sit on, one letter
+# past the vowel it belongs to ("Acadeḿie" -> "Académie"). Restricted
+# to m/l/r, where an acute is never legitimate, so Polish ć/ń etc. are
+# left alone. Matched in NFD form: the acute is combining U+0301.
+_ACUTE_ON_CONSONANT = re.compile("([aeiouAEIOU])([mlrMLR])́")
+
+
 def _visible_markdown(text: str) -> Tuple[str, List[int]]:
     """Return rendered text plus a map back to Markdown character offsets."""
     visible = []
@@ -152,6 +170,15 @@ def _repair_diacritics(text: str) -> str:
         return unicodedata.normalize("NFC", letter + REVERSED_DIACRITICS[accent])
 
     text = re.sub(f"({pattern})([A-Za-z])", replace, text)
+
+    text = _CEDILLA_AFTER_LETTER.sub(
+        lambda m: unicodedata.normalize("NFC", m.group(1) + "\u0327"), text
+    )
+
+    decomposed = unicodedata.normalize("NFD", text)
+    shifted = _ACUTE_ON_CONSONANT.sub("\\1\u0301\\2", decomposed)
+    if shifted != decomposed:
+        text = unicodedata.normalize("NFC", shifted)
 
     # A few title lines put an acute accent at the end of the next word even
     # though it visually belongs on the preceding final "e" (for example,
