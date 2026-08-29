@@ -32,6 +32,30 @@ _OCR_MUSH = "\n".join(
     ]
 )
 
+_CLEAN_PROSE = "\n".join(
+    [
+        "The history of mathematics begins with counting and measurement in the "
+        "ancient river valley civilizations of Egypt and Mesopotamia and beyond.",
+        "Greek geometers later organized these scattered practical results into "
+        "deductive systems built from explicit axioms, definitions, and theorems.",
+        "That axiomatic tradition, revived and widely extended over many centuries, "
+        "still shapes how working mathematicians present and justify new discoveries.",
+    ]
+)
+
+
+def make_pdf_pages(texts) -> bytes:
+    document = fitz.open()
+    for text in texts:
+        page = document.new_page()
+        y = 72
+        for line in text.split("\n"):
+            page.insert_text((72, y), line)
+            y += 14
+    content = document.tobytes()
+    document.close()
+    return content
+
 
 def wait_for_status(client: TestClient, doc_id: str, expected: str, timeout: float = 3) -> dict:
     deadline = time.time() + timeout
@@ -183,6 +207,21 @@ def test_pdf_with_a_corrupt_ocr_text_layer_is_rejected(service):
     )
     assert response.status_code == 422
     assert "corrupted" in response.json()["detail"]
+
+
+def test_document_with_a_few_corrupt_pages_indexes_the_rest_with_a_note(service):
+    _module, client, _indexed = service
+    pages = [_CLEAN_PROSE] * 10 + [_OCR_MUSH] * 2
+    upload = client.post(
+        "/documents",
+        files={"file": ("mixed.pdf", make_pdf_pages(pages), "application/pdf")},
+    )
+    assert upload.status_code == 201
+    doc_id = upload.json()["document_id"]
+
+    metadata = wait_for_status(client, doc_id, "indexed")
+    assert metadata["pages"] == 12  # the true page count, not the kept count
+    assert "2 of 12 pages were skipped" in (metadata["extraction_notes"] or "")
 
 
 def test_indexing_error_is_persisted_and_retryable(service, monkeypatch):

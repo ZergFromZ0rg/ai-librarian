@@ -198,6 +198,7 @@ npm run build
 
 - PDF is the only accepted document format.
 - Image-only scanned PDFs require OCR before upload; OCR remains disabled to avoid silently corrupting mathematical notation.
+- When a minority of pages carry a corrupt OCR text layer, those pages are skipped and the rest of the document is indexed; the document then shows an `extraction_notes` message saying how many pages were left out. A PDF whose text layer is *mostly* corrupt is still refused whole.
 - Layout extraction can preserve mathematical symbols only when the PDF exposes usable text or glyph information. Equations stored solely as images require a dedicated math-aware OCR system.
 - Token counts use a conservative local estimator so uploads do not have to load the embedding model. The lower 240-token hard budget leaves room for differences in the model's final WordPiece tokenization.
 - The document service intentionally runs as one process. The indexing backlog is durable (the worker pulls `queued` documents straight from SQLite, so a restart or a full-library re-index never loses or fails work), but the folder-import queue is still in-process. Moving to Redis or another external worker system would be the next step for horizontal scaling.

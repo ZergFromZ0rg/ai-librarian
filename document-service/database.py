@@ -33,6 +33,7 @@ COLUMNS = (
     "vector_dim",
     "pipeline_version",
     "index_schema_version",
+    "extraction_notes",
 )
 UPDATABLE_COLUMNS = frozenset(COLUMNS) - {"document_id"}
 
@@ -64,7 +65,8 @@ CREATE TABLE IF NOT EXISTS documents (
     embedding_model       TEXT,
     vector_dim            INTEGER NOT NULL DEFAULT 0,
     pipeline_version      INTEGER NOT NULL DEFAULT 0,
-    index_schema_version  INTEGER NOT NULL DEFAULT 0
+    index_schema_version  INTEGER NOT NULL DEFAULT 0,
+    extraction_notes      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_documents_content_sha256 ON documents (content_sha256);
 CREATE INDEX IF NOT EXISTS idx_documents_uploaded_at ON documents (uploaded_at DESC);
@@ -95,7 +97,19 @@ class MetadataStore:
         with self._lock:
             self._conn.execute("PRAGMA busy_timeout = 5000")
             self._conn.executescript(SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a database was first created."""
+        existing = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(documents)")
+        }
+        for column, ddl in (("extraction_notes", "TEXT"),):
+            if column not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE documents ADD COLUMN {column} {ddl}"
+                )
 
     def close(self) -> None:
         with self._lock:

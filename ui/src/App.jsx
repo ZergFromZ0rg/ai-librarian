@@ -350,6 +350,7 @@ export default function App() {
                   <span>{document.chunks} chunks</span>
                 </div>
                 {document.indexing_error && <div className="status-message error">{document.indexing_error}</div>}
+                {document.extraction_notes && <div className="status-message">{document.extraction_notes}</div>}
                 <div className="document-actions">
                   {document.indexing_status === "error" && (
                     <button className="secondary" type="button" onClick={() => retryDocument(document.document_id)}>Retry</button>

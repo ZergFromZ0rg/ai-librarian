@@ -205,10 +205,23 @@ def repair_extracted_text(markdown: str, layout: Dict, glyph_maps: Dict | None =
     combined_maps = {**(glyph_maps or {}), **KNOWN_GLYPH_MAPS}
     visible, markdown_offsets = _visible_markdown(markdown)
     raw, raw_metadata = _raw_characters(layout)
+    matcher = SequenceMatcher(None, raw, visible, autojunk=False)
     raw_to_visible = {}
-    for match in SequenceMatcher(None, raw, visible, autojunk=False).get_matching_blocks():
+    for match in matcher.get_matching_blocks():
         for delta in range(match.size):
             raw_to_visible[match.a + delta] = match.b + delta
+    # ``to_markdown`` emits U+FFFD for a glyph it cannot decode, which the diff
+    # above cannot line up with the original glyph character. Align an
+    # equal-length replaced region that is all replacement characters back onto
+    # the raw glyphs, so a glyph map can still recover them.
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if (
+            tag == "replace"
+            and i2 - i1 == j2 - j1
+            and all(visible[j] == "�" for j in range(j1, j2))
+        ):
+            for delta in range(i2 - i1):
+                raw_to_visible.setdefault(i1 + delta, j1 + delta)
 
     replacements = {}
     insertions = set()
@@ -248,6 +261,9 @@ def repair_extracted_text(markdown: str, layout: Dict, glyph_maps: Dict | None =
 _WORD_TOKEN = re.compile(r"[A-Za-z]{2,}")
 _HAS_VOWEL = re.compile(r"[aeiouy]")
 _TRIPLED_LETTER = re.compile(r"(.)\1\1")
+# Roman numerals legitimately carry "ii"/"iii" runs ("xiii", "xviii"); a table
+# of contents or an index is dense with them and must not read as OCR garbage.
+_ROMAN_NUMERAL = re.compile(r"^m{0,4}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$")
 
 
 def _page_text_is_garbled(text: str) -> Optional[bool]:
@@ -258,9 +274,13 @@ def _page_text_is_garbled(text: str) -> Optional[bool]:
     if len(tokens) < 40:
         return None
     count = len(tokens)
-    ii_runs = sum("ii" in token for token in tokens)
-    vowelless = sum(len(token) >= 4 and not _HAS_VOWEL.search(token) for token in tokens)
-    tripled = sum(bool(_TRIPLED_LETTER.search(token)) for token in tokens)
+    # Roman numerals count as prose for the denominator but are exempt from the
+    # fingerprints they would otherwise trip ("xiii" -> "ii" run and a tripled
+    # letter), so a table of contents or index does not read as OCR garbage.
+    prose = [token for token in tokens if not _ROMAN_NUMERAL.match(token)]
+    ii_runs = sum("ii" in token for token in prose)
+    vowelless = sum(len(token) >= 4 and not _HAS_VOWEL.search(token) for token in prose)
+    tripled = sum(bool(_TRIPLED_LETTER.search(token)) for token in prose)
     return (
         ii_runs / count > 0.012
         or vowelless / count > 0.03
@@ -268,28 +288,58 @@ def _page_text_is_garbled(text: str) -> Optional[bool]:
     )
 
 
-def assess_text_layer(pages: List[Dict]) -> Optional[str]:
-    """Return a rejection reason if the extracted text is largely OCR garbage.
+# A document with at least this fraction of judged pages tripping the
+# OCR-mangling fingerprints is treated as a failed scan and refused whole.
+# Below it, the garbled pages are dropped and the remainder is indexed.
+CATASTROPHIC_GARBLED_FRACTION = 0.35
+_MIN_JUDGED_PAGES = 5
 
-    Some PDFs are scans carrying a baked-in OCR layer too corrupt to index.
-    Re-running OCR is intentionally out of scope (see ``extract_pages``), so
-    such a document is refused at ingestion with an explanation.
+
+def garbled_page_indices(pages: List[Dict]) -> List[int]:
+    """0-based indices of pages whose text layer reads as OCR garbage.
+
+    Only pages with enough prose to judge and a positive verdict are returned;
+    equation-dense or sparse pages (verdict ``None``) are never listed.
+    """
+    return [
+        index
+        for index, page in enumerate(pages)
+        if _page_text_is_garbled(page.get("text", "")) is True
+    ]
+
+
+def assess_text_layer(pages: List[Dict]) -> Optional[str]:
+    """Return a rejection reason only when the text layer is *mostly* OCR garbage.
+
+    Some PDFs are scans carrying a baked-in OCR layer. When most judged pages
+    are corrupt the whole file is refused (re-running OCR is out of scope, see
+    ``extract_pages``). When only a minority are corrupt the caller drops those
+    pages and indexes the rest — see ``garbled_page_indices``.
     """
     verdicts = [
         verdict
         for page in pages
         if (verdict := _page_text_is_garbled(page.get("text", ""))) is not None
     ]
-    if len(verdicts) < 5:
+    if len(verdicts) < _MIN_JUDGED_PAGES:
         return None
     garbled_fraction = sum(verdicts) / len(verdicts)
-    if garbled_fraction >= 0.08:
+    if garbled_fraction >= CATASTROPHIC_GARBLED_FRACTION:
         return (
             "this PDF's text layer appears to be corrupted "
             f"({garbled_fraction:.0%} of pages are unreadable) — it is most likely a "
             "scan with a poor OCR layer; re-OCR the file and upload it again"
         )
     return None
+
+
+def describe_skipped_pages(count: int, total: int) -> str:
+    """The note stored on a document that indexed with some pages dropped."""
+    return (
+        f"{count} of {total} pages were skipped because their text layer is "
+        "corrupted (most likely a poor OCR scan of those pages); the rest of "
+        "the document was indexed normally."
+    )
 
 
 def extract_pages(pdf_path: str) -> List[Dict]:

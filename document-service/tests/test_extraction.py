@@ -3,6 +3,7 @@ from extraction import (
     _page_text_is_garbled,
     _rewrite_scripts,
     assess_text_layer,
+    garbled_page_indices,
     repair_extracted_text,
 )
 
@@ -54,6 +55,33 @@ def test_repairs_known_math_font_without_changing_regular_digits():
     }
 
     assert repair_extracted_text("v 1 f 5 e 12", layout) == "v + f = e 12"
+
+
+def test_recovers_a_glyph_that_to_markdown_replaced_with_fffd():
+    # PyMuPDF4LLM emits U+FFFD for a glyph it cannot decode; the raw layer still
+    # carries the real (mis-encoded) character and its font, so a glyph map can
+    # recover it once the diff is realigned across the replacement.
+    layout = {
+        "blocks": [
+            {
+                "type": 0,
+                "lines": [
+                    {
+                        "spans": [
+                            _span(
+                                "x2 \x04 q",
+                                "AmbigSym",
+                                [(0, 4), (4, 8), (8, 10), (10, 16), (16, 18), (18, 22)],
+                            )
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+
+    out = repair_extracted_text("x2 � q", layout, {"AmbigSym": {"\x04": "≡"}})
+    assert out == "x2 ≡ q"
 
 
 def test_collapses_runs_of_undecodable_glyphs_into_an_ellipsis():
@@ -111,15 +139,44 @@ def test_garbled_page_detection_separates_ocr_mush_from_clean_prose():
     assert _page_text_is_garbled("only a handful of words here") is None
 
 
+def test_garbled_page_detection_is_not_fooled_by_a_roman_numeral_index():
+    # A table of contents: every entry ends in a Roman-numeral page reference,
+    # several of which contain "ii" / "iii". This must not read as OCR garbage.
+    numerals = ["xii", "xiii", "xvii", "xviii", "viii", "iii"]
+    toc = " ".join(
+        f"Chapter {n} the subject of this particular section opens on page {numerals[n % len(numerals)]}"
+        for n in range(30)
+    )
+    assert _page_text_is_garbled(toc) is False
+
+
 def test_assess_text_layer_rejects_a_mostly_corrupt_document():
-    pages = [{"text": _CLEAN} for _ in range(9)] + [{"text": _GARBLED} for _ in range(3)]
+    pages = [{"text": _CLEAN} for _ in range(3)] + [{"text": _GARBLED} for _ in range(9)]
     reason = assess_text_layer(pages)
     assert reason and "corrupted" in reason
+
+
+def test_assess_text_layer_tolerates_a_minority_of_corrupt_pages():
+    # A quarter of the pages are garbage: below the catastrophic threshold, so
+    # the document is not refused — the caller drops those pages instead.
+    pages = [{"text": _CLEAN} for _ in range(9)] + [{"text": _GARBLED} for _ in range(3)]
+    assert assess_text_layer(pages) is None
+
+
+def test_garbled_page_indices_lists_only_the_corrupt_pages():
+    pages = [
+        {"text": _CLEAN},
+        {"text": _GARBLED},
+        {"text": "too little prose to judge"},
+        {"text": _GARBLED},
+    ]
+    assert garbled_page_indices(pages) == [1, 3]
 
 
 def test_assess_text_layer_accepts_a_clean_document_with_a_stray_bad_page():
     pages = [{"text": _CLEAN} for _ in range(20)] + [{"text": _GARBLED}]
     assert assess_text_layer(pages) is None
+    assert garbled_page_indices(pages) == [20]
 
 
 def test_assess_text_layer_abstains_without_enough_prose():

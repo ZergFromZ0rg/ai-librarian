@@ -64,6 +64,25 @@ _MIN_SAMPLES = 2
 _PAGE_SAMPLE_CAP = 60  # scan at most this many pages to identify a font
 
 
+def _winning_symbol(votes: Dict[str, int], decoded: str) -> Optional[str]:
+    """The symbol a set of shape-match votes agrees on, or ``None``.
+
+    Declines when nothing clears the minimum sample count, when the winner is
+    just the character PyMuPDF already decoded, or when a runner-up symbol is
+    within one vote — the last case catches glyphs drawn ambiguously and
+    re-subsetted 3B2/Advent fonts where one code covers several symbols across
+    the book, so no single mapping can be right.
+    """
+    if not votes:
+        return None
+    ranked = sorted(votes.values(), reverse=True)
+    winner, count = max(votes.items(), key=lambda item: item[1])
+    runner_up = ranked[1] if len(ranked) > 1 else 0
+    if count < _MIN_SAMPLES or count - runner_up < _MIN_SAMPLES or winner == decoded:
+        return None
+    return winner
+
+
 def _binarise(pixmap) -> np.ndarray:
     arr = np.frombuffer(pixmap.samples, dtype=np.uint8)
     arr = arr.reshape(pixmap.height, pixmap.width, pixmap.n)
@@ -198,10 +217,8 @@ def build_glyph_repairs(document) -> Dict[str, Dict[str, str]]:
             symbol = _classify_safe(document[page_index], bbox)
             if symbol:
                 votes[symbol] = votes.get(symbol, 0) + 1
-        if not votes:
-            continue
-        winner, count = max(votes.items(), key=lambda item: item[1])
-        if count >= _MIN_SAMPLES and winner != decoded:
+        winner = _winning_symbol(votes, decoded)
+        if winner is not None:
             repairs.setdefault(font_name, {})[decoded] = winner
 
     if repairs:

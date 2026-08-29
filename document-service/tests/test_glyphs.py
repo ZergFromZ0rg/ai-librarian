@@ -58,6 +58,21 @@ def test_classifier_rejects_noise_and_plain_letters():
     assert glyphs._classify(mask) is None
 
 
+def test_winning_symbol_declines_ambiguous_and_low_support_votes():
+    # Unanimous, well past the minimum -> accepted.
+    assert glyphs._winning_symbol({"−": 8}, "2") == "−"
+    # Clear plurality -> accepted.
+    assert glyphs._winning_symbol({"·": 5, "°": 1}, "\x03") == "·"
+    # Near-tie between two symbols -> declined (one glyph code, several meanings).
+    assert glyphs._winning_symbol({"·": 2, "°": 2}, "\x04") is None
+    assert glyphs._winning_symbol({"≡": 3, "·": 2}, "\x04") is None
+    # Too little support -> declined.
+    assert glyphs._winning_symbol({"×": 1}, "3") is None
+    assert glyphs._winning_symbol({}, "x") is None
+    # Winner only re-asserts what PyMuPDF already decoded -> nothing to fix.
+    assert glyphs._winning_symbol({"|": 4}, "|") is None
+
+
 def test_normalise_centres_and_scales_to_the_raster_box():
     mask = np.zeros((10, 4), dtype=bool)
     mask[2:8, 1:3] = True

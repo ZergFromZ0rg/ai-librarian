@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from database import MetadataStore
+from database import SCHEMA, MetadataStore
 
 
 def make_record(document_id="abc123abc123", **overrides):
@@ -94,6 +94,44 @@ def test_claim_for_indexing_takes_the_oldest_queued_document(store):
     # Nothing left queued; the two claimed rows are now 'indexing'.
     assert store.claim_for_indexing("2026-03-01T00:00:02Z") is None
     assert store.count_indexing_backlog() == 2
+
+
+def test_extraction_notes_round_trips(store):
+    store.create(make_record(extraction_notes="2 of 12 pages were skipped"))
+    assert store.get("abc123abc123")["extraction_notes"] == "2 of 12 pages were skipped"
+    updated = store.update(
+        "abc123abc123", {"extraction_notes": None, "updated_at": "later"}
+    )
+    assert updated["extraction_notes"] is None
+
+
+def test_migration_adds_extraction_notes_to_an_older_database(tmp_path):
+    import sqlite3
+
+    db_path = tmp_path / "older.db"
+    legacy = sqlite3.connect(db_path)
+    # The schema as it stood before the extraction_notes column was added.
+    legacy.executescript(
+        SCHEMA.replace("    extraction_notes      TEXT\n", "").replace(
+            "    index_schema_version  INTEGER NOT NULL DEFAULT 0,\n",
+            "    index_schema_version  INTEGER NOT NULL DEFAULT 0\n",
+        )
+    )
+    legacy.execute(
+        "INSERT INTO documents "
+        "(document_id, filename, stored_filename, content_sha256, uploaded_at, updated_at) "
+        "VALUES ('aaaaaaaaaaaa', 'x.pdf', 'aaaaaaaaaaaa.pdf', 'h', 't', 't')"
+    )
+    legacy.commit()
+    legacy.close()
+
+    store = MetadataStore(db_path)
+    try:
+        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(documents)")}
+        assert "extraction_notes" in columns
+        assert store.get("aaaaaaaaaaaa")["extraction_notes"] is None
+    finally:
+        store.close()
 
 
 def test_import_legacy_loads_json_once(tmp_path):

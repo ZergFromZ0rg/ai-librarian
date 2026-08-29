@@ -24,7 +24,12 @@ from pydantic import BaseModel, Field
 from chunking import build_semantic_groups, normalize_for_embedding, parse_typed_blocks
 from database import MetadataStore
 from embeddings import DEFAULT_MODEL as EMBEDDING_MODEL, embed_texts
-from extraction import assess_text_layer, extract_pages
+from extraction import (
+    assess_text_layer,
+    describe_skipped_pages,
+    extract_pages,
+    garbled_page_indices,
+)
 from reranker import model_info, rerank
 from vector_store import (
     INDEX_SCHEMA_VERSION,
@@ -58,7 +63,7 @@ CHUNK_SOFT_MAX_TOKENS = int(os.environ.get("CHUNK_SOFT_MAX_TOKENS", "220"))
 CHUNK_HARD_MAX_TOKENS = int(os.environ.get("CHUNK_HARD_MAX_TOKENS", "240"))
 CHUNK_OVERLAP_TOKENS = int(os.environ.get("CHUNK_OVERLAP_TOKENS", "32"))
 DOC_ID_PATTERN = re.compile(r"^[a-f0-9]{12}$")
-PIPELINE_VERSION = 7
+PIPELINE_VERSION = 8
 
 for directory in (DOCUMENTS_DIR, METADATA_DIR, EXTRACTED_DIR, CHUNKS_DIR, JOBS_DIR, INGEST_ROOT):
     directory.mkdir(parents=True, exist_ok=True)
@@ -335,13 +340,24 @@ def hash_file(path: Path) -> str:
 
 def build_document_artifacts(
     stored_path: Path, filename: str, doc_id: str
-) -> tuple[List[dict], List[dict], int]:
+) -> tuple[int, List[dict], int, Optional[str]]:
     pages = extract_pages(stored_path)
     if not any(page.get("text", "").strip() for page in pages):
         raise ValueError("the PDF contains no extractable text; scanned PDFs require OCR")
-    garbled_reason = assess_text_layer(pages)
-    if garbled_reason:
-        raise ValueError(garbled_reason)
+    fatal_reason = assess_text_layer(pages)
+    if fatal_reason:
+        raise ValueError(fatal_reason)
+
+    total_pages = len(pages)
+    garbled = set(garbled_page_indices(pages))
+    extraction_notes = None
+    if garbled:
+        # A minority of the pages are OCR garbage. Drop just those and index
+        # the rest rather than refusing the whole document.
+        pages = [page for index, page in enumerate(pages) if index not in garbled]
+        extraction_notes = describe_skipped_pages(len(garbled), total_pages)
+        logger.info("Skipped %d corrupt page(s) of %s", len(garbled), filename)
+
     blocks = parse_typed_blocks(pages)
     groups = build_semantic_groups(
         blocks,
@@ -390,7 +406,7 @@ def build_document_artifacts(
         },
     )
     atomic_write_json(CHUNKS_DIR / f"{doc_id}.json", chunks)
-    return pages, chunks, len(groups)
+    return total_pages, chunks, len(groups), extraction_notes
 
 
 def rebuild_document_artifacts(metadata: dict) -> dict:
@@ -398,25 +414,28 @@ def rebuild_document_artifacts(metadata: dict) -> dict:
     stored_path = DOCUMENTS_DIR / metadata["stored_filename"]
     if not stored_path.exists():
         raise FileNotFoundError("stored PDF is missing; upload the document again")
-    pages, chunks, group_count = build_document_artifacts(
+    page_count, chunks, group_count, extraction_notes = build_document_artifacts(
         stored_path, metadata["filename"], doc_id
     )
     return update_metadata(
         doc_id,
-        pages=len(pages),
+        pages=page_count,
         chunks=group_count,
         retrieval_units=len(chunks),
         pipeline_version=PIPELINE_VERSION,
         index_schema_version=0,
         indexing_status="queued",
         indexing_error=None,
+        extraction_notes=extraction_notes,
     )
 
 
 def create_document(stored_path: Path, filename: str, content_sha256: str) -> dict:
     doc_id = stored_path.stem
     try:
-        pages, chunks, group_count = build_document_artifacts(stored_path, filename, doc_id)
+        page_count, chunks, group_count, extraction_notes = build_document_artifacts(
+            stored_path, filename, doc_id
+        )
 
         now = utc_now()
         metadata = {
@@ -428,9 +447,10 @@ def create_document(stored_path: Path, filename: str, content_sha256: str) -> di
             "content_sha256": content_sha256,
             "uploaded_at": now,
             "updated_at": now,
-            "pages": len(pages),
+            "pages": page_count,
             "chunks": group_count,
             "retrieval_units": len(chunks),
+            "extraction_notes": extraction_notes,
             # "pending" until enqueue_index flips it to "queued": the index
             # worker only claims "queued" rows, so a folder-ingest job always
             # has its progress link registered before the worker can pick it up.
