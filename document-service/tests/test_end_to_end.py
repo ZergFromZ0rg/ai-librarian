@@ -2,6 +2,7 @@ import importlib
 import json
 import logging
 import math
+import os
 import sys
 import time
 
@@ -205,6 +206,51 @@ def test_search_is_logged_with_scored_hits(service):
     assert recent["entries"][0]["query"] == "absurd freedom"
 
 
+def test_reranker_score_gate_drops_low_scoring_hits(service, monkeypatch):
+    module, client, _indexed = service
+    upload = client.post(
+        "/documents",
+        files={
+            "file": (
+                "math.pdf",
+                make_pdf("A history of mathematics: numbers, geometry, algebra and proof."),
+                "application/pdf",
+            )
+        },
+    )
+    doc_id = upload.json()["document_id"]
+    wait_for_status(client, doc_id, "indexed")
+
+    # The reranker judges nothing in the library relevant to the query.
+    monkeypatch.setattr(module, "rerank", lambda query, passages: [-8.0 for _ in passages])
+
+    gated = client.post(
+        "/search",
+        json={"query": "characteristics of a gorilla", "rerank": True, "rerank_min_score": 0.0},
+    )
+    assert gated.status_code == 200
+    assert gated.json()["results"] == []
+
+    entry = json.loads((module.LOGS_DIR / "search.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert entry["rerank_min_score"] == 0.0
+    assert entry["rerank_dropped"] >= 1
+
+    # A permissive cutoff keeps the same hits.
+    kept = client.post(
+        "/search",
+        json={"query": "characteristics of a gorilla", "rerank": True, "rerank_min_score": -100},
+    )
+    assert len(kept.json()["results"]) >= 1
+
+    # A hit sitting exactly on the cutoff is kept (0.0 is a real score, not "unscored").
+    monkeypatch.setattr(module, "rerank", lambda query, passages: [0.0 for _ in passages])
+    boundary = client.post(
+        "/search",
+        json={"query": "characteristics of a gorilla", "rerank": True, "rerank_min_score": 0.0},
+    )
+    assert len(boundary.json()["results"]) >= 1
+
+
 def test_search_log_can_be_disabled(service, monkeypatch):
     module, client, _indexed = service
     monkeypatch.setattr(module, "SEARCH_LOG_ENABLED", False)
@@ -309,6 +355,30 @@ def test_folder_ingestion_indexes_each_file_and_reports_progress(service, tmp_pa
     assert job["state"] == "done"
     assert len(job["files"]) == 2
     assert {entry["status"] for entry in job["files"]} == {"indexed"}
+
+
+def test_offline_mode_enables_the_huggingface_offline_flags(service, monkeypatch):
+    module, _client, _indexed = service
+    monkeypatch.setenv("OFFLINE", "1")
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
+
+    module._apply_offline_env()
+
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
+    assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
+
+
+def test_warm_models_fetches_the_embedding_and_reranker_models(monkeypatch):
+    import warm_models
+
+    calls = []
+    monkeypatch.setattr(warm_models, "get_embedding_model", lambda: calls.append("embedding"))
+    monkeypatch.setattr(warm_models, "get_rerank_model", lambda: calls.append("reranker"))
+
+    warm_models.main()
+
+    assert calls == ["embedding", "reranker"]
 
 
 def test_api_token_gates_every_endpoint_except_health(service, monkeypatch):

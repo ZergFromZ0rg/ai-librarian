@@ -127,6 +127,7 @@ export default function App() {
   const [noticeError, setNoticeError] = useState(false);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
+  const [searched, setSearched] = useState(false);
   const [searching, setSearching] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [source, setSource] = useState(null);
@@ -272,10 +273,12 @@ export default function App() {
         body: JSON.stringify({ query: cleanQuery, top_k: 8, rerank: true, rerank_k: 20, max_text_chars: 20000 }),
       });
       setResults(result.results || []);
+      setSearched(true);
       setNotice(`Found ${result.results?.length || 0} relevant passages.`);
       setNoticeError(false);
     } catch (error) {
       setResults([]);
+      setSearched(true);
       setNotice(error.message);
       setNoticeError(true);
     } finally {
@@ -368,11 +371,20 @@ export default function App() {
             <p>Semantic search finds and reranks the most relevant source passages.</p>
           </div>
           <div className="messages" aria-live="polite">
-            {results.length === 0 && !searching && (
+            {results.length === 0 && !searching && !searched && (
               <div className="empty-state">
                 <div>
                   <strong>What are you looking for?</strong>
                   Add a document, wait for it to be indexed, then search across your collection.
+                </div>
+              </div>
+            )}
+            {results.length === 0 && !searching && searched && (
+              <div className="empty-state">
+                <div>
+                  <strong>No relevant passages found.</strong>
+                  Nothing in your library matched this closely enough. Try rephrasing, or add a
+                  document that covers the topic.
                 </div>
               </div>
             )}

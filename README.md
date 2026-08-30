@@ -54,6 +54,29 @@ docker compose up -d --build
 
 The first indexing request takes longer because the document service downloads its embedding model. The reranker is downloaded on the first reranked search. Model files are persisted under `data/models/`.
 
+| Role | Model | Download |
+| --- | --- | --- |
+| embeddings | `sentence-transformers/all-MiniLM-L6-v2` | ~90 MB |
+| reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` | ~90 MB |
+
+To fetch both up front instead of on the first request:
+
+```bash
+docker compose run --rm document-service python warm_models.py
+```
+
+### Offline / air-gapped
+
+Build with the models baked into the image, then set `OFFLINE=1` so the huggingface libraries never try to reach the network:
+
+```bash
+PREBAKE_MODELS=1 docker compose build document-service
+echo "OFFLINE=1" >> .env
+docker compose up -d
+```
+
+`PREBAKE_MODELS=1` adds roughly 400 MB to the image; on first start the entrypoint copies the baked models into an empty `data/models/`. Alternatively, run `warm_models.py` on a networked machine and copy `data/models/` to the air-gapped host.
+
 When upgrading from an older pipeline version, existing stored PDFs are automatically re-extracted and reindexed using the current structure-aware hybrid-search schema. The original PDFs remain unchanged. During this one-time migration, document badges move through `queued` and `indexing` again.
 
 Follow startup progress:
@@ -112,6 +135,7 @@ Absolute paths and paths outside `/library` are rejected. Folder imports scan PD
 | `MAX_UPLOAD_MB` | `100` | Per-file backend upload limit |
 | `EMBEDDING_BATCH_SIZE` | `32` | Chunks embedded in each indexing batch |
 | `RERANK_TIMEOUT` | `15` | Maximum reranker time in seconds |
+| `RERANK_MIN_SCORE` | `0.0` | Drop reranked hits below this cross-encoder score; `off` disables. Only applies to reranked searches |
 | `CHUNK_TARGET_TOKENS` | `180` | Preferred token budget for a searchable passage |
 | `CHUNK_SOFT_MAX_TOKENS` | `220` | Size allowed for an intact semantic group before child splitting |
 | `CHUNK_HARD_MAX_TOKENS` | `240` | Maximum estimated tokens in an embedding child |
@@ -203,13 +227,13 @@ Important endpoints:
 - `GET /documents/{id}` — inspect one document's state
 - `POST /documents/{id}/retry` — retry failed indexing
 - `DELETE /documents/{id}` — delete stored files and vectors
-- `POST /search` — semantic retrieval
+- `POST /search` — semantic retrieval (set `rerank: true` to reorder and relevance-gate; `rerank_min_score` overrides `RERANK_MIN_SCORE` per request)
 - `POST /admin/ingest-folder` — import the mounted library folder
 - `GET /admin/search-log` — recent queries with their returned pages and scores
 - `GET /health/live` — process liveness
 - `GET /health/ready` — Qdrant readiness, indexing backlog, and ingest queue depth
 
-Every search appends one JSON line to `data/app/logs/search.jsonl` (rotated, stays on the server): the query, the candidate budget, latency, and each returned hit's page and dense/rerank scores. It is meant for tuning retrieval quality — inspect it with `GET /admin/search-log` or read the file directly. Set `SEARCH_LOG=off` in `.env` to disable.
+Every search appends one JSON line to `data/app/logs/search.jsonl` (rotated, stays on the server): the query, the candidate budget, latency, the reranker cutoff and how many hits it dropped, and each returned hit's page and dense/rerank scores. It is meant for tuning retrieval quality — inspect it with `GET /admin/search-log` or read the file directly. Set `SEARCH_LOG=off` in `.env` to disable.
 
 ## Development and tests
 

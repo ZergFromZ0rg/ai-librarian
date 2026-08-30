@@ -69,6 +69,19 @@ def _configure_logging() -> None:
     service_logger.propagate = False
 
 
+def _apply_offline_env() -> None:
+    """``OFFLINE=1`` -> tell huggingface libraries never to reach the network.
+
+    With the models already cached (a prebaked image or a ``warm_models.py``
+    run), this skips the etag checks that would otherwise stall every model
+    load on an air-gapped host.
+    """
+    if os.environ.get("OFFLINE", "").strip().lower() in {"1", "true", "yes", "on"}:
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+
+_apply_offline_env()
 _configure_logging()
 logger = logging.getLogger("ai_librarian")
 
@@ -103,6 +116,25 @@ INGEST_QUEUE_SIZE = int(os.environ.get("INGEST_QUEUE_SIZE", "10"))
 INDEX_POLL_SECONDS = float(os.environ.get("INDEX_POLL_SECONDS", "30"))
 RERANK_MAX_WORKERS = int(os.environ.get("RERANK_MAX_WORKERS", "2"))
 RERANK_TIMEOUT = float(os.environ.get("RERANK_TIMEOUT", "10"))
+
+
+def _parse_min_score(raw: str):
+    """Reranker cutoff: a float, or None when disabled ('', 'off', 'none')."""
+    raw = (raw or "").strip()
+    if raw.lower() in {"", "off", "none", "disabled"}:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Ignoring unparseable RERANK_MIN_SCORE=%r; gate disabled", raw)
+        return None
+
+
+# Cross-encoder (ms-marco-MiniLM) emits raw logits: strongly relevant passages
+# score well above 0, unrelated ones go negative. Dropping hits below this cutoff
+# lets a query with no real answer in the library come back empty instead of
+# returning the least-bad noise. Only applies when reranking is on.
+RERANK_MIN_SCORE = _parse_min_score(os.environ.get("RERANK_MIN_SCORE", "0.0"))
 CHUNK_TARGET_TOKENS = int(os.environ.get("CHUNK_TARGET_TOKENS", "180"))
 CHUNK_SOFT_MAX_TOKENS = int(os.environ.get("CHUNK_SOFT_MAX_TOKENS", "220"))
 CHUNK_HARD_MAX_TOKENS = int(os.environ.get("CHUNK_HARD_MAX_TOKENS", "240"))
@@ -158,6 +190,8 @@ def record_search(
     hits: List[dict],
     candidate_count: int,
     latency_ms: float,
+    rerank_min_score: Optional[float] = None,
+    rerank_dropped: int = 0,
 ) -> None:
     """Append one search-log line. Never raises into the request path."""
     if not SEARCH_LOG_ENABLED:
@@ -177,6 +211,8 @@ def record_search(
             "top_k": request.top_k,
             "rerank": request.rerank,
             "rerank_k": request.rerank_k if request.rerank else None,
+            "rerank_min_score": rerank_min_score,
+            "rerank_dropped": rerank_dropped or None,
             "filters": filters or None,
             "candidate_count": candidate_count,
             "result_count": len(hits),
@@ -212,6 +248,9 @@ class SearchRequest(BaseModel):
     filename: Optional[str] = Field(default=None, max_length=255)
     rerank: bool = False
     rerank_k: int = Field(default=20, ge=1, le=50)
+    # Overrides RERANK_MIN_SCORE for this request. Only used when rerank=True.
+    # A hit is kept when its reranker score is >= this value.
+    rerank_min_score: Optional[float] = Field(default=None, ge=-100, le=100)
     max_text_chars: int = Field(default=20_000, ge=100, le=50_000)
 
 
@@ -900,7 +939,8 @@ async def retrieve(
     filename: Optional[str],
     rerank_enabled: bool,
     rerank_k: int,
-) -> tuple[List[dict], int]:
+    min_score: Optional[float] = None,
+) -> tuple[List[dict], int, int]:
     query_vector = await asyncio.to_thread(lambda: embed_texts([query])[0])
     filters = {
         key: value
@@ -919,9 +959,21 @@ async def retrieve(
         query,
     )
     hits = coalesce_group_hits(hits)
+    dropped = 0
     if rerank_enabled:
         hits = await run_reranker(query, hits[:rerank_k])
-    return hits[:top_k], candidate_count
+        # Apply the cutoff only when reranking actually produced scores; on a
+        # timeout or failure run_reranker returns hits unscored in vector order,
+        # and gating on a missing score would wrongly drop everything.
+        scored = any(hit.get("rerank_score") is not None for hit in hits)
+        if min_score is not None and scored:
+            kept = [
+                hit for hit in hits
+                if hit.get("rerank_score") is not None and hit["rerank_score"] >= min_score
+            ]
+            dropped = len(hits) - len(kept)
+            hits = kept
+    return hits[:top_k], candidate_count, dropped
 
 
 _TERMINAL_PUNCTUATION = tuple(".!?\"')”’»…")
@@ -1199,18 +1251,27 @@ async def delete_document(doc_id: str):
 @app.post("/search")
 async def search(request: SearchRequest):
     started = time.monotonic()
+    min_score = request.rerank_min_score if request.rerank_min_score is not None else RERANK_MIN_SCORE
     try:
-        hits, candidate_count = await retrieve(
+        hits, candidate_count, rerank_dropped = await retrieve(
             request.query,
             request.top_k,
             request.document_id,
             request.filename,
             request.rerank,
             request.rerank_k,
+            min_score,
         )
     except Exception as exc:
         raise _sanitized_http_error(503, "search failed", exc) from exc
-    record_search(request, hits, candidate_count, (time.monotonic() - started) * 1000)
+    record_search(
+        request,
+        hits,
+        candidate_count,
+        (time.monotonic() - started) * 1000,
+        rerank_min_score=min_score if request.rerank else None,
+        rerank_dropped=rerank_dropped,
+    )
     return {"query": request.query, "results": format_hits(hits, request.max_text_chars)}
 
 
@@ -1223,6 +1284,7 @@ async def search_get(
     max_text_chars: int = Query(20_000, ge=100, le=50_000),
     rerank_enabled: bool = Query(False, alias="rerank"),
     rerank_k: int = Query(20, ge=1, le=50),
+    rerank_min_score: Optional[float] = Query(default=None, ge=-100, le=100),
 ):
     request = SearchRequest(
         query=q,
@@ -1232,6 +1294,7 @@ async def search_get(
         max_text_chars=max_text_chars,
         rerank=rerank_enabled,
         rerank_k=rerank_k,
+        rerank_min_score=rerank_min_score,
     )
     return await search(request)
 
