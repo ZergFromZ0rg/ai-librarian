@@ -26,9 +26,18 @@ COPY *.py ./
 COPY fonts ./fonts
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
+# PREBAKE_MODELS=1 bakes the embedding and reranker models into the image at
+# /opt/models; the entrypoint seeds an empty models volume from there on first
+# start, so a fully air-gapped host can complete its first search.
+ARG PREBAKE_MODELS=0
+RUN if [ "$PREBAKE_MODELS" = "1" ]; then \
+        HF_HOME=/opt/models/huggingface python warm_models.py; \
+    fi
+
 RUN mkdir -p /app/data /models/huggingface \
     && chmod +x /usr/local/bin/docker-entrypoint.sh \
-    && chown -R app:app /app /models /home/app
+    && chown -R app:app /app /models /home/app \
+    && if [ -d /opt/models ]; then chown -R app:app /opt/models; fi
 
 ENV DATA_DIR=/app/data
 
