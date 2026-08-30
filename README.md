@@ -82,9 +82,19 @@ BIND_ADDRESS=0.0.0.0
 UI_PORT=3100
 ```
 
-Then open `http://SERVER_LAN_IP:3100`. If port 3100 is already occupied, choose another unused `UI_PORT`; the container still listens internally on port 80.
+Then open `http://SERVER_LAN_IP:3100`. If port 3100 is already occupied, choose another unused `UI_PORT`; the container still listens internally on port 8080.
 
-Restrict ports 3100 and 8000 with the server firewall. This application has no built-in authentication and should only be exposed on a trusted LAN, through Tailscale, or behind an authenticated TLS reverse proxy.
+Restrict ports 3100 and 8000 with the server firewall.
+
+### API token
+
+Set `APP_TOKEN` in `.env` to require `Authorization: Bearer <APP_TOKEN>` on every document-service endpoint except the health checks:
+
+```dotenv
+APP_TOKEN=$(openssl rand -hex 24)
+```
+
+The bundled UI keeps working — nginx forwards the token to the API. This protects **direct** API access (port 8000); a request that reaches the UI's nginx (port 3100) is still proxied through. Exposing the UI to an untrusted network therefore still needs Tailscale or an authenticated TLS reverse proxy in front. Unhandled errors now return a generic message plus an `X-Request-ID` that matches the full exception in the service logs.
 
 ## Adding documents from a server folder
 
@@ -108,7 +118,7 @@ Absolute paths and paths outside `/library` are rejected. Folder imports scan PD
 | `CHUNK_OVERLAP_TOKENS` | `32` | Context repeated between children of an oversized block |
 | `CORS_ORIGINS` | local development origins | Allowed origins for direct API development |
 
-If `MAX_UPLOAD_MB` is raised above 100, also update `client_max_body_size` in `ui/nginx.conf`.
+If `MAX_UPLOAD_MB` is raised above 100, also update `client_max_body_size` in `ui/nginx.conf.template`.
 
 ## Storage and backups
 
@@ -184,7 +194,7 @@ move back through `queued` and `indexing`.
 
 ## API
 
-Interactive API documentation is available at `http://127.0.0.1:8000/docs`.
+Interactive API documentation is available at `http://127.0.0.1:8000/docs` (also behind `APP_TOKEN` when set).
 
 Important endpoints:
 

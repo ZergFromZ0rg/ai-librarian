@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import contextvars
 import hashlib
 import json
 import logging
@@ -7,6 +8,7 @@ import logging.handlers
 import os
 import queue
 import re
+import secrets
 import shutil
 import threading
 import time
@@ -22,6 +24,7 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
+from starlette.datastructures import Headers, MutableHeaders
 
 from chunking import build_semantic_groups, normalize_for_embedding, parse_typed_blocks
 from database import MetadataStore
@@ -83,6 +86,13 @@ SEARCH_LOG_ENABLED = os.environ.get("SEARCH_LOG", "on").strip().lower() not in {
 }
 SEARCH_LOG_MAX_BYTES = int(os.environ.get("SEARCH_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
 SEARCH_LOG_BACKUPS = int(os.environ.get("SEARCH_LOG_BACKUPS", "3"))
+
+# When set, every endpoint except the health checks requires
+# ``Authorization: Bearer <APP_TOKEN>``. Empty (the default) leaves the API open,
+# which is the intended posture for a loopback / SSH-tunnel deployment.
+APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()
+_AUTH_EXEMPT_PATHS = {"/health", "/health/live", "/health/ready"}
+REQUEST_ID: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "100")) * 1024 * 1024
 EMBEDDING_BATCH_SIZE = int(os.environ.get("EMBEDDING_BATCH_SIZE", "32"))
@@ -765,12 +775,66 @@ async def lifespan(_app: FastAPI):
         stop_workers()
 
 
+def _request_authorized(scope) -> bool:
+    if not APP_TOKEN or scope["method"] == "OPTIONS":
+        return True
+    if scope["path"] in _AUTH_EXEMPT_PATHS:
+        return True
+    scheme, _, token = Headers(scope=scope).get("authorization", "").partition(" ")
+    return scheme.lower() == "bearer" and secrets.compare_digest(token, APP_TOKEN)
+
+
+class RequestGateMiddleware:
+    """Assign a request id (echoed as ``X-Request-ID``) and enforce ``APP_TOKEN``.
+
+    Pure ASGI so the id context var reliably reaches the endpoint. Sits inside
+    CORS, so preflight and CORS headers on a 401 are still handled.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        rid = uuid.uuid4().hex[:8]
+        token = REQUEST_ID.set(rid)
+
+        async def send_with_id(message):
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message)["X-Request-ID"] = rid
+            await send(message)
+
+        try:
+            if not _request_authorized(scope):
+                await JSONResponse(
+                    {"detail": "missing or invalid API token"}, status_code=401
+                )(scope, receive, send_with_id)
+                return
+            await self.app(scope, receive, send_with_id)
+        finally:
+            REQUEST_ID.reset(token)
+
+
+def _sanitized_http_error(
+    status: int, message: str, exc: BaseException, *, log_context: str = ""
+) -> HTTPException:
+    """Log the real exception; return a generic detail the client can quote."""
+    rid = REQUEST_ID.get()
+    logger.exception("%s%s [request %s]", message, f" ({log_context})" if log_context else "", rid)
+    return HTTPException(status_code=status, detail=f"{message} (request {rid})")
+
+
 app = FastAPI(
     title="AI Librarian",
     description="Local-first document ingestion and semantic search.",
     version="0.3.0",
     lifespan=lifespan,
 )
+
+# Added before CORS so CORS ends up the outermost middleware.
+app.add_middleware(RequestGateMiddleware)
 
 cors_value = os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
 cors_origins = [origin.strip() for origin in cors_value.split(",") if origin.strip()]
@@ -779,7 +843,7 @@ app.add_middleware(
     allow_origins=cors_origins or [],
     allow_credentials="*" not in cors_origins,
     allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
@@ -965,9 +1029,14 @@ async def upload_document(file: UploadFile = File(...)):
 
     try:
         metadata = await asyncio.to_thread(create_document, stored_path, Path(file.filename).name, digest.hexdigest())
+    except ValueError as exc:
+        # A deliberate, user-facing rejection from build_document_artifacts
+        # (no extractable text, corrupt OCR layer, no searchable chunks).
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
-        logger.exception("Document ingestion failed for %s", file.filename)
-        raise HTTPException(status_code=422, detail=f"document ingestion failed: {exc}") from exc
+        raise _sanitized_http_error(
+            422, "document ingestion failed", exc, log_context=file.filename
+        ) from exc
     enqueue_index(IndexTask(doc_id))
     return JSONResponse(metadata, status_code=201)
 
@@ -986,7 +1055,7 @@ async def get_chunks(doc_id: str):
     try:
         return await asyncio.to_thread(read_json, chunks_file)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"failed to read chunks: {exc}") from exc
+        raise _sanitized_http_error(500, "failed to read chunks", exc, log_context=doc_id) from exc
 
 
 def _stored_pdf_path(doc_id: str) -> Path:
@@ -1074,8 +1143,9 @@ async def get_document_page(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("Could not render page %s of %s", page, doc_id)
-        raise HTTPException(status_code=500, detail=f"could not render page: {exc}") from exc
+        raise _sanitized_http_error(
+            500, "could not render page", exc, log_context=f"page {page} of {doc_id}"
+        ) from exc
     return Response(
         content=image,
         media_type="image/png",
@@ -1091,8 +1161,12 @@ async def retry_document(doc_id: str):
     if metadata.get("pipeline_version") != PIPELINE_VERSION:
         try:
             metadata = await asyncio.to_thread(rebuild_document_artifacts, metadata)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:
-            raise HTTPException(status_code=422, detail=f"document rebuild failed: {exc}") from exc
+            raise _sanitized_http_error(
+                422, "document rebuild failed", exc, log_context=doc_id
+            ) from exc
     chunks_path = CHUNKS_DIR / f"{doc_id}.json"
     if not chunks_path.exists():
         raise HTTPException(status_code=409, detail="document chunks are missing; upload the document again")
@@ -1118,8 +1192,7 @@ async def delete_document(doc_id: str):
     try:
         await asyncio.to_thread(delete_all)
     except Exception as exc:
-        logger.exception("Could not delete document %s", doc_id)
-        raise HTTPException(status_code=503, detail=f"could not delete document: {exc}") from exc
+        raise _sanitized_http_error(503, "could not delete document", exc, log_context=doc_id) from exc
     return JSONResponse(status_code=200, content={"deleted": doc_id})
 
 
@@ -1136,8 +1209,7 @@ async def search(request: SearchRequest):
             request.rerank_k,
         )
     except Exception as exc:
-        logger.exception("Search failed")
-        raise HTTPException(status_code=503, detail=f"search failed: {exc}") from exc
+        raise _sanitized_http_error(503, "search failed", exc) from exc
     record_search(request, hits, candidate_count, (time.monotonic() - started) * 1000)
     return {"query": request.query, "results": format_hits(hits, request.max_text_chars)}
 

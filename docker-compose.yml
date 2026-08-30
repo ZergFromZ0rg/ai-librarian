@@ -37,6 +37,7 @@ services:
       INGEST_ROOT: /library
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: vault
+      APP_TOKEN: ${APP_TOKEN:-}
       ALLOW_INDEX_RESET: ${ALLOW_INDEX_RESET:-0}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
@@ -70,6 +71,11 @@ services:
     restart: unless-stopped
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${UI_PORT:-3100}:8080"
+    environment:
+      # "Bearer <token>" when APP_TOKEN is set, empty otherwise; nginx forwards
+      # it so the bundled UI keeps working when the API requires a token.
+      APP_TOKEN_HEADER: "${APP_TOKEN:+Bearer }${APP_TOKEN:-}"
+      NGINX_ENVSUBST_FILTER: "^APP_TOKEN_HEADER$$"
     depends_on:
       document-service:
         condition: service_healthy

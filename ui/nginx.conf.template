@@ -13,6 +13,9 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # Empty unless APP_TOKEN is set, in which case it is "Bearer <token>";
+        # an empty value means the header is not forwarded.
+        proxy_set_header Authorization "${APP_TOKEN_HEADER}";
         proxy_read_timeout 240s;
         proxy_send_timeout 240s;
     }

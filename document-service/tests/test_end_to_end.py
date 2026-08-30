@@ -311,6 +311,39 @@ def test_folder_ingestion_indexes_each_file_and_reports_progress(service, tmp_pa
     assert {entry["status"] for entry in job["files"]} == {"indexed"}
 
 
+def test_api_token_gates_every_endpoint_except_health(service, monkeypatch):
+    module, client, _indexed = service
+    monkeypatch.setattr(module, "APP_TOKEN", "s3cret")
+
+    assert client.get("/health/live").status_code == 200  # health stays open
+    assert client.get("/documents").status_code == 401
+    assert client.get("/documents", headers={"Authorization": "Bearer wrong"}).status_code == 401
+
+    ok = client.get("/documents", headers={"Authorization": "Bearer s3cret"})
+    assert ok.status_code == 200
+    assert ok.headers.get("X-Request-ID")
+
+    denied = client.get("/documents")
+    assert denied.json() == {"detail": "missing or invalid API token"}
+    assert denied.headers.get("X-Request-ID")
+
+
+def test_internal_errors_are_sanitized_and_carry_a_request_id(service):
+    module, client, _indexed = service
+    upload = client.post(
+        "/documents",
+        files={"file": ("x.pdf", make_pdf("Camus and the absurd."), "application/pdf")},
+    )
+    doc_id = upload.json()["document_id"]
+    (module.CHUNKS_DIR / f"{doc_id}.json").write_text("{ not valid json")
+
+    response = client.get(f"/documents/{doc_id}/chunks")
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert "json" not in detail.lower()  # the raw exception text is not exposed
+    assert detail == f"failed to read chunks (request {response.headers['X-Request-ID']})"
+
+
 def test_upload_rejects_non_pdf_and_empty_files(service):
     _module, client, _indexed = service
     non_pdf = client.post("/documents", files={"file": ("notes.txt", b"hello", "text/plain")})
