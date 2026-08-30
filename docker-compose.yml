@@ -37,6 +37,7 @@ services:
       INGEST_ROOT: /library
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: vault
+      ALLOW_INDEX_RESET: ${ALLOW_INDEX_RESET:-0}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
       EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
@@ -68,12 +69,12 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${UI_PORT:-3100}:80"
+      - "${BIND_ADDRESS:-127.0.0.1}:${UI_PORT:-3100}:8080"
     depends_on:
       document-service:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/healthz"]
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3

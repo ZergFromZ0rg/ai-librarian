@@ -1,6 +1,9 @@
 # Auto detect text files and perform LF normalization
 * text=auto
 
+# Shell scripts must stay LF so they run inside Linux containers
+*.sh text eol=lf
+
 # Fonts are binary — never apply line-ending normalization
 *.otf binary
 *.ttf binary

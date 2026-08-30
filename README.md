@@ -153,6 +153,35 @@ docker compose down
 
 Do not use `docker compose down --volumes` or delete `data/` unless you intend to remove the library's persistent state.
 
+Both application containers run as a non-root user. On Linux the document
+service takes ownership of `data/app` and `data/models` on first start (uid
+`10001`), so reading those paths from the host afterwards may need `sudo`; to
+run the container as your own user instead, add `user: "$(id -u):$(id -g)"` to
+the `document-service` service and make sure `data/` is owned by you.
+
+### Backup and restore
+
+Everything the library needs lives under `data/`:
+
+| Path | Contents | Rebuildable? |
+| --- | --- | --- |
+| `data/app/library.db` | document metadata and indexing state | no |
+| `data/app/documents/` | the uploaded PDFs (the only copy) | no |
+| `data/app/extracted/`, `data/app/chunks/` | extracted text and passages | yes, from the PDFs |
+| `data/app/jobs/`, `data/app/logs/` | folder-import state, search log | not needed |
+| `data/qdrant/` | the vector index | yes, by re-indexing |
+| `data/models/` | downloaded embedding and reranker models | yes, re-downloaded |
+
+**Minimum backup** — stop the stack, then copy `data/app/library.db` and
+`data/app/documents/`. On restore, put them back and `docker compose up -d`;
+the service re-extracts and re-indexes every PDF on first start.
+
+**Full backup** — also copy `data/qdrant/` to skip the re-index on restore.
+
+**Recover from a corrupt vector index** — delete `data/qdrant/` and restart.
+The service rebuilds every vector from the PDFs and `library.db`; documents
+move back through `queued` and `indexing`.
+
 ## API
 
 Interactive API documentation is available at `http://127.0.0.1:8000/docs`.

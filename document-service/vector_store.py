@@ -26,43 +26,66 @@ COLLECTION = os.environ.get("QDRANT_COLLECTION", "vault")
 DENSE_VECTOR = "semantic"
 SPARSE_VECTOR = "lexical"
 INDEX_SCHEMA_VERSION = 4
+ALLOW_INDEX_RESET = os.environ.get("ALLOW_INDEX_RESET", "").strip().lower() in {
+    "1", "true", "yes", "on"
+}
 
 logger = logging.getLogger("ai_librarian.vector_store")
 
 client = QdrantClient(url=QDRANT_URL, timeout=10, check_compatibility=False)
 
 
+def _create_collection(vector_size: int) -> None:
+    client.create_collection(
+        collection_name=COLLECTION,
+        vectors_config={DENSE_VECTOR: VectorParams(size=vector_size, distance=Distance.COSINE)},
+        sparse_vectors_config={SPARSE_VECTOR: SparseVectorParams()},
+    )
+
+
+def _point_count() -> int:
+    try:
+        return client.count(COLLECTION, exact=False).count
+    except Exception:
+        return -1
+
+
 def ensure_collection(vector_size: int):
     collections = [collection.name for collection in client.get_collections().collections]
     if COLLECTION not in collections:
-        client.create_collection(
-            collection_name=COLLECTION,
-            vectors_config={DENSE_VECTOR: VectorParams(size=vector_size, distance=Distance.COSINE)},
-            sparse_vectors_config={SPARSE_VECTOR: SparseVectorParams()},
-        )
+        _create_collection(vector_size)
         return
 
     info = client.get_collection(COLLECTION)
     vectors = info.config.params.vectors
     sparse_vectors = info.config.params.sparse_vectors or {}
-    compatible = (
-        isinstance(vectors, dict)
-        and DENSE_VECTOR in vectors
-        and vectors[DENSE_VECTOR].size == vector_size
-        and SPARSE_VECTOR in sparse_vectors
+    dense = vectors.get(DENSE_VECTOR) if isinstance(vectors, dict) else None
+    structural_ok = dense is not None and SPARSE_VECTOR in sparse_vectors
+    dimension_ok = dense is not None and dense.size == vector_size
+    if structural_ok and dimension_ok:
+        return
+
+    if structural_ok and not dimension_ok and not ALLOW_INDEX_RESET:
+        # The dense vector is the right shape of collection but the wrong size:
+        # the embedding model changed. That is almost always an accident, and
+        # discarding the index means re-embedding the whole library, so refuse.
+        raise RuntimeError(
+            f"Qdrant collection {COLLECTION!r} was built for {dense.size}-dimensional "
+            f"vectors but the embedding model now produces {vector_size}. Refusing to "
+            f"discard ~{_point_count()} indexed points. Set ALLOW_INDEX_RESET=1 to drop "
+            f"and rebuild the collection, or point QDRANT_COLLECTION at a new name."
+        )
+
+    # A structural mismatch (legacy dense-only collection, missing sparse index)
+    # or an operator-authorised dimension change: recreate.
+    logger.warning(
+        "Recreating Qdrant collection %s (held ~%d points) for index schema %s",
+        COLLECTION,
+        _point_count(),
+        INDEX_SCHEMA_VERSION,
     )
-    if not compatible:
-        logger.warning(
-            "Recreating derived Qdrant collection %s for hybrid index schema %s",
-            COLLECTION,
-            INDEX_SCHEMA_VERSION,
-        )
-        client.delete_collection(COLLECTION)
-        client.create_collection(
-            collection_name=COLLECTION,
-            vectors_config={DENSE_VECTOR: VectorParams(size=vector_size, distance=Distance.COSINE)},
-            sparse_vectors_config={SPARSE_VECTOR: SparseVectorParams()},
-        )
+    client.delete_collection(COLLECTION)
+    _create_collection(vector_size)
 
 
 def chunk_id_to_int(cid: str) -> int:
