@@ -7,8 +7,10 @@ Two subcommands:
                                             # search log with their current top
                                             # hits, as ready-to-edit judgment stubs
     python eval/harness.py score            # replay eval/queries.jsonl against
-                                            # /search and report recall@k / MRR /
-                                            # relevance-gate accuracy
+                                            # /search and report hit@k / recall@k
+                                            # / MRR / relevance-gate accuracy
+                                            # (--fusion / --dense-weight to A/B
+                                            # the dense+sparse merge)
 
 The eval set lives in ``eval/queries.jsonl`` -- one JSON object per line:
 
@@ -49,6 +51,10 @@ QUERIES_PATH = Path(__file__).with_name("queries.jsonl")
 # Ranks we report recall at. Top of this list is how many hits we ask for.
 CUTOFFS = [10, 5, 3, 1]
 
+# Per-request overrides set from the CLI (score --fusion / --dense-weight), so a
+# fusion method can be A/B'd against the eval set without redeploying the server.
+SEARCH_OVERRIDES: dict = {}
+
 
 def _request(method: str, path: str, body: Optional[dict] = None) -> dict:
     url = f"{BASE_URL}{path}"
@@ -74,7 +80,7 @@ def _request(method: str, path: str, body: Optional[dict] = None) -> dict:
 def search(query: str, top_k: int, rerank: bool) -> list[dict]:
     # No rerank_k: let the server's RERANK_CANDIDATES decide the pool, so the
     # harness measures whatever a plain UI search does.
-    payload = {"query": query, "top_k": top_k, "rerank": rerank}
+    payload = {"query": query, "top_k": top_k, "rerank": rerank, **SEARCH_OVERRIDES}
     return _request("POST", "/search", payload)["results"]
 
 
@@ -172,6 +178,8 @@ def score(cases: list[dict], rerank: bool) -> int:
         print(f"  {case_id.ljust(width)}   {note}")
 
     print("\n" + "-" * (width + 40))
+    if SEARCH_OVERRIDES:
+        print("  overrides: " + "  ".join(f"{k}={v}" for k, v in SEARCH_OVERRIDES.items()))
     if scored_cases:
         hit = "   ".join(f"hit@{k} {hit_totals[k] / scored_cases:.2f}" for k in sorted(CUTOFFS))
         rec = "   ".join(f"recall@{k} {recall_totals[k] / scored_cases:.2f}" for k in sorted(CUTOFFS))
@@ -274,6 +282,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     p_score = sub.add_parser("score", help="replay queries.jsonl and report metrics")
     p_score.add_argument("--no-rerank", action="store_true", help="test raw vector order")
     p_score.add_argument("--queries", type=Path, default=QUERIES_PATH)
+    p_score.add_argument("--fusion", choices=["rrf", "dbsf", "rsf"],
+                         help="override the server's dense/sparse fusion method")
+    p_score.add_argument("--dense-weight", type=float,
+                         help="rsf only: 0..1 weight on the semantic list")
 
     p_review = sub.add_parser("review", help="recent logged queries -> judgment stubs")
     p_review.add_argument("-n", "--limit", type=int, default=20)
@@ -286,6 +298,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
     rerank = not args.no_rerank
     BASE_URL = args.url.rstrip("/")
+    if getattr(args, "fusion", None):
+        SEARCH_OVERRIDES["fusion"] = args.fusion
+    if getattr(args, "dense_weight", None) is not None:
+        SEARCH_OVERRIDES["dense_weight"] = args.dense_weight
 
     if args.command == "score":
         return score(load_cases(args.queries), rerank)

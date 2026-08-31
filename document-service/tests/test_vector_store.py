@@ -59,6 +59,41 @@ def test_vector_upsert_filter_search_and_delete(monkeypatch):
     assert vector_store.healthcheck() is True
 
 
+def test_relative_score_fusion_weight_shifts_between_the_two_searches(monkeypatch):
+    monkeypatch.setattr(vector_store, "client", QdrantClient(":memory:"))
+    monkeypatch.setattr(vector_store, "COLLECTION", "rsf-library")
+    vector_store.upsert_chunks(
+        [
+            {
+                "chunk_id": "semantic-hit",
+                "document_id": "d1",
+                "filename": "f.pdf",
+                "page": 1,
+                "chunk_index": 0,
+                "text": "off-topic words",
+                "embedding_text": "off-topic words",
+                "embedding": [0.0, 1.0, 0.0],
+            },
+            {
+                "chunk_id": "lexical-hit",
+                "document_id": "d2",
+                "filename": "g.pdf",
+                "page": 1,
+                "chunk_index": 0,
+                "text": "Absurd freedom and revolt",
+                "embedding_text": "Absurd freedom and revolt",
+                "embedding": [1.0, 0.0, 0.0],
+            },
+        ]
+    )
+    # Dense query points at semantic-hit; the words point at lexical-hit.
+    kw = dict(top_k=2, query_text="Absurd freedom", fusion="rsf")
+    dense_led = vector_store.search_vectors([0.0, 1.0, 0.0], dense_weight=1.0, **kw)
+    lexical_led = vector_store.search_vectors([0.0, 1.0, 0.0], dense_weight=0.0, **kw)
+    assert dense_led[0]["payload"]["chunk_id"] == "semantic-hit"
+    assert lexical_led[0]["payload"]["chunk_id"] == "lexical-hit"
+
+
 def test_legacy_dense_collection_is_recreated_for_hybrid_schema(monkeypatch):
     local_client = QdrantClient(":memory:")
     monkeypatch.setattr(vector_store, "client", local_client)

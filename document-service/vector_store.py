@@ -30,6 +30,17 @@ ALLOW_INDEX_RESET = os.environ.get("ALLOW_INDEX_RESET", "").strip().lower() in {
     "1", "true", "yes", "on"
 }
 
+# How the dense (semantic) and sparse (lexical) result lists are merged:
+#   rrf  - reciprocal rank fusion: merge by rank position, ignore scores. Robust.
+#   dbsf - distribution-based score fusion: Qdrant normalises each score list by
+#          its mean/stdev, then sums. Uses score magnitude.
+#   rsf  - relative score fusion (client-side): min-max each list to [0, 1] and
+#          take FUSION_DENSE_WEIGHT * dense + (1 - weight) * sparse.
+# A request may override both per search; this is the default.
+FUSION_METHOD = os.environ.get("FUSION_METHOD", "rrf").strip().lower()
+FUSION_DENSE_WEIGHT = float(os.environ.get("FUSION_DENSE_WEIGHT", "0.5"))
+_NATIVE_FUSION = {"rrf": Fusion.RRF, "dbsf": Fusion.DBSF}
+
 logger = logging.getLogger("ai_librarian.vector_store")
 
 client = QdrantClient(url=QDRANT_URL, timeout=10, check_compatibility=False)
@@ -140,18 +151,53 @@ def upsert_chunks(chunks: List[dict], batch_size: int = 64):
         client.upsert(collection_name=COLLECTION, points=points, wait=True)
 
 
+def _min_max(points):
+    """Map point id -> (point, score rescaled to [0, 1] across this one list).
+
+    When every score is equal (including a single hit) they are all equally the
+    best that list has to offer, so they normalise to 1.0 rather than 0.0.
+    """
+    if not points:
+        return {}
+    scores = [p.score for p in points]
+    low, span = min(scores), max(scores) - min(scores)
+    if span <= 0:
+        return {p.id: (p, 1.0) for p in points}
+    return {p.id: (p, (p.score - low) / span) for p in points}
+
+
+def _relative_score_fusion(dense_points, sparse_points, dense_weight: float):
+    dense = _min_max(dense_points)
+    sparse = _min_max(sparse_points)
+    fused = []
+    for pid in set(dense) | set(sparse):
+        point = (dense.get(pid) or sparse.get(pid))[0]
+        score = dense_weight * (dense[pid][1] if pid in dense else 0.0) + (
+            1.0 - dense_weight
+        ) * (sparse[pid][1] if pid in sparse else 0.0)
+        fused.append((score, point))
+    fused.sort(key=lambda item: item[0], reverse=True)
+    return [{"id": p.id, "score": score, "payload": p.payload} for score, p in fused]
+
+
 def search_vectors(
     vector: List[float],
     top_k: int = 5,
     filters: Optional[Dict] = None,
     query_text: Optional[str] = None,
+    fusion: Optional[str] = None,
+    dense_weight: Optional[float] = None,
 ):
     """Return fused semantic and exact-symbol matches.
 
-    `filters` can be a dict like {"document_id": "<id>", "filename": "name.pdf"}
+    `filters` can be a dict like {"document_id": "<id>", "filename": "name.pdf"}.
+    `fusion` / `dense_weight` override FUSION_METHOD / FUSION_DENSE_WEIGHT.
     """
     if not client.collection_exists(COLLECTION):
         return []
+
+    method = (fusion or FUSION_METHOD).strip().lower()
+    weight = FUSION_DENSE_WEIGHT if dense_weight is None else dense_weight
 
     query_filter = None
     if filters:
@@ -166,6 +212,16 @@ def search_vectors(
     sparse_indices, sparse_values = sparse_vector(query_text or "")
     if sparse_indices:
         prefetch_limit = max(20, top_k * 4)
+        sparse_query = SparseVector(indices=sparse_indices, values=sparse_values)
+        if method == "rsf":
+            common = dict(query_filter=query_filter, limit=prefetch_limit, with_payload=True)
+            dense_points = client.query_points(
+                COLLECTION, query=vector, using=DENSE_VECTOR, **common
+            ).points
+            sparse_points = client.query_points(
+                COLLECTION, query=sparse_query, using=SPARSE_VECTOR, **common
+            ).points
+            return _relative_score_fusion(dense_points, sparse_points, weight)[:top_k]
         results = client.query_points(
             collection_name=COLLECTION,
             prefetch=[
@@ -176,13 +232,13 @@ def search_vectors(
                     limit=prefetch_limit,
                 ),
                 Prefetch(
-                    query=SparseVector(indices=sparse_indices, values=sparse_values),
+                    query=sparse_query,
                     using=SPARSE_VECTOR,
                     filter=query_filter,
                     limit=prefetch_limit,
                 ),
             ],
-            query=FusionQuery(fusion=Fusion.RRF),
+            query=FusionQuery(fusion=_NATIVE_FUSION.get(method, Fusion.RRF)),
             limit=top_k,
             with_payload=True,
             query_filter=query_filter,
@@ -196,10 +252,7 @@ def search_vectors(
             with_payload=True,
             query_filter=query_filter,
         ).points
-    out = []
-    for r in results:
-        out.append({"id": r.id, "score": r.score, "payload": r.payload})
-    return out
+    return [{"id": r.id, "score": r.score, "payload": r.payload} for r in results]
 
 
 def delete_document(document_id: str) -> None:

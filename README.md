@@ -140,6 +140,8 @@ Absolute paths and paths outside `/library` are rejected. Folder imports scan PD
 | `EMBEDDING_QUERY_PREFIX` | `query: ` | Role label prepended to search strings before embedding |
 | `EMBEDDING_PASSAGE_PREFIX` | `passage: ` | Role label prepended to stored passages before embedding |
 | `EMBEDDING_DIMS` | `0` | Matryoshka models only: keep the first N dimensions (0 = native width) |
+| `FUSION_METHOD` | `rrf` | How the semantic and lexical lists merge: `rrf` (rank only), `dbsf` (score, Qdrant-normalised), `rsf` (min-max + weight). Query-time only |
+| `FUSION_DENSE_WEIGHT` | `0.5` | `rsf` only: 0..1 weight on the semantic list (lexical gets the rest) |
 | `RERANK_TIMEOUT` | `15` | Maximum reranker time in seconds |
 | `RERANK_CANDIDATES` | `60` | Fused candidates the cross-encoder scores per query; higher lifts recall for ~linearly more latency |
 | `RERANK_MIN_SCORE` | `0.0` | Drop reranked hits below this cross-encoder score; `off` disables. Only applies to reranked searches |
@@ -234,7 +236,7 @@ Important endpoints:
 - `GET /documents/{id}` — inspect one document's state
 - `POST /documents/{id}/retry` — retry failed indexing
 - `DELETE /documents/{id}` — delete stored files and vectors
-- `POST /search` — semantic retrieval (set `rerank: true` to reorder and relevance-gate; `rerank_min_score` overrides `RERANK_MIN_SCORE` per request)
+- `POST /search` — semantic retrieval (set `rerank: true` to reorder and relevance-gate; `rerank_min_score`, `fusion`, and `dense_weight` override the server defaults per request)
 - `POST /admin/ingest-folder` — import the mounted library folder
 - `GET /admin/search-log` — recent queries with their returned pages and scores
 - `GET /health/live` — process liveness

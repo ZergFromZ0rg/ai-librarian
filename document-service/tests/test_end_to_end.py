@@ -122,7 +122,7 @@ def service(tmp_path, monkeypatch):
         ]:
             del indexed[chunk_id]
 
-    def fake_search(vector, top_k=5, filters=None, query_text=None):
+    def fake_search(vector, top_k=5, filters=None, query_text=None, **_kwargs):
         hits = []
         vector_norm = math.sqrt(sum(value * value for value in vector)) or 1
         for chunk_id, item in indexed.items():

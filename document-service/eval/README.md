@@ -100,6 +100,17 @@ Exits non-zero if an `expect_empty` query leaks results, or if not one judged
 query found an answer in the top 10 — so it can gate a release. `--no-rerank`
 scores raw vector order for comparison.
 
+### Comparing dense/sparse fusion
+
+`--fusion {rrf,dbsf,rsf}` and `--dense-weight 0..1` are passed through on every
+search, so a fusion method can be A/B'd against the eval set without touching the
+server:
+
+```bash
+python eval/harness.py --url … score                          # server default
+python eval/harness.py --url … score --fusion rsf --dense-weight 0.7
+```
+
 ## Pointing it at the service
 
 The harness talks to the **API**. Two ways to reach it:

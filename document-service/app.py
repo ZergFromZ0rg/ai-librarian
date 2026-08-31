@@ -38,6 +38,7 @@ from extraction import (
 )
 from reranker import model_info, rerank
 from vector_store import (
+    FUSION_METHOD,
     INDEX_SCHEMA_VERSION,
     delete_document as delete_document_vectors,
     healthcheck as vector_healthcheck,
@@ -219,6 +220,8 @@ def record_search(
             "rerank_k": request.rerank_k if request.rerank else None,
             "rerank_min_score": rerank_min_score,
             "rerank_dropped": rerank_dropped or None,
+            "fusion": request.fusion or FUSION_METHOD,
+            "dense_weight": request.dense_weight,
             "filters": filters or None,
             "candidate_count": candidate_count,
             "result_count": len(hits),
@@ -260,6 +263,10 @@ class SearchRequest(BaseModel):
     # Overrides RERANK_MIN_SCORE for this request. Only used when rerank=True.
     # A hit is kept when its reranker score is >= this value.
     rerank_min_score: Optional[float] = Field(default=None, ge=-100, le=100)
+    # Override how the dense and sparse lists are merged (FUSION_METHOD) and, for
+    # "rsf", how much weight the semantic list gets (FUSION_DENSE_WEIGHT).
+    fusion: Optional[str] = Field(default=None, pattern=r"^(rrf|dbsf|rsf)$")
+    dense_weight: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     max_text_chars: int = Field(default=20_000, ge=100, le=50_000)
 
 
@@ -964,6 +971,8 @@ async def retrieve(
     rerank_enabled: bool,
     rerank_k: int,
     min_score: Optional[float] = None,
+    fusion: Optional[str] = None,
+    dense_weight: Optional[float] = None,
 ) -> tuple[List[dict], int, int]:
     query_vector = await asyncio.to_thread(lambda: embed_texts([query], kind="query")[0])
     filters = {
@@ -982,6 +991,8 @@ async def retrieve(
         candidate_count,
         filters or None,
         query,
+        fusion=fusion,
+        dense_weight=dense_weight,
     )
     hits = coalesce_group_hits(hits)
     dropped = 0
@@ -1052,6 +1063,7 @@ async def config():
         "embedding_model": EMBEDDING_MODEL,
         "pipeline_version": PIPELINE_VERSION,
         "index_schema_version": INDEX_SCHEMA_VERSION,
+        "fusion": FUSION_METHOD,
         "chunking": {
             "target_tokens": CHUNK_TARGET_TOKENS,
             "soft_max_tokens": CHUNK_SOFT_MAX_TOKENS,
@@ -1286,6 +1298,8 @@ async def search(request: SearchRequest):
             request.rerank,
             request.rerank_k,
             min_score,
+            fusion=request.fusion,
+            dense_weight=request.dense_weight,
         )
     except Exception as exc:
         raise _sanitized_http_error(503, "search failed", exc) from exc
@@ -1310,6 +1324,8 @@ async def search_get(
     rerank_enabled: bool = Query(False, alias="rerank"),
     rerank_k: int = Query(20, ge=1, le=200),
     rerank_min_score: Optional[float] = Query(default=None, ge=-100, le=100),
+    fusion: Optional[str] = Query(default=None, pattern=r"^(rrf|dbsf|rsf)$"),
+    dense_weight: Optional[float] = Query(default=None, ge=0.0, le=1.0),
 ):
     request = SearchRequest(
         query=q,
@@ -1320,6 +1336,8 @@ async def search_get(
         rerank=rerank_enabled,
         rerank_k=rerank_k,
         rerank_min_score=rerank_min_score,
+        fusion=fusion,
+        dense_weight=dense_weight,
     )
     return await search(request)
 
