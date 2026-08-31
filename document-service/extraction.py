@@ -342,6 +342,100 @@ def describe_skipped_pages(count: int, total: int) -> str:
     )
 
 
+# --- Front/back-matter pages --------------------------------------------------
+# A table of contents, a back-of-book index, and a bibliography are all dense
+# with on-topic keywords but carry no prose worth retrieving. Left in the index
+# they outrank real explanations for broad queries ("what is a wormhole" pulling
+# up the contents page). Detect them by shape and drop them before chunking.
+
+_BOILERPLATE_HEADING = re.compile(
+    r"^\s{0,3}#{0,4}\s*\**\s*(?:"
+    r"(?:table\s+of\s+)?contents"
+    r"|(?:subject\s+|name\s+|author\s+)?index"
+    r"|(?:select(?:ed)?\s+)?(?:bibliography|references|works\s+cited"
+    r"|related\s+reading|further\s+reading|literature\s+cited)"
+    r"|list\s+of\s+(?:figures|tables|illustrations|plates|maps)"
+    r")\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+# Three-plus (optionally spaced) dots running into a page number: "Gateways .... 89".
+_DOT_LEADER = re.compile(r"(?:\.\s?){3,}\s*\d")
+_BARE_NUMBER = re.compile(r"\d{1,4}[.,;:)]?")
+_PAGE_RANGE = re.compile(r"\b\d{1,4}\s*[–—-]\s*\d{1,4}\b")
+# "term, 12, 45" — a comma directly followed by a page number. Indexes are full
+# of these even when the page's line breaks were flattened into one long run.
+_COMMA_NUMBER = re.compile(r",\s*\d{1,4}")
+# A line ending in a page reference: some text, then a number (optionally a range).
+_TRAILING_PAGE_REF = re.compile(r"\D\s\d{1,4}(?:[–—-]\d{1,4})?\s*$")
+# An index line: a term, then a comma-separated list of page numbers/ranges.
+_INDEX_ENTRY = re.compile(
+    r"[A-Za-z].*?,\s*\d{1,4}(?:[–—-]\d{1,4})?"
+    r"(?:\s*,\s*\d{1,4}(?:[–—-]\d{1,4})?)*\.?\s*$"
+)
+_CITATION_YEAR = re.compile(r"\((?:1[6-9]\d\d|20\d\d)[a-z]?\)")
+_MIN_BOILERPLATE_LINES = 8
+
+
+def _page_is_boilerplate(text: str) -> bool:
+    tokens = text.split()
+    if len(tokens) < 30:
+        return False
+
+    numeric = sum(1 for token in tokens if _BARE_NUMBER.fullmatch(token))
+    page_ranges = len(_PAGE_RANGE.findall(text))
+    comma_numbers = len(_COMMA_NUMBER.findall(text))
+    # Tokens that are a bare page number or part of a page range: contents and
+    # index pages run 30%+ page references, prose almost never breaks 15%.
+    numberish_ratio = (numeric + 2 * page_ranges) / len(tokens)
+    dot_leaders = len(_DOT_LEADER.findall(text))
+    citations = len(_CITATION_YEAR.findall(text))
+    has_heading = bool(_BOILERPLATE_HEADING.search(text))
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) >= _MIN_BOILERPLATE_LINES:
+        trailing = sum(bool(_TRAILING_PAGE_REF.search(line)) for line in lines) / len(lines)
+        index_entry = sum(bool(_INDEX_ENTRY.match(line)) for line in lines) / len(lines)
+    else:
+        trailing = index_entry = 0.0
+
+    # Any one of these shapes is decisive on its own.
+    if numberish_ratio > 0.30 and (numeric + page_ranges) >= 12:
+        return True
+    if dot_leaders >= 3:
+        return True
+    if comma_numbers >= 10 and page_ranges >= 4:
+        return True
+    if trailing > 0.55 or index_entry > 0.45:
+        return True
+    if citations >= 8 and citations / max(len(lines), 1) > 0.4:
+        return True
+    # A front/back-matter heading plus a milder-but-present list shape.
+    if has_heading and (
+        numberish_ratio > 0.15
+        or dot_leaders >= 1
+        or page_ranges >= 4
+        or comma_numbers >= 5
+        or trailing > 0.3
+        or index_entry > 0.25
+        or citations >= 3
+    ):
+        return True
+    return False
+
+
+def boilerplate_page_indices(pages: List[Dict]) -> List[int]:
+    """0-based indices of front/back-matter pages (contents, index, bibliography).
+
+    These pages are keyword-dense but hold no retrievable prose; indexing them
+    lets them outrank real answers for broad queries.
+    """
+    return [
+        index
+        for index, page in enumerate(pages)
+        if _page_is_boilerplate(page.get("text", ""))
+    ]
+
+
 def extract_pages(pdf_path: str) -> List[Dict]:
     """Extract layout-aware Markdown per page from a text-based PDF.
 

@@ -31,6 +31,7 @@ from database import MetadataStore
 from embeddings import DEFAULT_MODEL as EMBEDDING_MODEL, embed_texts
 from extraction import (
     assess_text_layer,
+    boilerplate_page_indices,
     describe_skipped_pages,
     extract_pages,
     garbled_page_indices,
@@ -116,6 +117,11 @@ INGEST_QUEUE_SIZE = int(os.environ.get("INGEST_QUEUE_SIZE", "10"))
 INDEX_POLL_SECONDS = float(os.environ.get("INDEX_POLL_SECONDS", "30"))
 RERANK_MAX_WORKERS = int(os.environ.get("RERANK_MAX_WORKERS", "2"))
 RERANK_TIMEOUT = float(os.environ.get("RERANK_TIMEOUT", "10"))
+# How many fused candidates the cross-encoder actually scores. Dense+sparse
+# fusion is only a coarse filter; the reranker is what picks the winning
+# passage, so it needs a wide enough pool. `rerank_k` from the request acts as
+# a floor on top of this. ~60 keeps latency near 1s on a CPU-only host.
+RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "60"))
 
 
 def _parse_min_score(raw: str):
@@ -140,7 +146,7 @@ CHUNK_SOFT_MAX_TOKENS = int(os.environ.get("CHUNK_SOFT_MAX_TOKENS", "220"))
 CHUNK_HARD_MAX_TOKENS = int(os.environ.get("CHUNK_HARD_MAX_TOKENS", "240"))
 CHUNK_OVERLAP_TOKENS = int(os.environ.get("CHUNK_OVERLAP_TOKENS", "32"))
 DOC_ID_PATTERN = re.compile(r"^[a-f0-9]{12}$")
-PIPELINE_VERSION = 8
+PIPELINE_VERSION = 9
 
 for directory in (
     DOCUMENTS_DIR, METADATA_DIR, EXTRACTED_DIR, CHUNKS_DIR, JOBS_DIR, LOGS_DIR, INGEST_ROOT
@@ -247,7 +253,10 @@ class SearchRequest(BaseModel):
     document_id: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{12}$")
     filename: Optional[str] = Field(default=None, max_length=255)
     rerank: bool = False
-    rerank_k: int = Field(default=20, ge=1, le=50)
+    # A floor on how many fused candidates the cross-encoder scores; the server's
+    # RERANK_CANDIDATES applies on top of it. Left at the default, the pool is
+    # RERANK_CANDIDATES.
+    rerank_k: int = Field(default=20, ge=1, le=200)
     # Overrides RERANK_MIN_SCORE for this request. Only used when rerank=True.
     # A hit is kept when its reranker score is >= this value.
     rerank_min_score: Optional[float] = Field(default=None, ge=-100, le=100)
@@ -527,6 +536,21 @@ def build_document_artifacts(
         pages = [page for index, page in enumerate(pages) if index not in garbled]
         extraction_notes = describe_skipped_pages(len(garbled), total_pages)
         logger.info("Skipped %d corrupt page(s) of %s", len(garbled), filename)
+
+    # Contents / index / bibliography pages: keyword-dense, no retrievable prose.
+    boilerplate = set(boilerplate_page_indices(pages))
+    if boilerplate and len(boilerplate) <= len(pages) * 0.4:
+        pages = [page for index, page in enumerate(pages) if index not in boilerplate]
+        logger.info(
+            "Skipped %d front/back-matter page(s) of %s", len(boilerplate), filename
+        )
+    elif boilerplate:
+        logger.warning(
+            "Boilerplate detection flagged %d/%d pages of %s; ignoring as unreliable",
+            len(boilerplate),
+            len(pages),
+            filename,
+        )
 
     blocks = parse_typed_blocks(pages)
     groups = build_semantic_groups(
@@ -947,7 +971,8 @@ async def retrieve(
         for key, value in {"document_id": document_id, "filename": filename}.items()
         if value
     }
-    desired_groups = max(top_k, rerank_k) if rerank_enabled else top_k
+    rerank_pool = max(rerank_k, RERANK_CANDIDATES) if rerank_enabled else 0
+    desired_groups = max(top_k, rerank_pool) if rerank_enabled else top_k
     # A parent group can have several independently searchable child blocks.
     # Fetch extra candidates so those siblings do not crowd out other groups.
     candidate_count = min(400, max(desired_groups * 8, 40))
@@ -961,7 +986,7 @@ async def retrieve(
     hits = coalesce_group_hits(hits)
     dropped = 0
     if rerank_enabled:
-        hits = await run_reranker(query, hits[:rerank_k])
+        hits = await run_reranker(query, hits[:rerank_pool])
         # Apply the cutoff only when reranking actually produced scores; on a
         # timeout or failure run_reranker returns hits unscored in vector order,
         # and gating on a missing score would wrongly drop everything.
@@ -1283,7 +1308,7 @@ async def search_get(
     filename: Optional[str] = Query(default=None, max_length=255),
     max_text_chars: int = Query(20_000, ge=100, le=50_000),
     rerank_enabled: bool = Query(False, alias="rerank"),
-    rerank_k: int = Query(20, ge=1, le=50),
+    rerank_k: int = Query(20, ge=1, le=200),
     rerank_min_score: Optional[float] = Query(default=None, ge=-100, le=100),
 ):
     request = SearchRequest(

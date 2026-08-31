@@ -1,8 +1,10 @@
 from extraction import (
     _collapse_replacement_runs,
+    _page_is_boilerplate,
     _page_text_is_garbled,
     _rewrite_scripts,
     assess_text_layer,
+    boilerplate_page_indices,
     garbled_page_indices,
     repair_extracted_text,
 )
@@ -181,6 +183,84 @@ def test_assess_text_layer_accepts_a_clean_document_with_a_stray_bad_page():
 
 def test_assess_text_layer_abstains_without_enough_prose():
     assert assess_text_layer([{"text": "Table 1"}, {"text": "see figure 2"}]) is None
+
+
+_TOC = "\n".join(
+    ["# Contents"]
+    + [
+        f"{title} {'.' * 8} {page}"
+        for title, page in [
+            ("Introduction", 1), ("Wormholes as Gateways", 89), ("Exotic Matter", 95),
+            ("Constructing Wormholes", 102), ("The Space Mirror", 107),
+            ("Schwarzschild Surgery", 111), ("The World Turned Inside Out", 115),
+            ("A Tangled Web", 118), ("The Black Hole Mining Expedition", 121),
+            ("The Future Was Yesterday", 139),
+        ]
+    ]
+)
+_INDEX = "\n".join(
+    [
+        "Index",
+        "Wormholes, 2-3, 92-96, 105-106, 109",
+        "throat of, 93-94, 96-97, 105, 108",
+        "stability, 106",
+        "exotic matter, 97-109, 112, 199, 200",
+        "white holes, 88, 91, 95-98, 101",
+        "Einstein-Rosen bridges, 70, 83-84",
+        "time travel, 153-158, 173, 187-199",
+        "Thorne, Kip, 15, 104-105, 147, 211",
+        "Sagan, Carl, 12, 15, 105",
+    ]
+)
+_BIBLIOGRAPHY = "\n".join(
+    ["Related Reading"]
+    + [
+        f"{author}. {title}. {journal} ({year}): {page}."
+        for author, title, journal, year, page in [
+            ("Visser, Matt", "Traversable Wormholes", "Nuclear Physics B328", 1989, 203),
+            ("Morris, Michael S., and Kip S. Thorne", "Wormholes in Spacetime", "Am. J. Physics 56", 1988, 395),
+            ("Hawking, Stephen", "Black Holes Are White Hot", "Nature", 1977, 30),
+            ("Thorne, Kip S", "Black Holes and Time Warps", "Norton", 1994, 1),
+            ("Novikov, Igor", "Black Holes and the Universe", "Cambridge", 1990, 1),
+            ("Penrose, Roger", "Gravitational Collapse", "Rivista del Nuovo Cimento", 1969, 252),
+            ("Wheeler, John A", "Geons and Quantum Foam", "Princeton", 1998, 1),
+            ("Everett, Hugh", "Relative State Formulation", "Rev. Modern Physics", 1957, 454),
+        ]
+    ]
+)
+_PROSE_WITH_DATES = (
+    "Euler was born in 1707 and died in 1783. Gauss lived from 1777 to 1855. "
+    "The calculus priority dispute ran from about 1699 to 1712, poisoning relations "
+    "between the Royal Society and the Continental mathematicians for a generation. "
+    "Newton, born in 1642, developed his method of fluxions in 1666 but did not "
+    "publish it until 1704. Leibniz, born in 1646, published his differential "
+    "calculus in 1684 in the Acta Eruditorum. The real question was never who was "
+    "first but whether Leibniz reached the ideas independently, which he did."
+)
+
+
+def test_boilerplate_detection_flags_front_and_back_matter():
+    assert _page_is_boilerplate(_TOC) is True
+    assert _page_is_boilerplate(_INDEX) is True
+    assert _page_is_boilerplate(_BIBLIOGRAPHY) is True
+
+
+def test_boilerplate_detection_leaves_prose_alone():
+    assert _page_is_boilerplate(_CLEAN) is False
+    # A history passage thick with years and dates must not read as an index.
+    assert _page_is_boilerplate(_PROSE_WITH_DATES) is False
+    # Too little text to judge.
+    assert _page_is_boilerplate("Contents\nChapter 1 .... 5") is False
+
+
+def test_boilerplate_page_indices_lists_only_the_boilerplate_pages():
+    pages = [
+        {"text": _TOC},
+        {"text": _CLEAN},
+        {"text": _PROSE_WITH_DATES},
+        {"text": _INDEX},
+    ]
+    assert boilerplate_page_indices(pages) == [0, 3]
 
 
 def test_repairs_visual_word_spacing_and_reversed_accents():

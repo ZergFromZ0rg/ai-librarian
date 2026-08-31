@@ -72,7 +72,9 @@ def _request(method: str, path: str, body: Optional[dict] = None) -> dict:
 
 
 def search(query: str, top_k: int, rerank: bool) -> list[dict]:
-    payload = {"query": query, "top_k": top_k, "rerank": rerank, "rerank_k": max(top_k, 20)}
+    # No rerank_k: let the server's RERANK_CANDIDATES decide the pool, so the
+    # harness measures whatever a plain UI search does.
+    payload = {"query": query, "top_k": top_k, "rerank": rerank}
     return _request("POST", "/search", payload)["results"]
 
 
