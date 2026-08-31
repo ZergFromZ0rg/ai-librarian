@@ -125,6 +125,10 @@ def first_hit_rank(judged: dict, results: list[dict]) -> Optional[int]:
 
 def score(cases: list[dict], rerank: bool) -> int:
     top_k = CUTOFFS[0]
+    # hit@k: did *any* acceptable passage land in the top k (the number that
+    # tracks whether the user got a good answer).
+    # recall@k: of all the acceptable passages, what fraction were surfaced.
+    hit_totals = {k: 0 for k in CUTOFFS}
     recall_totals = {k: 0.0 for k in CUTOFFS}
     scored_cases = 0
     mrr_total = 0.0
@@ -149,13 +153,17 @@ def score(cases: list[dict], rerank: bool) -> int:
 
         ranks = [first_hit_rank(entry, results) for entry in judged]
         scored_cases += 1
-        for k in CUTOFFS:
-            found = sum(1 for r in ranks if r is not None and r <= k)
-            recall_totals[k] += found / len(judged)
         best = min((r for r in ranks if r is not None), default=None)
         mrr_total += (1.0 / best) if best else 0.0
-        hit_k = sum(1 for r in ranks if r is not None and r <= 5)
-        rows.append((case_id, f"recall@5 {hit_k}/{len(judged)}  first@{best or '-'}"))
+        for k in CUTOFFS:
+            if best is not None and best <= k:
+                hit_totals[k] += 1
+            found = sum(1 for r in ranks if r is not None and r <= k)
+            recall_totals[k] += found / len(judged)
+        found_5 = sum(1 for r in ranks if r is not None and r <= 5)
+        mark = "hit" if (best is not None and best <= 5) else "MISS"
+        detail = f"  recall@5 {found_5}/{len(judged)}" if len(judged) > 1 else ""
+        rows.append((case_id, f"{mark}@5  first@{best or '-'}{detail}"))
 
     width = max((len(cid) for cid, _ in rows), default=0)
     for case_id, note in rows:
@@ -163,19 +171,22 @@ def score(cases: list[dict], rerank: bool) -> int:
 
     print("\n" + "-" * (width + 40))
     if scored_cases:
-        parts = [f"recall@{k} {recall_totals[k] / scored_cases:.2f}" for k in sorted(CUTOFFS)]
-        parts.append(f"MRR {mrr_total / scored_cases:.2f}")
-        print(f"  {scored_cases} judged queries:  " + "   ".join(parts))
+        hit = "   ".join(f"hit@{k} {hit_totals[k] / scored_cases:.2f}" for k in sorted(CUTOFFS))
+        rec = "   ".join(f"recall@{k} {recall_totals[k] / scored_cases:.2f}" for k in sorted(CUTOFFS))
+        print(f"  {scored_cases} judged queries")
+        print(f"    hit rate:  {hit}")
+        print(f"    recall:    {rec}")
+        print(f"    MRR:       {mrr_total / scored_cases:.2f}")
     if gate_total:
         print(f"  relevance gate:  {gate_pass}/{gate_total} expected-empty queries returned nothing")
     if not scored_cases and not gate_total:
         print("  nothing to score yet -- add cases to eval/queries.jsonl")
         return 0
 
-    # Non-zero exit when the gate leaks or nothing relevant is found at all,
+    # Non-zero exit when the gate leaks or not a single query found an answer,
     # so this can guard a release.
     failed = (gate_total and gate_pass < gate_total) or (
-        scored_cases and recall_totals[5] == 0.0
+        scored_cases and hit_totals[CUTOFFS[0]] == 0
     )
     return 1 if failed else 0
 

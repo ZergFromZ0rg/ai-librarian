@@ -1,8 +1,8 @@
 # Retrieval evaluation harness
 
 A small, hand-curated set of queries with relevance judgments, plus a runner that
-replays them against `/search` and reports **recall@k**, **MRR**, and
-**relevance-gate accuracy**. Use it to catch retrieval regressions when the
+replays them against `/search` and reports **hit rate@k**, **recall@k**, **MRR**,
+and **relevance-gate accuracy**. Use it to catch retrieval regressions when the
 chunking, embedding, or reranker changes.
 
 This is **not** a unit test — it needs the real models and a real indexed
@@ -26,7 +26,7 @@ One JSON object per line. Two kinds of case:
 |---|---|
 | `id` | stable handle, shown in the report |
 | `query` | the search string, exactly as a user would type it |
-| `relevant` | passages that *should* come back. Each: `document` (filename), `page` (PDF position, 1-based — same number the UI shows), optional `contains` (a distinctive phrase the passage must include) |
+| `relevant` | one or more passages, *any* of which is an acceptable answer. Each: `document` (filename), `page` (PDF position, 1-based — same number the UI shows), optional `contains` (a distinctive phrase the passage must include) |
 | `expect_empty` | `true` for a query nothing in the library should answer — asserts the rerank gate returns zero results |
 
 A `relevant` entry is counted as retrieved when the result's filename matches,
@@ -34,6 +34,17 @@ A `relevant` entry is counted as retrieved when the result's filename matches,
 appears in the returned text. **Judgments are keyed by filename + page** because
 `chunk_id` / `group_id` are random and regenerated on every re-index; filename and
 page survive.
+
+List every passage that would genuinely answer the query. The two metrics read
+the list differently:
+
+- **hit@k** — did *at least one* listed passage land in the top k? This is the
+  headline: it tracks whether a searcher got a good answer. Adding more
+  acceptable passages can only help it.
+- **recall@k** — of all the listed passages, what fraction were surfaced? A
+  completeness measure. Only meaningful when you intend the list to be
+  exhaustive; with "any of these is fine" judgments it will read low and that's
+  expected.
 
 `#`-prefixed and blank lines are ignored.
 
@@ -69,18 +80,25 @@ python eval/harness.py --url http://192.168.0.122:3100/api score
 ```
 
 ```
-  camus-absurd      recall@5 1/1  first@1
-  history-conics    recall@5 1/2  first@2
+  camus-absurd      hit@5   first@1
+  history-conics    hit@5   first@2   recall@5 1/2
   gate-gorilla      gate PASS
 
   ----------------------------------------
-  2 judged queries:  recall@1 0.50   recall@3 0.75   recall@5 0.75   recall@10 0.75   MRR 0.75
+  2 judged queries
+    hit rate:  hit@1 0.50   hit@3 1.00   hit@5 1.00   hit@10 1.00
+    recall:    recall@1 0.25   recall@3 0.75   recall@5 0.75   recall@10 0.75
+    MRR:       0.75
   relevance gate:  1/1 expected-empty queries returned nothing
 ```
 
-Exits non-zero if an `expect_empty` query leaks results, or if a judged query
-finds nothing relevant at all — so it can gate a release. `--no-rerank` scores
-raw vector order for comparison.
+Per-row: `hit@5` / `MISS@5` is whether any acceptable passage made the top 5;
+`first@N` is the rank of the first one; `recall@5 x/y` is shown only when a query
+lists more than one acceptable passage.
+
+Exits non-zero if an `expect_empty` query leaks results, or if not one judged
+query found an answer in the top 10 — so it can gate a release. `--no-rerank`
+scores raw vector order for comparison.
 
 ## Pointing it at the service
 
