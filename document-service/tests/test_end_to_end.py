@@ -85,7 +85,7 @@ def service(tmp_path, monkeypatch):
 
     indexed = {}
 
-    def fake_embed(texts):
+    def fake_embed(texts, kind="passage", model_name=None):
         vectors = []
         for text in texts:
             lowered = text.lower()
@@ -316,7 +316,11 @@ def test_document_with_a_few_corrupt_pages_indexes_the_rest_with_a_note(service)
 def test_indexing_error_is_persisted_and_retryable(service, monkeypatch):
     module, client, _indexed = service
     original_embed = module.embed_texts
-    monkeypatch.setattr(module, "embed_texts", lambda _texts: (_ for _ in ()).throw(RuntimeError("model unavailable")))
+    monkeypatch.setattr(
+        module,
+        "embed_texts",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("model unavailable")),
+    )
 
     upload = client.post(
         "/documents",

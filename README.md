@@ -56,8 +56,10 @@ The first indexing request takes longer because the document service downloads i
 
 | Role | Model | Download |
 | --- | --- | --- |
-| embeddings | `sentence-transformers/all-MiniLM-L6-v2` | ~90 MB |
+| embeddings | `intfloat/e5-small-v2` | ~130 MB |
 | reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` | ~90 MB |
+
+The embedding model is a 384-dimensional, 512-token model that expects its inputs labelled by role — the service prefixes search strings with `query: ` and stored passages with `passage: ` (configurable). Override `EMBEDDING_MODEL` for a different model; for an unprefixed one such as `sentence-transformers/all-MiniLM-L6-v2` also set `EMBEDDING_QUERY_PREFIX` and `EMBEDDING_PASSAGE_PREFIX` empty. A model change re-embeds the whole library on the next start (no Qdrant reset while the vector width stays 384).
 
 To fetch both up front instead of on the first request:
 
@@ -77,7 +79,7 @@ docker compose up -d
 
 `PREBAKE_MODELS=1` adds roughly 400 MB to the image; on first start the entrypoint copies the baked models into an empty `data/models/`. Alternatively, run `warm_models.py` on a networked machine and copy `data/models/` to the air-gapped host.
 
-When upgrading from an older pipeline version, existing stored PDFs are automatically re-extracted and reindexed using the current structure-aware hybrid-search schema. The original PDFs remain unchanged. During this one-time migration, document badges move through `queued` and `indexing` again.
+When upgrading from an older pipeline version, or after changing `EMBEDDING_MODEL`, existing stored PDFs are automatically reindexed on first start — re-extracted when the pipeline changed, otherwise just re-embedded. The original PDFs remain unchanged. During this one-time migration, document badges move through `queued` and `indexing` again.
 
 Follow startup progress:
 
@@ -134,6 +136,10 @@ Absolute paths and paths outside `/library` are rejected. Folder imports scan PD
 | `API_PORT` | `8000` | Direct API and interactive docs port |
 | `MAX_UPLOAD_MB` | `100` | Per-file backend upload limit |
 | `EMBEDDING_BATCH_SIZE` | `32` | Chunks embedded in each indexing batch |
+| `EMBEDDING_MODEL` | `intfloat/e5-small-v2` | Sentence-embedding model; a change re-embeds the library on next start |
+| `EMBEDDING_QUERY_PREFIX` | `query: ` | Role label prepended to search strings before embedding |
+| `EMBEDDING_PASSAGE_PREFIX` | `passage: ` | Role label prepended to stored passages before embedding |
+| `EMBEDDING_DIMS` | `0` | Matryoshka models only: keep the first N dimensions (0 = native width) |
 | `RERANK_TIMEOUT` | `15` | Maximum reranker time in seconds |
 | `RERANK_CANDIDATES` | `60` | Fused candidates the cross-encoder scores per query; higher lifts recall for ~linearly more latency |
 | `RERANK_MIN_SCORE` | `0.0` | Drop reranked hits below this cross-encoder score; `off` disables. Only applies to reranked searches |

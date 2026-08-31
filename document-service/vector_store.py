@@ -25,7 +25,7 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 COLLECTION = os.environ.get("QDRANT_COLLECTION", "vault")
 DENSE_VECTOR = "semantic"
 SPARSE_VECTOR = "lexical"
-INDEX_SCHEMA_VERSION = 4
+INDEX_SCHEMA_VERSION = 5
 ALLOW_INDEX_RESET = os.environ.get("ALLOW_INDEX_RESET", "").strip().lower() in {
     "1", "true", "yes", "on"
 }

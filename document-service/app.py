@@ -965,7 +965,7 @@ async def retrieve(
     rerank_k: int,
     min_score: Optional[float] = None,
 ) -> tuple[List[dict], int, int]:
-    query_vector = await asyncio.to_thread(lambda: embed_texts([query])[0])
+    query_vector = await asyncio.to_thread(lambda: embed_texts([query], kind="query")[0])
     filters = {
         key: value
         for key, value in {"document_id": document_id, "filename": filename}.items()
