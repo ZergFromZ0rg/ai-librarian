@@ -52,6 +52,8 @@ services:
       LEXICAL_K1: ${LEXICAL_K1:-1.5}
       LEXICAL_B: ${LEXICAL_B:-0.75}
       LEXICAL_AVGDL: ${LEXICAL_AVGDL:-180}
+      MATH_OCR: ${MATH_OCR:-}
+      MATH_OCR_MODEL: ${MATH_OCR_MODEL:-facebook/nougat-small}
       FUSION_METHOD: ${FUSION_METHOD:-rrf}
       FUSION_DENSE_WEIGHT: ${FUSION_DENSE_WEIGHT:-0.5}
       RERANK_MODEL: ${RERANK_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2}

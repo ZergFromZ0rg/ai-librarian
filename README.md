@@ -58,6 +58,7 @@ The first indexing request takes longer because the document service downloads i
 | --- | --- | --- |
 | embeddings | `intfloat/e5-small-v2` | ~130 MB |
 | reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` | ~90 MB |
+| math OCR (opt-in) | `facebook/nougat-small` | ~1.3 GB |
 
 The embedding model is a 384-dimensional, 512-token model that expects its inputs labelled by role — the service prefixes search strings with `query: ` and stored passages with `passage: ` (configurable). Override `EMBEDDING_MODEL` for a different model; for an unprefixed one such as `sentence-transformers/all-MiniLM-L6-v2` also set `EMBEDDING_QUERY_PREFIX` and `EMBEDDING_PASSAGE_PREFIX` empty. A model change re-embeds the whole library on the next start (no Qdrant reset while the vector width stays 384).
 
@@ -142,6 +143,8 @@ Absolute paths and paths outside `/library` are rejected. Folder imports scan PD
 | `EMBEDDING_DIMS` | `0` | Matryoshka models only: keep the first N dimensions (0 = native width) |
 | `LEXICAL_K1` / `LEXICAL_B` | `1.5` / `0.75` | BM25 term-saturation and length-penalty parameters for the keyword half |
 | `LEXICAL_AVGDL` | `180` | BM25 reference passage length (weighted terms); a re-index picks up a change |
+| `MATH_OCR` | _(off)_ | Set to `1` to transcribe image-only equations with `MATH_OCR_MODEL` (Nougat) on near-empty image pages |
+| `MATH_OCR_MODEL` | `facebook/nougat-small` | Vision-to-text model for the math-OCR fallback |
 | `FUSION_METHOD` | `rrf` | How the semantic and lexical lists merge: `rrf` (rank only), `dbsf` (score, Qdrant-normalised), `rsf` (min-max + weight). Query-time only |
 | `FUSION_DENSE_WEIGHT` | `0.5` | `rsf` only: 0..1 weight on the semantic list (lexical gets the rest) |
 | `RERANK_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder that re-sorts the shortlist; `BAAI/bge-reranker-base` is stronger on scholarly prose but slower on CPU |
@@ -279,7 +282,7 @@ npm run build
 - Image-only scanned PDFs require OCR before upload; OCR remains disabled to avoid silently corrupting mathematical notation.
 - When a minority of pages carry a corrupt OCR text layer, those pages are skipped and the rest of the document is indexed; the document then shows an `extraction_notes` message saying how many pages were left out. A PDF whose text layer is *mostly* corrupt is still refused whole.
 - Front and back matter — tables of contents, back-of-book indexes, bibliographies — is detected by shape and dropped before indexing, so those keyword-dense pages don't outrank real passages. Detection is conservative and skips nothing when it would flag more than 40% of a document.
-- Layout extraction can preserve mathematical symbols only when the PDF exposes usable text or glyph information. Equations stored solely as images require a dedicated math-aware OCR system.
+- Layout extraction preserves mathematical symbols only when the PDF exposes usable text or glyph information. Equations stored solely as images are recovered by a math-OCR fallback (Nougat) if `MATH_OCR` is enabled — off by default because it adds a ~1 GB model, is slow on CPU, and the model can hallucinate; its output is appended, never substituted, and degenerate output is discarded. Enable it, then re-index the affected documents.
 - Chunk sizes are measured with the embedding model's own tokenizer (loaded on its own, without the model). If that tokenizer cannot be loaded — no `transformers`, or offline before it is cached — the chunker falls back to a conservative regex estimate and logs a warning.
 - The document service intentionally runs as one process. The indexing backlog is durable (the worker pulls `queued` documents straight from SQLite, so a restart or a full-library re-index never loses or fails work), but the folder-import queue is still in-process. Moving to Redis or another external worker system would be the next step for horizontal scaling.
 - Search returns relevant source passages; it does not generate or summarize answers.

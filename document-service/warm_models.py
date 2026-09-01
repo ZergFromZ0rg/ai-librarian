@@ -21,6 +21,13 @@ def main() -> None:
     get_embedding_model()
     print(f"Fetching reranker model:  {RERANK_MODEL}", flush=True)
     get_rerank_model()
+
+    import math_ocr
+
+    if math_ocr.ENABLED:
+        print(f"Fetching math-OCR model:  {math_ocr.MODEL_NAME}", flush=True)
+        math_ocr._load()
+
     print(f"Cached under {os.environ.get('HF_HOME', '(default cache)')}", flush=True)
 
 

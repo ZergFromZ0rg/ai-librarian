@@ -1,6 +1,9 @@
+import pymupdf
+
 from extraction import (
     _collapse_replacement_runs,
     _page_is_boilerplate,
+    _page_needs_math_ocr,
     _page_text_is_garbled,
     _rewrite_scripts,
     assess_text_layer,
@@ -261,6 +264,31 @@ def test_boilerplate_page_indices_lists_only_the_boilerplate_pages():
         {"text": _INDEX},
     ]
     assert boilerplate_page_indices(pages) == [0, 3]
+
+
+def _page_with_image(coverage: float):
+    document = pymupdf.open()
+    page = document.new_page(width=200, height=200)
+    side = (coverage * 200 * 200) ** 0.5
+    pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 40))
+    pixmap.clear_with(128)
+    page.insert_image(pymupdf.Rect(5, 5, 5 + side, 5 + side), pixmap=pixmap)
+    return document, page
+
+
+def test_page_needs_math_ocr_on_an_image_page_with_no_text():
+    _doc, page = _page_with_image(coverage=0.5)
+    assert _page_needs_math_ocr(page, "") is True
+    assert _page_needs_math_ocr(page, "x") is True
+
+
+def test_page_needs_math_ocr_skips_pages_that_carry_text_or_no_image():
+    _doc, image_page = _page_with_image(coverage=0.5)
+    assert _page_needs_math_ocr(image_page, "A" * 500) is False
+
+    text_only = pymupdf.open()
+    bare = text_only.new_page(width=200, height=200)
+    assert _page_needs_math_ocr(bare, "") is False
 
 
 def test_repairs_visual_word_spacing_and_reversed_accents():
