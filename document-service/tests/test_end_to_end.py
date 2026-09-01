@@ -24,6 +24,22 @@ def make_pdf(text: str, pages: int = 1) -> bytes:
     return content
 
 
+def make_scanned_pdf(image_pages: int, text_pages: int = 0) -> bytes:
+    """A PDF whose `image_pages` are a full-page image with no text layer."""
+    document = fitz.open()
+    pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 64, 64))
+    pixmap.clear_with(210)
+    for _ in range(image_pages):
+        page = document.new_page()
+        page.insert_image(page.rect, pixmap=pixmap)
+    for index in range(text_pages):
+        page = document.new_page()
+        page.insert_text((72, 72), f"Readable page {index} with real sentences of prose.")
+    content = document.tobytes()
+    document.close()
+    return content
+
+
 _OCR_MUSH = "\n".join(
     [
         "Matheinatics as we kilow it has beeil created and used by huinan beiilgs "
@@ -311,6 +327,16 @@ def test_pdf_with_a_corrupt_ocr_text_layer_is_rejected(service):
     )
     assert response.status_code == 422
     assert "corrupted" in response.json()["detail"]
+
+
+def test_a_scanned_image_only_pdf_is_rejected_with_an_ocr_message(service):
+    _module, client, _indexed = service
+    response = client.post(
+        "/documents",
+        files={"file": ("scan.pdf", make_scanned_pdf(image_pages=8, text_pages=2), "application/pdf")},
+    )
+    assert response.status_code == 422
+    assert "OCR" in response.json()["detail"]
 
 
 def test_document_with_a_few_corrupt_pages_indexes_the_rest_with_a_note(service):

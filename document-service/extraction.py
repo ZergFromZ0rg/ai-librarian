@@ -342,6 +342,47 @@ def describe_skipped_pages(count: int, total: int) -> str:
     )
 
 
+# A page whose image covers most of its area and that carries almost no text is
+# a scanned page: there is nothing to extract and this service does not OCR.
+_IMAGE_ONLY_MIN_COVERAGE = 0.5
+_IMAGE_ONLY_MAX_TEXT = 100
+# Reject the whole PDF once this many, and this fraction, of pages are like that
+# — a handful of full-page figure plates in a born-digital book is fine.
+_MIN_SCANNED_PAGES = 4
+SCANNED_REJECT_FRACTION = 0.2
+
+
+def _page_is_image_only(source_page, text: str) -> bool:
+    if len(text.strip()) > _IMAGE_ONLY_MAX_TEXT:
+        return False
+    page_area = abs(source_page.rect)
+    if page_area <= 0:
+        return False
+    covered = 0.0
+    try:
+        for info in source_page.get_image_info():
+            bbox = info.get("bbox")
+            if bbox:
+                covered += abs(pymupdf.Rect(bbox))
+    except Exception:
+        return False
+    return covered / page_area >= _IMAGE_ONLY_MIN_COVERAGE
+
+
+def assess_scanned(pages: List[Dict]) -> Optional[str]:
+    """Rejection reason when a PDF is mostly page-images with no text layer."""
+    scanned = [page for page in pages if page.get("needs_ocr")]
+    if len(scanned) < _MIN_SCANNED_PAGES or not pages:
+        return None
+    if len(scanned) / len(pages) < SCANNED_REJECT_FRACTION:
+        return None
+    return (
+        f"{len(scanned)} of {len(pages)} pages are images with no text layer — "
+        "this PDF is a scan or uses image-only typesetting. Run OCR to produce a "
+        "searchable PDF and upload that; this service does not perform OCR."
+    )
+
+
 # --- Front/back-matter pages --------------------------------------------------
 # A table of contents, a back-of-book index, and a bibliography are all dense
 # with on-topic keywords but carry no prose worth retrieving. Left in the index
@@ -492,11 +533,13 @@ def extract_pages(pdf_path: str) -> List[Dict]:
                 source_page, (page.get("text") or "").strip()
             )
             layout = source_page.get_text("rawdict", sort=True)
+            text = repair_extracted_text(markdown, layout, glyph_maps)
             pages.append(
                 {
                     "page": int(metadata.get("page_number") or index + 1),
-                    "text": repair_extracted_text(markdown, layout, glyph_maps),
+                    "text": text,
                     "format": "markdown",
+                    "needs_ocr": _page_is_image_only(source_page, text),
                 }
             )
     return pages

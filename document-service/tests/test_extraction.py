@@ -1,8 +1,12 @@
+import pymupdf
+
 from extraction import (
     _collapse_replacement_runs,
     _page_is_boilerplate,
+    _page_is_image_only,
     _page_text_is_garbled,
     _rewrite_scripts,
+    assess_scanned,
     assess_text_layer,
     boilerplate_page_indices,
     garbled_page_indices,
@@ -261,6 +265,40 @@ def test_boilerplate_page_indices_lists_only_the_boilerplate_pages():
         {"text": _INDEX},
     ]
     assert boilerplate_page_indices(pages) == [0, 3]
+
+
+def _page_covered_by_image(fraction: float):
+    document = pymupdf.open()
+    page = document.new_page(width=200, height=200)
+    side = (fraction * 200 * 200) ** 0.5
+    pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 40))
+    pixmap.clear_with(200)
+    page.insert_image(pymupdf.Rect(0, 0, side, side), pixmap=pixmap)
+    return document, page
+
+
+def test_page_is_image_only_needs_a_big_image_and_almost_no_text():
+    _doc, full = _page_covered_by_image(0.9)
+    assert _page_is_image_only(full, "") is True
+    assert _page_is_image_only(full, "a scattered caption") is True
+    # a page carrying real text is never a scan, however large its figure
+    assert _page_is_image_only(full, _CLEAN) is False
+    # a small inset figure on an otherwise blank page is not a scan
+    _doc2, inset = _page_covered_by_image(0.15)
+    assert _page_is_image_only(inset, "") is False
+
+
+def test_assess_scanned_rejects_a_mostly_image_pdf():
+    pages = [{"text": "", "needs_ocr": True} for _ in range(8)]
+    pages += [{"text": _CLEAN, "needs_ocr": False} for _ in range(2)]
+    reason = assess_scanned(pages)
+    assert reason and "OCR" in reason
+
+
+def test_assess_scanned_tolerates_a_few_figure_plates():
+    pages = [{"text": _CLEAN, "needs_ocr": False} for _ in range(40)]
+    pages += [{"text": "", "needs_ocr": True} for _ in range(3)]
+    assert assess_scanned(pages) is None
 
 
 def test_repairs_visual_word_spacing_and_reversed_accents():

@@ -30,6 +30,7 @@ from chunking import build_semantic_groups, normalize_for_embedding, parse_typed
 from database import MetadataStore
 from embeddings import DEFAULT_MODEL as EMBEDDING_MODEL, embed_texts
 from extraction import (
+    assess_scanned,
     assess_text_layer,
     boilerplate_page_indices,
     describe_skipped_pages,
@@ -535,7 +536,7 @@ def build_document_artifacts(
     pages = extract_pages(stored_path)
     if not any(page.get("text", "").strip() for page in pages):
         raise ValueError("the PDF contains no extractable text; scanned PDFs require OCR")
-    fatal_reason = assess_text_layer(pages)
+    fatal_reason = assess_scanned(pages) or assess_text_layer(pages)
     if fatal_reason:
         raise ValueError(fatal_reason)
 

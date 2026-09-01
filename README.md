@@ -276,10 +276,10 @@ npm run build
 ## Current limitations
 
 - PDF is the only accepted document format.
-- Image-only scanned PDFs require OCR before upload; OCR remains disabled to avoid silently corrupting mathematical notation.
+- The service does not run OCR. A PDF that is mostly page-images with no text layer — a scan, or image-only typesetting — is rejected on upload with a message to OCR it first; a few full-page figure plates in an otherwise text PDF are fine.
 - When a minority of pages carry a corrupt OCR text layer, those pages are skipped and the rest of the document is indexed; the document then shows an `extraction_notes` message saying how many pages were left out. A PDF whose text layer is *mostly* corrupt is still refused whole.
 - Front and back matter — tables of contents, back-of-book indexes, bibliographies — is detected by shape and dropped before indexing, so those keyword-dense pages don't outrank real passages. Detection is conservative and skips nothing when it would flag more than 40% of a document.
-- Layout extraction can preserve mathematical symbols only when the PDF exposes usable text or glyph information. Equations stored solely as images require a dedicated math-aware OCR system.
+- Layout extraction can preserve mathematical symbols only when the PDF exposes usable text or glyph information. Equations stored solely as images are not recovered.
 - Chunk sizes are measured with the embedding model's own tokenizer (loaded on its own, without the model). If that tokenizer cannot be loaded — no `transformers`, or offline before it is cached — the chunker falls back to a conservative regex estimate and logs a warning.
 - The document service intentionally runs as one process. The indexing backlog is durable (the worker pulls `queued` documents straight from SQLite, so a restart or a full-library re-index never loses or fails work), but the folder-import queue is still in-process. Moving to Redis or another external worker system would be the next step for horizontal scaling.
 - Search returns relevant source passages; it does not generate or summarize answers.
