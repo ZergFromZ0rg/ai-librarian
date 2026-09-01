@@ -1,12 +1,21 @@
 import hashlib
-import math
+import os
 import re
 import unicodedata
 from collections import Counter
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 TERM_PATTERN = re.compile(r"\w+(?:[’'-]\w+)*|[^\w\s]", re.UNICODE)
 SPACE_GROUP_PATTERN = re.compile(r"\S+", re.UNICODE)
+
+# BM25 parameters. k1 controls how fast term-frequency saturates; b controls how
+# hard long passages are penalised. avgdl is the reference passage length (in
+# summed term weight) — chunks are token-budgeted so a fixed value tracks the
+# true corpus average closely; tune it if chunk sizes change a lot. The rarity
+# weight (IDF) is supplied by Qdrant's sparse-vector IDF modifier at query time.
+BM25_K1 = float(os.environ.get("LEXICAL_K1", "1.5"))
+BM25_B = float(os.environ.get("LEXICAL_B", "0.75"))
+BM25_AVGDL = float(os.environ.get("LEXICAL_AVGDL", "180"))
 
 
 def lexical_terms(text: str) -> List[Tuple[str, float]]:
@@ -39,15 +48,38 @@ def term_index(term: str) -> int:
     return int.from_bytes(hashlib.blake2s(term.encode("utf-8"), digest_size=4).digest(), "big")
 
 
-def sparse_vector(text: str) -> Tuple[List[int], List[float]]:
-    weighted_counts: Counter[int] = Counter()
+def _term_frequencies(text: str) -> Dict[int, float]:
+    """Weighted occurrence count per hashed term (symbols/formulae count extra)."""
+    counts: Counter = Counter()
     for term, weight in lexical_terms(text):
-        weighted_counts[term_index(term)] += weight
-    if not weighted_counts:
-        return [], []
+        counts[term_index(term)] += weight
+    return counts
 
-    weighted = {index: 1.0 + math.log(value) for index, value in weighted_counts.items()}
-    norm = math.sqrt(sum(value * value for value in weighted.values())) or 1.0
-    indices = sorted(weighted)
-    values = [weighted[index] / norm for index in indices]
+
+def bm25_document_vector(text: str) -> Tuple[List[int], List[float]]:
+    """Sparse vector for a stored passage.
+
+    Each value is the BM25 term-frequency component:
+    ``tf * (k1 + 1) / (tf + k1 * (1 - b + b * dl / avgdl))`` — frequency that
+    saturates and is normalised for passage length. Qdrant's IDF modifier
+    multiplies in the across-library rarity weight when a query hits the term.
+    """
+    counts = _term_frequencies(text)
+    if not counts:
+        return [], []
+    doc_len = sum(counts.values())
+    length_norm = BM25_K1 * (1.0 - BM25_B + BM25_B * doc_len / BM25_AVGDL)
+    indices = sorted(counts)
+    values = [counts[i] * (BM25_K1 + 1.0) / (counts[i] + length_norm) for i in indices]
     return indices, values
+
+
+def bm25_query_vector(text: str) -> Tuple[List[int], List[float]]:
+    """Sparse vector for a query: the weighted presence of each term. IDF is
+    applied by the collection modifier; symbol and formula terms keep the extra
+    weight that makes an exact ``∂f/∂x`` match count for more than a word."""
+    counts = _term_frequencies(text)
+    if not counts:
+        return [], []
+    indices = sorted(counts)
+    return indices, [counts[i] for i in indices]

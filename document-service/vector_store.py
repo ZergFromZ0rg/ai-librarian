@@ -12,6 +12,7 @@ from qdrant_client.models import (
     Fusion,
     FusionQuery,
     MatchValue,
+    Modifier,
     PointStruct,
     Prefetch,
     SparseVector,
@@ -19,13 +20,13 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from lexical import sparse_vector
+from lexical import bm25_document_vector, bm25_query_vector
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 COLLECTION = os.environ.get("QDRANT_COLLECTION", "vault")
 DENSE_VECTOR = "semantic"
 SPARSE_VECTOR = "lexical"
-INDEX_SCHEMA_VERSION = 5
+INDEX_SCHEMA_VERSION = 6
 ALLOW_INDEX_RESET = os.environ.get("ALLOW_INDEX_RESET", "").strip().lower() in {
     "1", "true", "yes", "on"
 }
@@ -50,7 +51,9 @@ def _create_collection(vector_size: int) -> None:
     client.create_collection(
         collection_name=COLLECTION,
         vectors_config={DENSE_VECTOR: VectorParams(size=vector_size, distance=Distance.COSINE)},
-        sparse_vectors_config={SPARSE_VECTOR: SparseVectorParams()},
+        # IDF: Qdrant tracks each term's document frequency and applies the
+        # rarity weight at query time, so BM25 stays correct as the library grows.
+        sparse_vectors_config={SPARSE_VECTOR: SparseVectorParams(modifier=Modifier.IDF)},
     )
 
 
@@ -71,7 +74,9 @@ def ensure_collection(vector_size: int):
     vectors = info.config.params.vectors
     sparse_vectors = info.config.params.sparse_vectors or {}
     dense = vectors.get(DENSE_VECTOR) if isinstance(vectors, dict) else None
-    structural_ok = dense is not None and SPARSE_VECTOR in sparse_vectors
+    sparse = sparse_vectors.get(SPARSE_VECTOR)
+    sparse_ok = sparse is not None and getattr(sparse, "modifier", None) == Modifier.IDF
+    structural_ok = dense is not None and sparse_ok
     dimension_ok = dense is not None and dense.size == vector_size
     if structural_ok and dimension_ok:
         return
@@ -115,7 +120,7 @@ def upsert_chunks(chunks: List[dict], batch_size: int = 64):
     for c in chunks:
         point_id = chunk_id_to_int(c["chunk_id"])
         search_text = c.get("embedding_text") or c.get("text", "")
-        sparse_indices, sparse_values = sparse_vector(search_text)
+        sparse_indices, sparse_values = bm25_document_vector(search_text)
         points.append(
             PointStruct(
                 id=point_id,
@@ -209,7 +214,7 @@ def search_vectors(
         if must:
             query_filter = Filter(must=must)
 
-    sparse_indices, sparse_values = sparse_vector(query_text or "")
+    sparse_indices, sparse_values = bm25_query_vector(query_text or "")
     if sparse_indices:
         prefetch_limit = max(20, top_k * 4)
         sparse_query = SparseVector(indices=sparse_indices, values=sparse_values)

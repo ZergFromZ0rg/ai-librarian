@@ -1,6 +1,6 @@
 # AI Librarian
 
-AI Librarian is a self-hosted, local-first knowledge library for PDF documents. It extracts layout-aware Markdown, parses typed document blocks, builds structure-aware token-budgeted passages, and combines semantic and exact-symbol retrieval in Qdrant before reranking passages with page-level source references.
+AI Librarian is a self-hosted, local-first knowledge library for PDF documents. It extracts layout-aware Markdown, parses typed document blocks, builds structure-aware token-budgeted passages, and combines semantic and BM25 keyword retrieval in Qdrant before reranking passages with page-level source references.
 
 No hosted AI API or generative model is required. After the container images and search models have been downloaded, document processing and search stay on your server.
 
@@ -15,7 +15,7 @@ No hosted AI API or generative model is required. After the container images and
 - Preserve headings, lists, tables, whitespace, Unicode symbols, and mathematical notation when the PDF text layer contains them.
 - Keep equations and tables attached to their introductions, captions, and explanations, including continuations across page boundaries.
 - Index smaller child blocks for precise matching while returning their complete parent passage for context.
-- Combine dense semantic search with sparse lexical matching for exact terms, formulas, and symbols.
+- Combine dense semantic search with BM25 keyword matching (rare words weighted up, long passages down), keeping math symbols and formula fragments as first-class searchable units.
 
 ## Architecture
 
@@ -140,6 +140,8 @@ Absolute paths and paths outside `/library` are rejected. Folder imports scan PD
 | `EMBEDDING_QUERY_PREFIX` | `query: ` | Role label prepended to search strings before embedding |
 | `EMBEDDING_PASSAGE_PREFIX` | `passage: ` | Role label prepended to stored passages before embedding |
 | `EMBEDDING_DIMS` | `0` | Matryoshka models only: keep the first N dimensions (0 = native width) |
+| `LEXICAL_K1` / `LEXICAL_B` | `1.5` / `0.75` | BM25 term-saturation and length-penalty parameters for the keyword half |
+| `LEXICAL_AVGDL` | `180` | BM25 reference passage length (weighted terms); a re-index picks up a change |
 | `FUSION_METHOD` | `rrf` | How the semantic and lexical lists merge: `rrf` (rank only), `dbsf` (score, Qdrant-normalised), `rsf` (min-max + weight). Query-time only |
 | `FUSION_DENSE_WEIGHT` | `0.5` | `rsf` only: 0..1 weight on the semantic list (lexical gets the rest) |
 | `RERANK_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder that re-sorts the shortlist; `BAAI/bge-reranker-base` is stronger on scholarly prose but slower on CPU |

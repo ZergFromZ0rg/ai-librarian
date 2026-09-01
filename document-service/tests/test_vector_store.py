@@ -107,7 +107,25 @@ def test_legacy_dense_collection_is_recreated_for_hybrid_schema(monkeypatch):
 
     params = local_client.get_collection("legacy-library").config.params
     assert vector_store.DENSE_VECTOR in params.vectors
-    assert vector_store.SPARSE_VECTOR in params.sparse_vectors
+    assert params.sparse_vectors[vector_store.SPARSE_VECTOR].modifier == vector_store.Modifier.IDF
+
+
+def test_sparse_collection_without_idf_modifier_is_recreated(monkeypatch):
+    from qdrant_client.models import SparseVectorParams
+
+    local_client = QdrantClient(":memory:")
+    monkeypatch.setattr(vector_store, "client", local_client)
+    monkeypatch.setattr(vector_store, "COLLECTION", "pre-idf")
+    local_client.create_collection(
+        collection_name="pre-idf",
+        vectors_config={vector_store.DENSE_VECTOR: VectorParams(size=3, distance=Distance.COSINE)},
+        sparse_vectors_config={vector_store.SPARSE_VECTOR: SparseVectorParams()},  # no modifier
+    )
+
+    vector_store.ensure_collection(3)
+
+    sparse = local_client.get_collection("pre-idf").config.params.sparse_vectors
+    assert sparse[vector_store.SPARSE_VECTOR].modifier == vector_store.Modifier.IDF
 
 
 def _hybrid_collection(monkeypatch, name, size):
