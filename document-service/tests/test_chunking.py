@@ -3,6 +3,7 @@ import pytest
 from chunking import (
     BLOCK_TYPES,
     _enforce_hard_budget,
+    _regex_token_spans,
     chunk_document,
     count_tokens,
     lead_in_from,
@@ -247,9 +248,16 @@ def test_enforce_hard_budget_splits_over_budget_units_instead_of_raising():
     assert all(unit["kind"] == "block" for unit in units)
 
 
-def test_token_estimator_splits_long_damaged_words():
-    assert count_tokens("ordinary words") == 2
-    assert count_tokens("x" * 80) == 10
+def test_regex_token_estimator_splits_long_damaged_words():
+    # The dependency-free fallback used when the real tokenizer will not load.
+    assert len(_regex_token_spans("ordinary words")) == 2
+    assert len(_regex_token_spans("x" * 80)) == 10
+
+
+def test_count_tokens_is_positive_and_grows_with_length():
+    assert count_tokens("word") >= 1
+    assert count_tokens("one two three four five six") > count_tokens("one two")
+    assert count_tokens("") == 0
 
 
 @pytest.mark.parametrize(

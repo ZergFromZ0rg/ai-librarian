@@ -1,6 +1,10 @@
+import logging
 import re
+import threading
 from dataclasses import dataclass, replace
 from typing import Dict, Iterable, List, Sequence
+
+logger = logging.getLogger("ai_librarian.chunking")
 
 BLOCK_TYPES = {"paragraph", "heading", "equation", "table", "caption"}
 TOKEN_PATTERN = re.compile(r"\w+|[^\w\s]", re.UNICODE)
@@ -61,12 +65,46 @@ class Unit:
         return max(block.page_end for block in self.blocks)
 
 
-def _token_spans(text: str) -> List[tuple[int, int]]:
-    """Return conservative, dependency-free token-like character spans.
+_tokenizer = None
+_tokenizer_lock = threading.Lock()
+_tokenizer_unavailable = False
 
-    The embedding model performs the final WordPiece tokenization. Splitting
-    unusually long strings here keeps this estimator from treating a whole
-    URL, identifier, or damaged PDF word as one token.
+
+def _get_tokenizer():
+    """The embedding model's own fast tokenizer, or None to fall back to the
+    regex estimate. Only the tokenizer is loaded, never the model itself, so
+    this stays cheap enough to run at upload time.
+    """
+    global _tokenizer, _tokenizer_unavailable
+    if _tokenizer is not None or _tokenizer_unavailable:
+        return _tokenizer
+    with _tokenizer_lock:
+        if _tokenizer is None and not _tokenizer_unavailable:
+            try:
+                from transformers import AutoTokenizer
+
+                from embeddings import DEFAULT_MODEL
+
+                tokenizer = AutoTokenizer.from_pretrained(DEFAULT_MODEL)
+                if not getattr(tokenizer, "is_fast", False):
+                    raise RuntimeError("a fast tokenizer is required for offsets")
+                _tokenizer = tokenizer
+            except Exception:
+                _tokenizer_unavailable = True
+                logger.warning(
+                    "Embedding tokenizer unavailable; falling back to the regex "
+                    "token estimate. Chunk sizes will be approximate.",
+                    exc_info=True,
+                )
+    return _tokenizer
+
+
+def _regex_token_spans(text: str) -> List[tuple[int, int]]:
+    """Conservative, dependency-free token-like character spans.
+
+    Used only when the real tokenizer cannot be loaded. Long alphanumeric runs
+    (URLs, identifiers, damaged PDF words) are split so one of them is not
+    mistaken for a single token.
     """
     spans: List[tuple[int, int]] = []
     for match in TOKEN_PATTERN.finditer(text):
@@ -79,9 +117,24 @@ def _token_spans(text: str) -> List[tuple[int, int]]:
     return spans
 
 
+def _token_spans(text: str) -> List[tuple[int, int]]:
+    """Character spans of the model's tokens, for splitting text on a token
+    boundary. Exact when the tokenizer is available, estimated otherwise."""
+    tokenizer = _get_tokenizer()
+    if tokenizer is None:
+        return _regex_token_spans(text)
+    offsets = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)[
+        "offset_mapping"
+    ]
+    return [(start, end) for start, end in offsets if end > start]
+
+
 def count_tokens(text: str) -> int:
-    """Estimate model tokens without loading the embedding model at upload time."""
-    return len(_token_spans(text))
+    """The number of tokens the embedding model will see for `text`."""
+    tokenizer = _get_tokenizer()
+    if tokenizer is None:
+        return len(_regex_token_spans(text))
+    return len(tokenizer(text, add_special_tokens=False)["input_ids"])
 
 
 def normalize_for_embedding(markdown: str) -> str:
@@ -568,10 +621,9 @@ def build_semantic_groups(
 def _enforce_hard_budget(group: Dict, hard_max_tokens: int, overlap_tokens: int) -> None:
     """Guarantee every retrieval unit fits the hard token budget.
 
-    ``count_tokens`` is a dependency-free *estimate* of the embedding model's
-    tokenisation. A block that the estimator scores just over budget (an
-    undelimited table, a formula shredded by a broken font) must never be a
-    reason to reject the whole document: split any such unit further instead.
+    A block that lands over budget (an undelimited table, a formula shredded by
+    a broken font) must never be a reason to reject the whole document: split
+    any such unit further instead.
     """
     fitted: List[Dict] = []
     seen = {unit["text"] for unit in group["retrieval_units"]}
