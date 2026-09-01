@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """Retrieval evaluation harness for the document service.
 
-Two subcommands:
+Subcommands:
 
     python eval/harness.py review [-n 20]   # list recent real queries from the
                                             # search log with their current top
                                             # hits, as ready-to-edit judgment stubs
+    python eval/harness.py capture "q" ...  # same stubs for queries given now
     python eval/harness.py score            # replay eval/queries.jsonl against
                                             # /search and report hit@k / recall@k
                                             # / MRR / relevance-gate accuracy
                                             # (--fusion / --dense-weight to A/B
                                             # the dense+sparse merge)
+    python eval/harness.py calibrate        # fit the reranker's raw score to
+                                            # P(relevant) on the judged set and
+                                            # recommend a RERANK_MIN_SCORE cutoff
 
 The eval set lives in ``eval/queries.jsonl`` -- one JSON object per line:
 
@@ -201,6 +205,105 @@ def score(cases: list[dict], rerank: bool) -> int:
     return 1 if failed else 0
 
 
+def _isotonic(pairs: list[tuple[float, int]]) -> list[tuple[float, float]]:
+    """Pool-adjacent-violators fit: returns (min_score, P(relevant)) per block,
+    a monotone non-decreasing step function over score."""
+    blocks: list[list[float]] = []  # [label_sum, count, min_score]
+    for score, label in sorted(pairs):
+        blocks.append([float(label), 1.0, score])
+        while len(blocks) >= 2 and blocks[-2][0] / blocks[-2][1] >= blocks[-1][0] / blocks[-1][1]:
+            merged = blocks.pop()
+            blocks[-1][0] += merged[0]
+            blocks[-1][1] += merged[1]
+    return [(score, total / count) for total, count, score in blocks]
+
+
+def _prob_at(curve: list[tuple[float, float]], score: float) -> float:
+    prob = curve[0][1] if curve else 0.0
+    for block_score, block_prob in curve:
+        if score >= block_score:
+            prob = block_prob
+        else:
+            break
+    return prob
+
+
+def calibrate(cases: list[dict], _rerank: bool) -> int:
+    """Fit the reranker's raw score to P(relevant) using the judged set, and
+    recommend a RERANK_MIN_SCORE cutoff."""
+    saved = dict(SEARCH_OVERRIDES)
+    SEARCH_OVERRIDES["rerank_min_score"] = -100  # open the gate: see every score
+    labelled: list[tuple[float, bool, bool]] = []  # (score, is_relevant, is_gate_case)
+    try:
+        for case in cases:
+            gate = bool(case.get("expect_empty"))
+            judged = case.get("relevant") or []
+            if not gate and not judged:
+                continue
+            for result in search(case["query"], CUTOFFS[0], True):
+                score = result.get("rerank_score")
+                if score is None:
+                    continue
+                relevant = (not gate) and any(result_matches(j, result) for j in judged)
+                labelled.append((float(score), relevant, gate))
+    finally:
+        SEARCH_OVERRIDES.clear()
+        SEARCH_OVERRIDES.update(saved)
+
+    positives = [s for s, rel, _ in labelled if rel]
+    negatives = [s for s, rel, _ in labelled if not rel]
+    gate_scores = [s for s, _, g in labelled if g]
+    if not positives or not negatives:
+        print("  need both matched and unmatched reranked passages -- run `score` first")
+        return 1
+
+    curve = _isotonic([(s, 1 if rel else 0) for s, rel, _ in labelled])
+
+    print(f"  {len(positives)} relevant / {len(negatives)} not "
+          f"({len(gate_scores)} from expected-empty queries)\n")
+    print("  raw score -> P(relevant), isotonic fit:")
+    lo, hi = min(s for s, *_ in labelled), max(s for s, *_ in labelled)
+    for i in range(9):
+        s = lo + (hi - lo) * i / 8
+        print(f"    {s:+7.2f}  ->  {_prob_at(curve, s):.2f}")
+
+    print("\n  cutoff        kept    of which     recall of   gate")
+    print("  (min_score)   hits    off-topic    relevant    leaks")
+    candidates = sorted({round(s * 2) / 2 for s, *_ in labelled})
+    floor = None
+    balanced = None
+    balanced_j = -1.0
+    for cutoff in candidates:
+        kept_pos = sum(1 for s in positives if s >= cutoff)
+        kept_neg = sum(1 for s in negatives if s >= cutoff)
+        leaks = sum(1 for s in gate_scores if s >= cutoff)
+        recall = kept_pos / len(positives)
+        noise = kept_neg / (kept_pos + kept_neg) if (kept_pos + kept_neg) else 0.0
+        flag = ""
+        if leaks == 0:
+            if floor is None:
+                floor = cutoff
+                flag = "  <- floor (no gate leaks)"
+            if recall - noise > balanced_j:
+                balanced_j, balanced = recall - noise, cutoff
+        print(f"  {cutoff:+6.1f}       {kept_pos + kept_neg:4d}    {noise:6.0%}       "
+              f"{recall:6.0%}      {leaks:3d}{flag}")
+
+    if floor is None:
+        print("\n  every cutoff leaks an expected-empty query -- the reranker cannot "
+              "tell them from real answers. A stronger RERANK_MODEL is the fix.")
+        return 0
+    def keep(cutoff: float) -> float:
+        return sum(1 for s in positives if s >= cutoff) / len(positives)
+
+    print(f"\n  RERANK_MIN_SCORE floor    {floor:+.1f}  "
+          f"(P(rel) ~ {_prob_at(curve, floor):.2f}, keeps {keep(floor):.0%} of known answers)")
+    if balanced is not None and balanced != floor:
+        print(f"  best noise/recall trade  {balanced:+.1f}  "
+              f"(P(rel) ~ {_prob_at(curve, balanced):.2f}, keeps {keep(balanced):.0%})")
+    return 0
+
+
 def _snippet(result: dict, length: int) -> str:
     return " ".join((result.get("matched") or result.get("text") or "").split())[:length]
 
@@ -287,6 +390,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     p_score.add_argument("--dense-weight", type=float,
                          help="rsf only: 0..1 weight on the semantic list")
 
+    p_cal = sub.add_parser("calibrate", help="fit reranker score -> P(relevant), recommend a cutoff")
+    p_cal.add_argument("--queries", type=Path, default=QUERIES_PATH)
+
     p_review = sub.add_parser("review", help="recent logged queries -> judgment stubs")
     p_review.add_argument("-n", "--limit", type=int, default=20)
     p_review.add_argument("--no-rerank", action="store_true")
@@ -296,7 +402,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     p_capture.add_argument("--no-rerank", action="store_true")
 
     args = parser.parse_args(list(argv) if argv is not None else None)
-    rerank = not args.no_rerank
+    rerank = not getattr(args, "no_rerank", False)
     BASE_URL = args.url.rstrip("/")
     if getattr(args, "fusion", None):
         SEARCH_OVERRIDES["fusion"] = args.fusion
@@ -305,6 +411,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
     if args.command == "score":
         return score(load_cases(args.queries), rerank)
+    if args.command == "calibrate":
+        return calibrate(load_cases(args.queries), rerank)
     if args.command == "review":
         return review(args.limit, rerank)
     if args.command == "capture":

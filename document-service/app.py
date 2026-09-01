@@ -36,7 +36,7 @@ from extraction import (
     extract_pages,
     garbled_page_indices,
 )
-from reranker import model_info, rerank
+from reranker import DEFAULT_MODEL as RERANK_MODEL, model_info, rerank
 from vector_store import (
     FUSION_METHOD,
     INDEX_SCHEMA_VERSION,
@@ -123,6 +123,11 @@ RERANK_TIMEOUT = float(os.environ.get("RERANK_TIMEOUT", "10"))
 # passage, so it needs a wide enough pool. `rerank_k` from the request acts as
 # a floor on top of this. ~60 keeps latency near 1s on a CPU-only host.
 RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "60"))
+# What text the cross-encoder scores against the query: "matched" = the specific
+# retrieval unit that won (a paragraph, an equation), "group" = the whole parent
+# passage. Scoring the matched part keeps a small hit from being diluted by the
+# rest of its group.
+RERANK_PASSAGE = os.environ.get("RERANK_PASSAGE", "matched").strip().lower()
 
 
 def _parse_min_score(raw: str):
@@ -917,14 +922,19 @@ app.add_middleware(
 )
 
 
+def _rerank_passage(payload: dict) -> str:
+    """The text the cross-encoder scores for one hit (see RERANK_PASSAGE)."""
+    group = (payload.get("text") or "").strip()
+    matched = (payload.get("retrieval_text") or "").strip()
+    if RERANK_PASSAGE == "matched" and 40 <= len(matched) < len(group):
+        return matched
+    return group or matched or (payload.get("embedding_text") or "")
+
+
 async def run_reranker(query: str, hits: List[dict]) -> List[dict]:
     if not hits or RERANK_EXECUTOR is None:
         return hits
-    passages = [
-        hit.get("payload", {}).get("text")
-        or hit.get("payload", {}).get("embedding_text", "")
-        for hit in hits
-    ]
+    passages = [_rerank_passage(hit.get("payload") or {}) for hit in hits]
     loop = asyncio.get_running_loop()
     future = loop.run_in_executor(RERANK_EXECUTOR, rerank, query, passages)
     try:
@@ -1061,6 +1071,8 @@ async def config():
         "ingest_root": str(INGEST_ROOT),
         "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
         "embedding_model": EMBEDDING_MODEL,
+        "reranker_model": RERANK_MODEL,
+        "rerank_passage": RERANK_PASSAGE,
         "pipeline_version": PIPELINE_VERSION,
         "index_schema_version": INDEX_SCHEMA_VERSION,
         "fusion": FUSION_METHOD,

@@ -251,6 +251,21 @@ def test_reranker_score_gate_drops_low_scoring_hits(service, monkeypatch):
     assert len(boundary.json()["results"]) >= 1
 
 
+def test_rerank_passage_prefers_the_matched_unit_when_it_is_distinct(service, monkeypatch):
+    module, _client, _indexed = service
+    group = "Long unrelated introduction. " * 20
+    matched = "the specific paragraph inside the group that actually matched the query"
+    payload = {"text": group, "retrieval_text": matched}
+
+    monkeypatch.setattr(module, "RERANK_PASSAGE", "matched")
+    assert module._rerank_passage(payload) == matched
+    # A matched unit that is really the whole group falls back to the group text.
+    assert module._rerank_passage({"text": group, "retrieval_text": group}) == group.strip()
+
+    monkeypatch.setattr(module, "RERANK_PASSAGE", "group")
+    assert module._rerank_passage(payload) == group.strip()
+
+
 def test_search_log_can_be_disabled(service, monkeypatch):
     module, client, _indexed = service
     monkeypatch.setattr(module, "SEARCH_LOG_ENABLED", False)

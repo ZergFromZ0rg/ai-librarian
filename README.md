@@ -142,6 +142,8 @@ Absolute paths and paths outside `/library` are rejected. Folder imports scan PD
 | `EMBEDDING_DIMS` | `0` | Matryoshka models only: keep the first N dimensions (0 = native width) |
 | `FUSION_METHOD` | `rrf` | How the semantic and lexical lists merge: `rrf` (rank only), `dbsf` (score, Qdrant-normalised), `rsf` (min-max + weight). Query-time only |
 | `FUSION_DENSE_WEIGHT` | `0.5` | `rsf` only: 0..1 weight on the semantic list (lexical gets the rest) |
+| `RERANK_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder that re-sorts the shortlist; `BAAI/bge-reranker-base` is stronger on scholarly prose but slower on CPU |
+| `RERANK_PASSAGE` | `matched` | Text the reranker scores: `matched` (the winning retrieval unit) or `group` (the whole passage) |
 | `RERANK_TIMEOUT` | `15` | Maximum reranker time in seconds |
 | `RERANK_CANDIDATES` | `60` | Fused candidates the cross-encoder scores per query; higher lifts recall for ~linearly more latency |
 | `RERANK_MIN_SCORE` | `0.0` | Drop reranked hits below this cross-encoder score; `off` disables. Only applies to reranked searches |

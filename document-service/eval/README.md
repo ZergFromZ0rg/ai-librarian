@@ -111,6 +111,21 @@ python eval/harness.py --url … score                          # server default
 python eval/harness.py --url … score --fusion rsf --dense-weight 0.7
 ```
 
+## Calibrating the relevance gate
+
+```bash
+python eval/harness.py --url … calibrate
+```
+
+Runs every judged query with the gate wide open, labels each returned passage
+relevant / not (matched a judgment vs. not; everything from an `expect_empty`
+query counts as not), fits the reranker's raw score to **P(relevant)** with
+isotonic regression, and sweeps candidate `RERANK_MIN_SCORE` cutoffs — showing
+for each what fraction of known answers it keeps, how much off-topic noise it
+lets through, and how many `expect_empty` queries it leaks. It recommends the
+lowest cutoff with no leaks. Re-run it after changing `RERANK_MODEL` or
+`RERANK_PASSAGE`.
+
 ## Pointing it at the service
 
 The harness talks to the **API**. Two ways to reach it:
