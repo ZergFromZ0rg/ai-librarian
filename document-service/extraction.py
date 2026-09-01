@@ -7,7 +7,6 @@ from typing import Dict, List, Optional, Tuple
 import pymupdf
 import pymupdf4llm
 
-import math_ocr
 from glyphs import build_glyph_repairs
 from layout import recover_dropped_text
 
@@ -437,30 +436,6 @@ def boilerplate_page_indices(pages: List[Dict]) -> List[int]:
     ]
 
 
-# A page with this much of its area covered by images and barely any extracted
-# text is a candidate for the math-OCR fallback (an equation or figure baked in
-# as a picture with no text behind it).
-_IMAGE_MATH_MIN_COVERAGE = 0.06
-_IMAGE_MATH_MAX_TEXT = 240
-
-
-def _page_needs_math_ocr(source_page, text: str) -> bool:
-    if len(text.strip()) > _IMAGE_MATH_MAX_TEXT:
-        return False
-    page_area = abs(source_page.rect)
-    if page_area <= 0:
-        return False
-    image_area = 0.0
-    try:
-        for info in source_page.get_image_info():
-            bbox = info.get("bbox")
-            if bbox:
-                image_area += abs(pymupdf.Rect(bbox))
-    except Exception:
-        return False
-    return image_area / page_area >= _IMAGE_MATH_MIN_COVERAGE
-
-
 def extract_pages(pdf_path: str) -> List[Dict]:
     """Extract layout-aware Markdown per page from a text-based PDF.
 
@@ -509,7 +484,6 @@ def extract_pages(pdf_path: str) -> List[Dict]:
 
         # Repair one page at a time so large books do not retain hundreds of
         # raw character-layout dictionaries in memory.
-        transcribed_pages = 0
         for index, original_page in enumerate(extracted):
             page = fallbacks.get(index, original_page)
             metadata = page.get("metadata") or {}
@@ -518,21 +492,11 @@ def extract_pages(pdf_path: str) -> List[Dict]:
                 source_page, (page.get("text") or "").strip()
             )
             layout = source_page.get_text("rawdict", sort=True)
-            text = repair_extracted_text(markdown, layout, glyph_maps)
-
-            if math_ocr.ENABLED and _page_needs_math_ocr(source_page, text):
-                transcribed = math_ocr.transcribe_page(source_page)
-                if transcribed:
-                    text = f"{text}\n\n{transcribed}".strip() if text.strip() else transcribed
-                    transcribed_pages += 1
-
             pages.append(
                 {
                     "page": int(metadata.get("page_number") or index + 1),
-                    "text": text,
+                    "text": repair_extracted_text(markdown, layout, glyph_maps),
                     "format": "markdown",
                 }
             )
-        if transcribed_pages:
-            logger.info("math OCR recovered content on %d page(s)", transcribed_pages)
     return pages
