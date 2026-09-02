@@ -145,13 +145,14 @@ def _parse_min_score(raw: str):
         return None
 
 
-# The cross-encoder emits raw logits: strongly relevant passages score well
-# above 0, unrelated ones go negative. Dropping hits below this cutoff lets a
-# query with no real answer in the library come back empty instead of returning
-# the least-bad noise. Only applies when reranking is on. The 0.0 default is the
-# natural boundary for bge-reranker-base; re-fit it for any other RERANK_MODEL
-# with `eval/harness.py calibrate`.
-RERANK_MIN_SCORE = _parse_min_score(os.environ.get("RERANK_MIN_SCORE", "0.0"))
+# bge-reranker-base emits a 0..1 relevance probability (sentence-transformers
+# applies the model's sigmoid head); the old cross-encoder/ms-marco-MiniLM
+# emitted raw logits centred on 0. Dropping hits below this cutoff lets a query
+# with no real answer in the library come back empty instead of returning the
+# least-bad noise. Only applies when reranking is on. 0.5 is the sigmoid midpoint
+# and the calibrated no-leak floor for bge-reranker-base; re-fit it for any other
+# RERANK_MODEL (or a different library) with `eval/harness.py calibrate`.
+RERANK_MIN_SCORE = _parse_min_score(os.environ.get("RERANK_MIN_SCORE", "0.5"))
 CHUNK_TARGET_TOKENS = int(os.environ.get("CHUNK_TARGET_TOKENS", "180"))
 CHUNK_SOFT_MAX_TOKENS = int(os.environ.get("CHUNK_SOFT_MAX_TOKENS", "220"))
 CHUNK_HARD_MAX_TOKENS = int(os.environ.get("CHUNK_HARD_MAX_TOKENS", "240"))

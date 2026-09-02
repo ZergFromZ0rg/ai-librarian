@@ -269,7 +269,11 @@ def calibrate(cases: list[dict], _rerank: bool) -> int:
 
     print("\n  cutoff        kept    of which     recall of   gate")
     print("  (min_score)   hits    off-topic    relevant    leaks")
-    candidates = sorted({round(s * 2) / 2 for s, *_ in labelled})
+    # ms-marco-MiniLM scores are logits spanning ~10+ points; bge-reranker-base
+    # scores are a 0..1 probability. Step finely enough to resolve the floor in
+    # either range without printing hundreds of rows.
+    step = 0.05 if (hi - lo) <= 3 else 0.5
+    candidates = sorted({round(s / step) * step for s, *_ in labelled})
     floor = None
     balanced = None
     balanced_j = -1.0
@@ -286,7 +290,7 @@ def calibrate(cases: list[dict], _rerank: bool) -> int:
                 flag = "  <- floor (no gate leaks)"
             if recall - noise > balanced_j:
                 balanced_j, balanced = recall - noise, cutoff
-        print(f"  {cutoff:+6.1f}       {kept_pos + kept_neg:4d}    {noise:6.0%}       "
+        print(f"  {cutoff:+7.2f}      {kept_pos + kept_neg:4d}    {noise:6.0%}       "
               f"{recall:6.0%}      {leaks:3d}{flag}")
 
     if floor is None:
@@ -296,10 +300,10 @@ def calibrate(cases: list[dict], _rerank: bool) -> int:
     def keep(cutoff: float) -> float:
         return sum(1 for s in positives if s >= cutoff) / len(positives)
 
-    print(f"\n  RERANK_MIN_SCORE floor    {floor:+.1f}  "
+    print(f"\n  RERANK_MIN_SCORE floor    {floor:+.2f}  "
           f"(P(rel) ~ {_prob_at(curve, floor):.2f}, keeps {keep(floor):.0%} of known answers)")
     if balanced is not None and balanced != floor:
-        print(f"  best noise/recall trade  {balanced:+.1f}  "
+        print(f"  best noise/recall trade  {balanced:+.2f}  "
               f"(P(rel) ~ {_prob_at(curve, balanced):.2f}, keeps {keep(balanced):.0%})")
     return 0
 
