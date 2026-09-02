@@ -145,7 +145,7 @@ Absolute paths and paths outside `/library` are rejected. Folder imports scan PD
 | `FUSION_METHOD` | `rrf` | How the semantic and lexical lists merge: `rrf` (rank only), `dbsf` (score, Qdrant-normalised), `rsf` (min-max + weight). Query-time only |
 | `FUSION_DENSE_WEIGHT` | `0.5` | `rsf` only: 0..1 weight on the semantic list (lexical gets the rest) |
 | `RERANK_MODEL` | `BAAI/bge-reranker-base` | Cross-encoder that re-sorts the shortlist; the default is strong on scholarly prose. `cross-encoder/ms-marco-MiniLM-L-6-v2` is ~10x smaller and faster on CPU but far noisier. Re-run `eval/harness.py calibrate` after a change |
-| `RERANK_PASSAGE` | `matched` | Text the reranker scores: `matched` (the winning retrieval unit) or `group` (the whole passage) |
+| `RERANK_PASSAGE` | `group` | Text the reranker scores: `group` (the whole passage) or `matched` (just the winning retrieval unit). `group` gives bge-reranker-base the context to separate near-duplicates; `matched` saturates on short fragments. A search request may override it |
 | `RERANK_TIMEOUT` | `30` | Maximum reranker time in seconds; on a timeout the fused order is returned unranked |
 | `RERANK_CANDIDATES` | `60` | Fused candidates the cross-encoder scores per query; higher lifts recall for ~linearly more latency |
 | `RERANK_MIN_SCORE` | `0.0` | Drop reranked hits below this cross-encoder score; `off` disables. Only applies to reranked searches |

@@ -126,11 +126,12 @@ RERANK_TIMEOUT = float(os.environ.get("RERANK_TIMEOUT", "30"))
 # bge-reranker-base on a CPU-only host; drop it (or switch to ms-marco-MiniLM)
 # if that latency hurts.
 RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "60"))
-# What text the cross-encoder scores against the query: "matched" = the specific
-# retrieval unit that won (a paragraph, an equation), "group" = the whole parent
-# passage. Scoring the matched part keeps a small hit from being diluted by the
-# rest of its group.
-RERANK_PASSAGE = os.environ.get("RERANK_PASSAGE", "matched").strip().lower()
+# What text the cross-encoder scores against the query: "group" = the whole
+# parent passage (default), "matched" = just the specific retrieval unit that
+# won (a paragraph, an equation). "group" gives bge-reranker-base enough context
+# to separate near-duplicates in dense survey prose; "matched" tends to saturate
+# its score on short fragments and bare headings. A request may override this.
+RERANK_PASSAGE = os.environ.get("RERANK_PASSAGE", "group").strip().lower()
 
 
 def _parse_min_score(raw: str):
@@ -230,6 +231,7 @@ def record_search(
             "rerank": request.rerank,
             "rerank_k": request.rerank_k if request.rerank else None,
             "rerank_min_score": rerank_min_score,
+            "rerank_passage": (request.rerank_passage or RERANK_PASSAGE) if request.rerank else None,
             "rerank_dropped": rerank_dropped or None,
             "fusion": request.fusion or FUSION_METHOD,
             "dense_weight": request.dense_weight,
@@ -274,6 +276,8 @@ class SearchRequest(BaseModel):
     # Overrides RERANK_MIN_SCORE for this request. Only used when rerank=True.
     # A hit is kept when its reranker score is >= this value.
     rerank_min_score: Optional[float] = Field(default=None, ge=-100, le=100)
+    # Overrides RERANK_PASSAGE for this request: "group" or "matched".
+    rerank_passage: Optional[str] = Field(default=None, pattern=r"^(group|matched)$")
     # Override how the dense and sparse lists are merged (FUSION_METHOD) and, for
     # "rsf", how much weight the semantic list gets (FUSION_DENSE_WEIGHT).
     fusion: Optional[str] = Field(default=None, pattern=r"^(rrf|dbsf|rsf)$")
@@ -928,19 +932,21 @@ app.add_middleware(
 )
 
 
-def _rerank_passage(payload: dict) -> str:
+def _rerank_passage(payload: dict, mode: Optional[str] = None) -> str:
     """The text the cross-encoder scores for one hit (see RERANK_PASSAGE)."""
     group = (payload.get("text") or "").strip()
     matched = (payload.get("retrieval_text") or "").strip()
-    if RERANK_PASSAGE == "matched" and 40 <= len(matched) < len(group):
+    if (mode or RERANK_PASSAGE) == "matched" and 40 <= len(matched) < len(group):
         return matched
     return group or matched or (payload.get("embedding_text") or "")
 
 
-async def run_reranker(query: str, hits: List[dict]) -> List[dict]:
+async def run_reranker(
+    query: str, hits: List[dict], passage_mode: Optional[str] = None
+) -> List[dict]:
     if not hits or RERANK_EXECUTOR is None:
         return hits
-    passages = [_rerank_passage(hit.get("payload") or {}) for hit in hits]
+    passages = [_rerank_passage(hit.get("payload") or {}, passage_mode) for hit in hits]
     loop = asyncio.get_running_loop()
     future = loop.run_in_executor(RERANK_EXECUTOR, rerank, query, passages)
     try:
@@ -989,6 +995,7 @@ async def retrieve(
     min_score: Optional[float] = None,
     fusion: Optional[str] = None,
     dense_weight: Optional[float] = None,
+    rerank_passage: Optional[str] = None,
 ) -> tuple[List[dict], int, int]:
     query_vector = await asyncio.to_thread(lambda: embed_texts([query], kind="query")[0])
     filters = {
@@ -1013,7 +1020,7 @@ async def retrieve(
     hits = coalesce_group_hits(hits)
     dropped = 0
     if rerank_enabled:
-        hits = await run_reranker(query, hits[:rerank_pool])
+        hits = await run_reranker(query, hits[:rerank_pool], rerank_passage)
         # Apply the cutoff only when reranking actually produced scores; on a
         # timeout or failure run_reranker returns hits unscored in vector order,
         # and gating on a missing score would wrongly drop everything.
@@ -1318,6 +1325,7 @@ async def search(request: SearchRequest):
             min_score,
             fusion=request.fusion,
             dense_weight=request.dense_weight,
+            rerank_passage=request.rerank_passage,
         )
     except Exception as exc:
         raise _sanitized_http_error(503, "search failed", exc) from exc
@@ -1342,6 +1350,7 @@ async def search_get(
     rerank_enabled: bool = Query(False, alias="rerank"),
     rerank_k: int = Query(20, ge=1, le=200),
     rerank_min_score: Optional[float] = Query(default=None, ge=-100, le=100),
+    rerank_passage: Optional[str] = Query(default=None, pattern=r"^(group|matched)$"),
     fusion: Optional[str] = Query(default=None, pattern=r"^(rrf|dbsf|rsf)$"),
     dense_weight: Optional[float] = Query(default=None, ge=0.0, le=1.0),
 ):
@@ -1354,6 +1363,7 @@ async def search_get(
         rerank=rerank_enabled,
         rerank_k=rerank_k,
         rerank_min_score=rerank_min_score,
+        rerank_passage=rerank_passage,
         fusion=fusion,
         dense_weight=dense_weight,
     )

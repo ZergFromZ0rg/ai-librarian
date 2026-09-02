@@ -393,9 +393,13 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                          help="override the server's dense/sparse fusion method")
     p_score.add_argument("--dense-weight", type=float,
                          help="rsf only: 0..1 weight on the semantic list")
+    p_score.add_argument("--rerank-passage", choices=["group", "matched"],
+                         help="override what text the reranker scores")
 
     p_cal = sub.add_parser("calibrate", help="fit reranker score -> P(relevant), recommend a cutoff")
     p_cal.add_argument("--queries", type=Path, default=QUERIES_PATH)
+    p_cal.add_argument("--rerank-passage", choices=["group", "matched"],
+                       help="override what text the reranker scores")
 
     p_review = sub.add_parser("review", help="recent logged queries -> judgment stubs")
     p_review.add_argument("-n", "--limit", type=int, default=20)
@@ -412,6 +416,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         SEARCH_OVERRIDES["fusion"] = args.fusion
     if getattr(args, "dense_weight", None) is not None:
         SEARCH_OVERRIDES["dense_weight"] = args.dense_weight
+    if getattr(args, "rerank_passage", None):
+        SEARCH_OVERRIDES["rerank_passage"] = args.rerank_passage
 
     if args.command == "score":
         return score(load_cases(args.queries), rerank)

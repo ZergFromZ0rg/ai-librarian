@@ -281,6 +281,11 @@ def test_rerank_passage_prefers_the_matched_unit_when_it_is_distinct(service, mo
     monkeypatch.setattr(module, "RERANK_PASSAGE", "group")
     assert module._rerank_passage(payload) == group.strip()
 
+    # An explicit per-request mode overrides the server default either way.
+    assert module._rerank_passage(payload, "matched") == matched
+    monkeypatch.setattr(module, "RERANK_PASSAGE", "matched")
+    assert module._rerank_passage(payload, "group") == group.strip()
+
 
 def test_search_log_can_be_disabled(service, monkeypatch):
     module, client, _indexed = service
