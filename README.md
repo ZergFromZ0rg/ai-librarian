@@ -57,7 +57,7 @@ The first indexing request takes longer because the document service downloads i
 | Role | Model | Download |
 | --- | --- | --- |
 | embeddings | `intfloat/e5-small-v2` | ~130 MB |
-| reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` | ~90 MB |
+| reranker | `BAAI/bge-reranker-base` | ~1.1 GB |
 
 The embedding model is a 384-dimensional, 512-token model that expects its inputs labelled by role — the service prefixes search strings with `query: ` and stored passages with `passage: ` (configurable). Override `EMBEDDING_MODEL` for a different model; for an unprefixed one such as `sentence-transformers/all-MiniLM-L6-v2` also set `EMBEDDING_QUERY_PREFIX` and `EMBEDDING_PASSAGE_PREFIX` empty. A model change re-embeds the whole library on the next start (no Qdrant reset while the vector width stays 384).
 
@@ -77,7 +77,7 @@ echo "OFFLINE=1" >> .env
 docker compose up -d
 ```
 
-`PREBAKE_MODELS=1` adds roughly 400 MB to the image; on first start the entrypoint copies the baked models into an empty `data/models/`. Alternatively, run `warm_models.py` on a networked machine and copy `data/models/` to the air-gapped host.
+`PREBAKE_MODELS=1` adds roughly 1.3 GB to the image (mostly the reranker; set `RERANK_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2` before building to trade quality for ~1 GB); on first start the entrypoint copies the baked models into an empty `data/models/`. Alternatively, run `warm_models.py` on a networked machine and copy `data/models/` to the air-gapped host.
 
 When upgrading from an older pipeline version, or after changing `EMBEDDING_MODEL`, existing stored PDFs are automatically reindexed on first start — re-extracted when the pipeline changed, otherwise just re-embedded. The original PDFs remain unchanged. During this one-time migration, document badges move through `queued` and `indexing` again.
 
@@ -144,9 +144,9 @@ Absolute paths and paths outside `/library` are rejected. Folder imports scan PD
 | `LEXICAL_AVGDL` | `180` | BM25 reference passage length (weighted terms); a re-index picks up a change |
 | `FUSION_METHOD` | `rrf` | How the semantic and lexical lists merge: `rrf` (rank only), `dbsf` (score, Qdrant-normalised), `rsf` (min-max + weight). Query-time only |
 | `FUSION_DENSE_WEIGHT` | `0.5` | `rsf` only: 0..1 weight on the semantic list (lexical gets the rest) |
-| `RERANK_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder that re-sorts the shortlist; `BAAI/bge-reranker-base` is stronger on scholarly prose but slower on CPU |
+| `RERANK_MODEL` | `BAAI/bge-reranker-base` | Cross-encoder that re-sorts the shortlist; the default is strong on scholarly prose. `cross-encoder/ms-marco-MiniLM-L-6-v2` is ~10x smaller and faster on CPU but far noisier. Re-run `eval/harness.py calibrate` after a change |
 | `RERANK_PASSAGE` | `matched` | Text the reranker scores: `matched` (the winning retrieval unit) or `group` (the whole passage) |
-| `RERANK_TIMEOUT` | `15` | Maximum reranker time in seconds |
+| `RERANK_TIMEOUT` | `30` | Maximum reranker time in seconds; on a timeout the fused order is returned unranked |
 | `RERANK_CANDIDATES` | `60` | Fused candidates the cross-encoder scores per query; higher lifts recall for ~linearly more latency |
 | `RERANK_MIN_SCORE` | `0.0` | Drop reranked hits below this cross-encoder score; `off` disables. Only applies to reranked searches |
 | `CHUNK_TARGET_TOKENS` | `180` | Preferred token budget for a searchable passage |

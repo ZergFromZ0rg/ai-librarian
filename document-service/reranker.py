@@ -5,7 +5,7 @@ from typing import List, Optional
 _model = None
 _model_name = None
 _model_lock = threading.Lock()
-DEFAULT_MODEL = os.environ.get("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+DEFAULT_MODEL = os.environ.get("RERANK_MODEL", "BAAI/bge-reranker-base")
 
 
 def get_model(name: str = DEFAULT_MODEL):

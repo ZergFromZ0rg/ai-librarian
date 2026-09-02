@@ -118,11 +118,13 @@ INGEST_QUEUE_SIZE = int(os.environ.get("INGEST_QUEUE_SIZE", "10"))
 # case a wake-up signal is ever missed.
 INDEX_POLL_SECONDS = float(os.environ.get("INDEX_POLL_SECONDS", "30"))
 RERANK_MAX_WORKERS = int(os.environ.get("RERANK_MAX_WORKERS", "2"))
-RERANK_TIMEOUT = float(os.environ.get("RERANK_TIMEOUT", "10"))
+RERANK_TIMEOUT = float(os.environ.get("RERANK_TIMEOUT", "30"))
 # How many fused candidates the cross-encoder actually scores. Dense+sparse
 # fusion is only a coarse filter; the reranker is what picks the winning
 # passage, so it needs a wide enough pool. `rerank_k` from the request acts as
-# a floor on top of this. ~60 keeps latency near 1s on a CPU-only host.
+# a floor on top of this. ~60 costs a few seconds per query with the default
+# bge-reranker-base on a CPU-only host; drop it (or switch to ms-marco-MiniLM)
+# if that latency hurts.
 RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "60"))
 # What text the cross-encoder scores against the query: "matched" = the specific
 # retrieval unit that won (a paragraph, an equation), "group" = the whole parent
@@ -143,10 +145,12 @@ def _parse_min_score(raw: str):
         return None
 
 
-# Cross-encoder (ms-marco-MiniLM) emits raw logits: strongly relevant passages
-# score well above 0, unrelated ones go negative. Dropping hits below this cutoff
-# lets a query with no real answer in the library come back empty instead of
-# returning the least-bad noise. Only applies when reranking is on.
+# The cross-encoder emits raw logits: strongly relevant passages score well
+# above 0, unrelated ones go negative. Dropping hits below this cutoff lets a
+# query with no real answer in the library come back empty instead of returning
+# the least-bad noise. Only applies when reranking is on. The 0.0 default is the
+# natural boundary for bge-reranker-base; re-fit it for any other RERANK_MODEL
+# with `eval/harness.py calibrate`.
 RERANK_MIN_SCORE = _parse_min_score(os.environ.get("RERANK_MIN_SCORE", "0.0"))
 CHUNK_TARGET_TOKENS = int(os.environ.get("CHUNK_TARGET_TOKENS", "180"))
 CHUNK_SOFT_MAX_TOKENS = int(os.environ.get("CHUNK_SOFT_MAX_TOKENS", "220"))
