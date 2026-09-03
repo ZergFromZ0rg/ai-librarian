@@ -213,8 +213,9 @@ SDK. `GENERATION_MODEL` optionally sets the default model (`provider:model`, e.g
 ### Shared knobs
 
 `GENERATION_MAX_TOKENS` (answer length ceiling), `GENERATION_TEMPERATURE`,
-`GENERATION_TIMEOUT`, `ASK_CONTEXT_PASSAGES` (how many passages the model sees, default 6),
-and `ASK_MAX_CONTEXT_CHARS` (a character budget over those passages). `GET /config` reports
+`GENERATION_TIMEOUT`, `ASK_CONTEXT_PASSAGES` (how many passages the model sees and cites,
+default 10), and `ASK_MAX_CONTEXT_CHARS` (a character budget over those passages,
+default 10000). `GET /config` reports
 whether Ask mode is enabled and which providers are configured; the UI shows the **Ask**
 tab only when at least one model is available.
 
