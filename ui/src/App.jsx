@@ -1,8 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 
-import { makeMatchHighlighter } from "./highlight.js";
+import AskPanel from "./AskPanel.jsx";
+import ResultCard from "./ResultCard.jsx";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 const TERMINAL_JOB_STATES = new Set(["done", "partial", "error", "interrupted"]);
@@ -132,6 +131,8 @@ export default function App() {
   const [searching, setSearching] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [source, setSource] = useState(null);
+  const [askEnabled, setAskEnabled] = useState(false);
+  const [view, setView] = useState("search");
 
   const api = useCallback(
     async (path, options = {}) => {
@@ -165,6 +166,18 @@ export default function App() {
   useEffect(() => {
     refreshHealth();
   }, [refreshHealth]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api("/config")
+      .then((config) => {
+        if (!cancelled) setAskEnabled(Boolean(config?.generation?.enabled));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
 
   useEffect(() => {
     refreshDocuments();
@@ -369,100 +382,93 @@ export default function App() {
         </section>
 
         <section className="panel chat-panel">
-          <div className="chat-header">
-            <h2>Search your library</h2>
-            <p>Semantic search finds and reranks the most relevant source passages.</p>
-          </div>
-          <div className="messages" aria-live="polite">
-            {results.length === 0 && !searching && !searched && (
-              <div className="empty-state">
-                <div>
-                  <strong>What are you looking for?</strong>
-                  Add a document, wait for it to be indexed, then search across your collection.
-                </div>
+          {askEnabled && (
+            <div className="panel-tabs" role="tablist">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={view === "search"}
+                className={view === "search" ? "active" : ""}
+                onClick={() => setView("search")}
+              >
+                Search
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={view === "ask"}
+                className={view === "ask" ? "active" : ""}
+                onClick={() => setView("ask")}
+              >
+                Ask
+              </button>
+            </div>
+          )}
+
+          {view === "ask" && askEnabled ? (
+            <AskPanel apiBase={API_BASE} onViewSource={setSource} indexedCount={indexedCount} />
+          ) : (
+            <>
+              <div className="chat-header">
+                <h2>Search your library</h2>
+                <p>Semantic search finds and reranks the most relevant source passages.</p>
               </div>
-            )}
-            {results.length === 0 && !searching && searched && (
-              <div className="empty-state">
-                <div>
-                  <strong>No relevant passages found.</strong>
-                  Nothing in your library matched this closely enough. Try rephrasing, or add a
-                  document that covers the topic.
-                </div>
-              </div>
-            )}
-            {results.length > 0 && lowConfidence && (
-              <div className="empty-state low-confidence">
-                <div>
-                  <strong>Low confidence.</strong>
-                  Nothing in your library scored as a clear match for this query — the
-                  passages below are the closest available, not necessarily an answer.
-                </div>
-              </div>
-            )}
-            {results.map((result) => {
-              const highlighter = makeMatchHighlighter(result.matched);
-              return (
-                <article className="search-result" key={`${result.document_id}-${result.chunk_id}`}>
-                  <div className="search-result-meta">
-                    <strong>{result.document}</strong>
-                    <span>
-                      {result.page_end && result.page_end !== result.page
-                        ? `pages ${result.page}–${result.page_end}`
-                        : `page ${result.page}`}
-                    </span>
-                    <span>score {(result.rerank_score ?? result.score)?.toFixed(3)}</span>
-                    <button
-                      type="button"
-                      className="source-link"
-                      onClick={() =>
-                        setSource({
-                          documentId: result.document_id,
-                          documentName: result.document,
-                          page: result.page,
-                          matched: result.matched,
-                          snippet: result.text,
-                        })
-                      }
-                    >
-                      view source ↗
-                    </button>
+              <div className="messages" aria-live="polite">
+                {results.length === 0 && !searching && !searched && (
+                  <div className="empty-state">
+                    <div>
+                      <strong>What are you looking for?</strong>
+                      Add a document, wait for it to be indexed, then search across your collection.
+                    </div>
                   </div>
-                  {result.lead_in && (
-                    <p className="search-result-leadin">…{result.lead_in}</p>
-                  )}
-                  <div className="search-result-text">
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      rehypePlugins={highlighter ? [highlighter] : []}
-                      skipHtml
-                    >
-                      {result.text}
-                    </ReactMarkdown>
+                )}
+                {results.length === 0 && !searching && searched && (
+                  <div className="empty-state">
+                    <div>
+                      <strong>No relevant passages found.</strong>
+                      Nothing in your library matched this closely enough. Try rephrasing, or add a
+                      document that covers the topic.
+                    </div>
                   </div>
-                </article>
-              );
-            })}
-            {searching && <div className="message assistant">Finding the most relevant passages…</div>}
-          </div>
+                )}
+                {results.length > 0 && lowConfidence && (
+                  <div className="empty-state low-confidence">
+                    <div>
+                      <strong>Low confidence.</strong>
+                      Nothing in your library scored as a clear match for this query — the
+                      passages below are the closest available, not necessarily an answer.
+                    </div>
+                  </div>
+                )}
+                {results.map((result) => (
+                  <ResultCard
+                    key={`${result.document_id}-${result.chunk_id}`}
+                    result={result}
+                    onViewSource={setSource}
+                  />
+                ))}
+                {searching && <div className="message assistant">Finding the most relevant passages…</div>}
+              </div>
+              <form className="question-box" onSubmit={searchLibrary}>
+                <textarea
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      event.currentTarget.form.requestSubmit();
+                    }
+                  }}
+                  placeholder="Search concepts, passages, names, or ideas…"
+                  aria-label="Search query"
+                />
+                <button className="primary" type="submit" disabled={!query.trim() || searching || indexedCount === 0}>
+                  {searching ? "Searching…" : "Search"}
+                </button>
+              </form>
+            </>
+          )}
           {source && <SourceViewer source={source} onClose={() => setSource(null)} />}
-          <form className="question-box" onSubmit={searchLibrary}>
-            <textarea
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  event.currentTarget.form.requestSubmit();
-                }
-              }}
-              placeholder="Search concepts, passages, names, or ideas…"
-              aria-label="Search query"
-            />
-            <button className="primary" type="submit" disabled={!query.trim() || searching || indexedCount === 0}>
-              {searching ? "Searching…" : "Search"}
-            </button>
-          </form>
         </section>
       </div>
     </main>

@@ -16,8 +16,11 @@ server {
         # Empty unless APP_TOKEN is set, in which case it is "Bearer <token>";
         # an empty value means the header is not forwarded.
         proxy_set_header Authorization "${APP_TOKEN_HEADER}";
-        proxy_read_timeout 240s;
-        proxy_send_timeout 240s;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        # Ask mode answers stream as Server-Sent Events; without this nginx
+        # buffers the whole response and the answer lands in one lump.
+        proxy_buffering off;
     }
 
     location = /healthz {
