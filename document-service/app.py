@@ -123,10 +123,10 @@ RERANK_TIMEOUT = float(os.environ.get("RERANK_TIMEOUT", "15"))
 # How many fused candidates the cross-encoder actually scores. Dense+sparse
 # fusion is only a coarse filter; the reranker is what picks the winning
 # passage, so it needs a wide enough pool. `rerank_k` from the request acts as
-# a floor on top of this. The default ms-marco-MiniLM scores ~60 in well under a
-# second on CPU; a heavier RERANK_MODEL (bge-reranker-base) makes this the main
-# latency knob -- drop it to ~25 there.
-RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "60"))
+# a floor on top of this. The default ms-marco-MiniLM scores ~100 in ~1-2s on
+# CPU; raise it further as the library grows (fusion over hundreds of documents
+# is a coarse net), or drop it to ~25 with a heavier RERANK_MODEL.
+RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "100"))
 # What text the cross-encoder scores against the query: "group" = the whole
 # parent passage (default), "matched" = just the specific retrieval unit that
 # won (a paragraph, an equation). "group" gives the reranker enough context to
@@ -160,6 +160,13 @@ RERANK_MIN_SCORE = _parse_min_score(os.environ.get("RERANK_MIN_SCORE", "-2.0"))
 # banner without hiding anything. 0.0 suits MiniLM logits; raise it (~0.3) for a
 # 0..1 model. `off` disables the flag.
 RERANK_LOWCONF_SCORE = _parse_min_score(os.environ.get("RERANK_LOWCONF_SCORE", "0.0"))
+# Ask mode: keep any single document from taking more than this many of the
+# passages sent to the model, so a large library answers with breadth instead of
+# ten near-identical paragraphs from one chapter. 0 disables the cap.
+ASK_MAX_PER_DOC = int(os.environ.get("ASK_MAX_PER_DOC", "3"))
+# Ask mode: drop a passage whose word overlap with an already-kept passage
+# exceeds this (near-duplicate removal). 0/1 disables.
+ASK_DEDUP_JACCARD = float(os.environ.get("ASK_DEDUP_JACCARD", "0.6"))
 CHUNK_TARGET_TOKENS = int(os.environ.get("CHUNK_TARGET_TOKENS", "180"))
 CHUNK_SOFT_MAX_TOKENS = int(os.environ.get("CHUNK_SOFT_MAX_TOKENS", "220"))
 CHUNK_HARD_MAX_TOKENS = int(os.environ.get("CHUNK_HARD_MAX_TOKENS", "240"))
@@ -1048,6 +1055,50 @@ def coalesce_group_hits(hits: List[dict]) -> List[dict]:
     return [grouped[key] for key in order]
 
 
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _word_set(text: str) -> set:
+    return set(_WORD_RE.findall((text or "").lower()))
+
+
+def diversify_hits(
+    hits: List[dict], top_k: int, max_per_doc: int = 0, dedup_jaccard: float = 1.0
+) -> List[dict]:
+    """Trim a ranked list to `top_k`, favouring breadth.
+
+    Walks best-first, skipping a hit once its document already has `max_per_doc`
+    picks, or when its wording overlaps an already-kept hit by more than
+    `dedup_jaccard`. Falls back to the plain top-k if the constraints would
+    leave fewer than `top_k` and there are demoted hits to backfill with.
+    """
+    if not hits:
+        return hits
+    per_doc: dict = {}
+    kept: List[dict] = []
+    kept_words: List[set] = []
+    demoted: List[dict] = []
+    for hit in hits:
+        payload = hit.get("payload") or {}
+        doc = payload.get("document_id")
+        if max_per_doc and per_doc.get(doc, 0) >= max_per_doc:
+            demoted.append(hit)
+            continue
+        if 0 < dedup_jaccard < 1:
+            words = _word_set(payload.get("text") or payload.get("retrieval_text") or "")
+            if words and any(
+                len(words & seen) / len(words | seen) > dedup_jaccard for seen in kept_words
+            ):
+                demoted.append(hit)
+                continue
+            kept_words.append(words)
+        per_doc[doc] = per_doc.get(doc, 0) + 1
+        kept.append(hit)
+        if len(kept) >= top_k:
+            return kept
+    return (kept + demoted)[:top_k]
+
+
 async def retrieve(
     query: str,
     top_k: int,
@@ -1059,7 +1110,9 @@ async def retrieve(
     fusion: Optional[str] = None,
     dense_weight: Optional[float] = None,
     rerank_passage: Optional[str] = None,
-) -> tuple[List[dict], int, int]:
+    max_per_doc: int = 0,
+    dedup_jaccard: float = 1.0,
+) -> tuple[List[dict], int, int, int]:
     query_vector = await asyncio.to_thread(lambda: embed_texts([query], kind="query")[0])
     filters = {
         key: value
@@ -1095,7 +1148,10 @@ async def retrieve(
             ]
             dropped = len(hits) - len(kept)
             hits = kept
-    return hits[:top_k], candidate_count, dropped
+    relevant_count = len(hits)
+    if max_per_doc or (0 < dedup_jaccard < 1):
+        hits = diversify_hits(hits, top_k, max_per_doc, dedup_jaccard)
+    return hits[:top_k], candidate_count, dropped, relevant_count
 
 
 _TERMINAL_PUNCTUATION = tuple(".!?\"')”’»…")
@@ -1380,7 +1436,7 @@ async def search(request: SearchRequest):
     started = time.monotonic()
     min_score = request.rerank_min_score if request.rerank_min_score is not None else RERANK_MIN_SCORE
     try:
-        hits, candidate_count, rerank_dropped = await retrieve(
+        hits, candidate_count, rerank_dropped, _ = await retrieve(
             request.query,
             request.top_k,
             request.document_id,
@@ -1487,16 +1543,22 @@ async def ask(request: AskRequest):
     if model is None:
         raise HTTPException(status_code=503, detail=generation.disabled_reason())
 
+    # How many passages this model sees and cites — more for big-context cloud
+    # models, fewer for a local one. The request's top_k is a floor.
+    passages = max(request.top_k, generation.context_passages_for(model))
+
     started = time.monotonic()
     try:
-        hits, candidate_count, rerank_dropped = await retrieve(
+        hits, candidate_count, rerank_dropped, relevant_count = await retrieve(
             request.question,
-            request.top_k,
+            passages,
             request.document_id,
             request.filename,
             True,
             SearchRequest.model_fields["rerank_k"].default,
             RERANK_MIN_SCORE,
+            max_per_doc=ASK_MAX_PER_DOC,
+            dedup_jaccard=ASK_DEDUP_JACCARD,
         )
     except Exception as exc:
         raise _sanitized_http_error(503, "retrieval failed", exc) from exc
@@ -1527,7 +1589,10 @@ async def ask(request: AskRequest):
                 )
                 return
             system, messages, used = generation.build_ask_prompt(
-                request.question, sources, [turn.model_dump() for turn in request.history]
+                request.question,
+                sources,
+                [turn.model_dump() for turn in request.history],
+                max_passages=passages,
             )
             async for chunk in generation.generate_stream(model, system, messages):
                 yield _sse({"type": "token", "text": chunk})
@@ -1537,6 +1602,8 @@ async def ask(request: AskRequest):
                     "results": used,
                     "low_confidence": low_confidence,
                     "model": model,
+                    "documents": len({s.get("document_id") for s in used}),
+                    "relevant_count": relevant_count,
                 }
             )
         except generation.GenerationError as exc:
