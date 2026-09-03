@@ -148,7 +148,7 @@ Absolute paths and paths outside `/library` are rejected. Folder imports scan PD
 | `RERANK_PASSAGE` | `group` | Text the reranker scores: `group` (the whole passage) or `matched` (just the winning retrieval unit). `group` gives bge-reranker-base the context to separate near-duplicates; `matched` saturates on short fragments. A search request may override it |
 | `RERANK_TIMEOUT` | `30` | Maximum reranker time in seconds; on a timeout the fused order is returned unranked |
 | `RERANK_CANDIDATES` | `60` | Fused candidates the cross-encoder scores per query; higher lifts recall for ~linearly more latency |
-| `RERANK_MIN_SCORE` | `0.0` | Drop reranked hits below this cross-encoder score; `off` disables. Only applies to reranked searches |
+| `RERANK_MIN_SCORE` | `off` | Optional floor on the reranker score; hits below it are dropped so an unanswerable query can return empty. Off by default — bge-reranker-base occasionally scores unrelated text above 0.9 on this library, so no floor cleanly separates junk from genuine low-confidence answers. Set a float only where `eval/harness.py calibrate` finds a clean cutoff |
 | `CHUNK_TARGET_TOKENS` | `180` | Preferred token budget for a searchable passage |
 | `CHUNK_SOFT_MAX_TOKENS` | `220` | Size allowed for an intact semantic group before child splitting |
 | `CHUNK_HARD_MAX_TOKENS` | `240` | Maximum estimated tokens in an embedding child |

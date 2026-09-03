@@ -9,12 +9,11 @@ Subcommands:
     python eval/harness.py capture "q" ...  # same stubs for queries given now
     python eval/harness.py score            # replay eval/queries.jsonl against
                                             # /search and report hit@k / recall@k
-                                            # / MRR / relevance-gate accuracy
-                                            # (--fusion / --dense-weight to A/B
-                                            # the dense+sparse merge)
+                                            # / MRR (--fusion / --dense-weight /
+                                            # --rerank-passage to A/B the pipeline)
     python eval/harness.py calibrate        # fit the reranker's raw score to
-                                            # P(relevant) on the judged set and
-                                            # recommend a RERANK_MIN_SCORE cutoff
+                                            # P(relevant) on the judged set (only
+                                            # useful if re-enabling RERANK_MIN_SCORE)
 
 The eval set lives in ``eval/queries.jsonl`` -- one JSON object per line:
 
@@ -22,6 +21,11 @@ The eval set lives in ``eval/queries.jsonl`` -- one JSON object per line:
      "relevant": [{"document": "myth-of-sisyphus.pdf", "page": 3,
                    "contains": "one truly serious philosophical problem"}]}
     {"id": "gate-gorilla", "query": "characteristics of a gorilla", "expect_empty": true}
+
+``expect_empty`` cases are unanswerable queries. With the relevance gate off
+(the default) ``score`` treats them as a probe -- it reports how confidently the
+reranker matches noise -- and never fails on them; ``calibrate`` still uses them
+to check for leaks if you are considering a RERANK_MIN_SCORE floor.
 
 A ``relevant`` entry counts as retrieved when the result's filename matches,
 the judged ``page`` falls inside the result's [page, page_end] span, and (when
@@ -144,7 +148,8 @@ def score(cases: list[dict], rerank: bool) -> int:
     recall_totals = {k: 0.0 for k in CUTOFFS}
     scored_cases = 0
     mrr_total = 0.0
-    gate_pass = gate_total = 0
+    probe_total = 0
+    probe_worst = 0.0
     rows: list[tuple[str, str]] = []
 
     for case in cases:
@@ -152,10 +157,13 @@ def score(cases: list[dict], rerank: bool) -> int:
         results = search(case["query"], top_k, rerank)
 
         if case.get("expect_empty"):
-            gate_total += 1
-            ok = len(results) == 0
-            gate_pass += ok
-            rows.append((case_id, "gate PASS" if ok else f"gate FAIL ({len(results)} returned)"))
+            # The relevance gate is off by default (RERANK_MIN_SCORE), so these
+            # unanswerable queries are a probe, not a pass/fail: how confidently
+            # does the reranker match noise? Higher top score = worse.
+            probe_total += 1
+            top = max((r.get("rerank_score") or 0.0 for r in results), default=0.0)
+            probe_worst = max(probe_worst, top)
+            rows.append((case_id, f"unanswerable -- reranker top {top:.2f}"))
             continue
 
         judged = case.get("relevant") or []
@@ -191,18 +199,16 @@ def score(cases: list[dict], rerank: bool) -> int:
         print(f"    hit rate:  {hit}")
         print(f"    recall:    {rec}")
         print(f"    MRR:       {mrr_total / scored_cases:.2f}")
-    if gate_total:
-        print(f"  relevance gate:  {gate_pass}/{gate_total} expected-empty queries returned nothing")
-    if not scored_cases and not gate_total:
+    if probe_total:
+        print(f"  unanswerable probes:  {probe_total} queries, reranker top score "
+              f"peaks at {probe_worst:.2f} (no relevance gate -- informational)")
+    if not scored_cases and not probe_total:
         print("  nothing to score yet -- add cases to eval/queries.jsonl")
         return 0
 
-    # Non-zero exit when the gate leaks or not a single query found an answer,
-    # so this can guard a release.
-    failed = (gate_total and gate_pass < gate_total) or (
-        scored_cases and hit_totals[CUTOFFS[0]] == 0
-    )
-    return 1 if failed else 0
+    # Non-zero exit only when not a single judged query found an answer, so this
+    # can still guard a release without depending on the (now-off) gate.
+    return 1 if (scored_cases and hit_totals[CUTOFFS[0]] == 0) else 0
 
 
 def _isotonic(pairs: list[tuple[float, int]]) -> list[tuple[float, float]]:
