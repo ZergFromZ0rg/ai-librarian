@@ -1,3 +1,19 @@
+# Evaluation harnesses
+
+Two hand-curated eval sets, each with a stdlib-only runner. Neither is a `pytest`
+test — they need the real models and a real indexed library, so run them by hand
+against a live service.
+
+- **`harness.py` + `queries.jsonl`** — *retrieval*: replays queries against
+  `/search`, reports hit@k / recall@k / MRR / gate accuracy. Catches regressions
+  from chunking, embedding, or reranker changes. (This document.)
+- **`ask_harness.py` + `answers.jsonl`** — *answer quality*: replays questions
+  against `/ask`, checks the generated answers are grounded, cited, on-topic, and
+  refuse when the library has nothing. See [Answer-quality harness](#answer-quality-harness)
+  at the bottom.
+
+---
+
 # Retrieval evaluation harness
 
 A small, hand-curated set of queries with relevance judgments, plus a runner that
@@ -141,3 +157,90 @@ environment. `APP_TOKEN` is only needed when going direct to :8000 on a
 token-protected API.
 
 The script is standard-library only — run it with any `python3`, no venv needed.
+
+---
+
+# Answer-quality harness
+
+`ask_harness.py` replays `answers.jsonl` against `/ask`, consumes the SSE stream,
+and checks the **generated answer** — the stage after retrieval. It catches
+regressions in the prompts, the map-reduce flow, query cleaning, and the model
+wiring.
+
+## The eval set: `answers.jsonl`
+
+One JSON object per line. `#`-prefixed and blank lines are ignored.
+
+```jsonl
+{"id": "meme-def", "question": "What is a meme?", "must_mention": ["imitation"],
+ "key_points": ["copied person to person", "spreads by imitation"],
+ "must_cite": [{"document": "The Meme Machine ....pdf", "page": 23}]}
+{"id": "carburetor", "question": "how do I rebuild a carburetor", "expect_refusal": true}
+```
+
+| field | meaning |
+|---|---|
+| `id`, `question` | required |
+| `mode` | `quick` (default) or `thorough` |
+| `model` | per-case model override (`provider:model`) |
+| `must_mention` | regexes (case-insensitive) the answer **must** contain — hard check |
+| `must_not_mention` | regexes the answer must **not** contain — hard check |
+| `key_points` | facts a good answer covers; scored by `--judge` only |
+| `must_cite` | list of acceptable passages (`document` + `page`); **≥1 must be retrieved** (hard), and it's a soft signal whether one was actually cited `[n]` |
+| `expect_refusal` | the library can't answer — assert the answer declines and cites nothing |
+
+## Deterministic checks (always run, no LLM)
+
+- citations present (non-refusal answers), every `[n]` within the source count
+- `must_mention` / `must_not_mention`
+- `must_cite` retrieved / cited
+- refusal detected for `expect_refusal`; **not** detected otherwise
+- `cited_fraction` — how much of the supplied context the answer actually cited
+
+`score` exits non-zero if any case has a hard failure, so it can gate a release.
+
+**LLM answers vary run to run.** A single hard failure is a signal to look, not
+proof of a regression — re-run, or use `--repeat N` (each case runs N times and
+fails only if it fails a majority; the pass rate is printed). A local model on
+CPU is slow, so `--repeat 3` on the full set is a coffee break.
+
+## Optional LLM judge
+
+`--judge <provider:model>` adds faithfulness / relevance / citation-accuracy
+(1–5) and `key_points` coverage. Two backends:
+
+```bash
+# local Ollama judge
+python eval/ask_harness.py --url http://192.168.0.122:3100/api \
+  --judge ollama:qwen2.5:7b --judge-url http://192.168.0.122:11434 score
+
+# Anthropic judge (needs ANTHROPIC_API_KEY)
+ANTHROPIC_API_KEY=sk-ant-... python eval/ask_harness.py --url … \
+  --judge anthropic:claude-sonnet-5 score
+```
+
+A missing key/URL disables the judge for the run (deterministic checks still run).
+
+## Building the set
+
+```bash
+python eval/ask_harness.py --url http://192.168.0.122:3100/api capture \
+  "What is a wormhole?" "Who discovered non-Euclidean geometry?"
+python eval/ask_harness.py --url http://192.168.0.122:3100/api review -n 20   # from the search log
+```
+
+Both print the answer, its sources, and a ready-to-edit stub. Paste a line into
+`answers.jsonl`, fill `must_mention` / `key_points` / `must_cite`, or swap in
+`{"expect_refusal": true}`.
+
+## Running
+
+```bash
+cd document-service
+python eval/ask_harness.py --url http://192.168.0.122:3100/api score
+python eval/ask_harness.py --url … --model ollama:qwen2.5:7b score   # pin a model
+python eval/ask_harness.py --url … capture "…" --mode thorough       # try thorough
+```
+
+`--model` / `--provider-key PROVIDER=KEY` before the subcommand override the model
+and pass a browser-style cloud key with every `/ask`.
