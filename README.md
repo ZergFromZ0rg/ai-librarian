@@ -229,6 +229,15 @@ paragraphs of one chapter:
 Each answer's source header shows the spread — "*N passages · M documents · K relevant
 matches*" — so you can see when coverage is thin.
 
+**Thorough mode** (the toggle in the Ask tab) is for library-wide questions — "what have I
+read about X", "compare how these books treat Y". It retrieves a much wider pool
+(`ASK_THOROUGH_PASSAGES`, default 40), groups it by document, has a cheap model pull the
+relevant evidence from each document **in parallel**, then the model you picked synthesises
+the answer from those notes with citations. It is slower (a handful of extra calls) and
+shines with a capable synthesis model. The map passes use the cheapest available model — a
+local one, else a small cloud model, else your selected model — overridable with
+`ASK_THOROUGH_MAP_MODEL`.
+
 ### Other knobs
 
 `GENERATION_MAX_TOKENS` (answer length ceiling), `GENERATION_TEMPERATURE`,
@@ -320,7 +329,7 @@ Important endpoints:
 - `POST /documents/{id}/retry` — retry failed indexing
 - `DELETE /documents/{id}` — delete stored files and vectors
 - `POST /search` — semantic retrieval (set `rerank: true` to reorder and relevance-gate; `rerank_min_score`, `fusion`, and `dense_weight` override the server defaults per request)
-- `POST /ask` — retrieve, then stream a grounded answer as Server-Sent Events (`token` chunks, then one `sources` event); body: `{"question", "history": [{"role", "content"}], "model": "provider:model"}`. Returns 503 when no model is available. See [Ask mode](#ask-mode)
+- `POST /ask` — retrieve, then stream a grounded answer as Server-Sent Events (`token` chunks, `progress` in thorough mode, then one `sources` event); body: `{"question", "history": [{"role", "content"}], "model": "provider:model", "mode": "quick"|"thorough"}`. Returns 503 when no model is available. See [Ask mode](#ask-mode)
 - `GET /ask/models` — models the reader may pick, plus the current default
 - `POST /admin/ingest-folder` — import the mounted library folder
 - `GET /admin/search-log` — recent queries with their returned pages and scores
