@@ -22,10 +22,9 @@ The eval set lives in ``eval/queries.jsonl`` -- one JSON object per line:
                    "contains": "one truly serious philosophical problem"}]}
     {"id": "gate-gorilla", "query": "characteristics of a gorilla", "expect_empty": true}
 
-``expect_empty`` cases are unanswerable queries. With the relevance gate off
-(the default) ``score`` treats them as a probe -- it reports how confidently the
-reranker matches noise -- and never fails on them; ``calibrate`` still uses them
-to check for leaks if you are considering a RERANK_MIN_SCORE floor.
+``expect_empty`` cases are unanswerable queries. ``score`` reports whether the
+RERANK_MIN_SCORE gate dropped them (informational -- the gate is a product
+choice, not a release blocker); ``calibrate`` uses them to fit the floor.
 
 A ``relevant`` entry counts as retrieved when the result's filename matches,
 the judged ``page`` falls inside the result's [page, page_end] span, and (when
@@ -151,7 +150,8 @@ def score(cases: list[dict], rerank: bool) -> int:
     scored_cases = 0
     mrr_total = 0.0
     probe_total = 0
-    probe_worst = 0.0
+    probe_gated = 0
+    probe_leaks = 0
     rows: list[tuple[str, str]] = []
 
     for case in cases:
@@ -159,13 +159,17 @@ def score(cases: list[dict], rerank: bool) -> int:
         results = search(case["query"], top_k, rerank)
 
         if case.get("expect_empty"):
-            # The relevance gate is off by default (RERANK_MIN_SCORE), so these
-            # unanswerable queries are a probe, not a pass/fail: how confidently
-            # does the reranker match noise? Higher top score = worse.
+            # Unanswerable queries. With the RERANK_MIN_SCORE gate on they should
+            # come back empty; report whichever way it went (informational -- the
+            # gate is a soft product choice, not a release blocker).
             probe_total += 1
-            top = max((r.get("rerank_score") or 0.0 for r in results), default=0.0)
-            probe_worst = max(probe_worst, top)
-            rows.append((case_id, f"unanswerable -- reranker top {top:.2f}"))
+            if not results:
+                probe_gated += 1
+                rows.append((case_id, "unanswerable -- gated out"))
+            else:
+                probe_leaks += 1
+                top = max((r.get("rerank_score") or 0.0 for r in results), default=0.0)
+                rows.append((case_id, f"unanswerable -- LEAKED {len(results)} (top {top:.2f})"))
             continue
 
         judged = case.get("relevant") or []
@@ -202,8 +206,8 @@ def score(cases: list[dict], rerank: bool) -> int:
         print(f"    recall:    {rec}")
         print(f"    MRR:       {mrr_total / scored_cases:.2f}")
     if probe_total:
-        print(f"  unanswerable probes:  {probe_total} queries, reranker top score "
-              f"peaks at {probe_worst:.2f} (no relevance gate -- informational)")
+        print(f"  unanswerable probes:  {probe_gated}/{probe_total} gated out"
+              + (f", {probe_leaks} LEAKED" if probe_leaks else ""))
     if not scored_cases and not probe_total:
         print("  nothing to score yet -- add cases to eval/queries.jsonl")
         return 0
@@ -403,6 +407,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                          help="rsf only: 0..1 weight on the semantic list")
     p_score.add_argument("--rerank-passage", choices=["group", "matched"],
                          help="override what text the reranker scores")
+    p_score.add_argument("--rerank-min-score", type=float,
+                         help="override the server's RERANK_MIN_SCORE gate for this run")
 
     p_cal = sub.add_parser("calibrate", help="fit reranker score -> P(relevant), recommend a cutoff")
     p_cal.add_argument("--queries", type=Path, default=QUERIES_PATH)
@@ -426,6 +432,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         SEARCH_OVERRIDES["dense_weight"] = args.dense_weight
     if getattr(args, "rerank_passage", None):
         SEARCH_OVERRIDES["rerank_passage"] = args.rerank_passage
+    if getattr(args, "rerank_min_score", None) is not None:
+        SEARCH_OVERRIDES["rerank_min_score"] = args.rerank_min_score
 
     if args.command == "score":
         return score(load_cases(args.queries), rerank)

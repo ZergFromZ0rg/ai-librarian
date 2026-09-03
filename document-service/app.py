@@ -146,14 +146,14 @@ def _parse_min_score(raw: str):
         return None
 
 
-# Optional hard floor on the reranker score: hits below it are dropped, so a
-# query with no real answer in the library can come back empty. Off by default --
-# neither reranker separates unanswerable queries from real ones cleanly enough
-# (bge-reranker-base scored a geometry sentence 0.93 for "chess en passant";
-# ms-marco-MiniLM scores real literary-prose answers below 0). Set a float
-# (MiniLM: logits around 0; bge: 0..1 probability) only where `eval/harness.py
-# calibrate` finds a clean cutoff.
-RERANK_MIN_SCORE = _parse_min_score(os.environ.get("RERANK_MIN_SCORE", "off"))
+# Hard floor on the reranker score: hits below it are dropped, so a query with no
+# real answer in the library comes back empty. -2.0 works with the default
+# ms-marco-MiniLM: on the reference library every unanswerable probe scores below
+# -3.5 while genuine answers (with bge-base retrieval feeding the reranker) score
+# above -2. bge-reranker-base cannot be gated at all -- it scored a geometry
+# sentence 0.93 for "chess en passant". Re-fit with `eval/harness.py calibrate`
+# after changing RERANK_MODEL; set "off" to disable.
+RERANK_MIN_SCORE = _parse_min_score(os.environ.get("RERANK_MIN_SCORE", "-2.0"))
 # Soft signal instead: when the top reranked hit scores below this, the response
 # is flagged `low_confidence` and the UI shows a "nothing clearly matched"
 # banner without hiding anything. 0.0 suits MiniLM logits; raise it (~0.3) for a
