@@ -267,32 +267,39 @@ def _model_label(model_id: str) -> str:
     return (model_id or "").partition(":")[2] or model_id
 
 
-async def pick_map_model(reduce_model: str) -> str:
+async def pick_map_model(reduce_model: str, keys: Optional[dict] = None) -> str:
     """The cheapest available model for the per-document extraction step.
 
     ``ASK_THOROUGH_MAP_MODEL`` wins if set and available; then any local Ollama
-    model (free); then a small cloud model whose provider is configured; finally
-    the model doing the synthesis.
+    model (free); then a small cloud model whose provider is configured (server
+    key or a browser-supplied one); finally the model doing the synthesis.
     """
+    keys = keys or {}
     ids = {model["id"] for model in await list_models()}
     override = os.environ.get("ASK_THOROUGH_MAP_MODEL", "").strip()
-    if override and override in ids:
+    if override and (override in ids or keys.get(override.split(":", 1)[0])):
         return override
     for model_id in ids:
         if model_id.startswith("ollama:"):
             return model_id
     for candidate in _MAP_FALLBACKS:
-        if candidate in ids:
+        if candidate in ids or keys.get(candidate.split(":", 1)[0]):
             return candidate
     return reduce_model
 
 
-async def _complete(model_id: str, system: str, messages: List[dict]) -> str:
-    return "".join([chunk async for chunk in generate_stream(model_id, system, messages)])
+async def _complete(
+    model_id: str, system: str, messages: List[dict], keys: Optional[dict] = None
+) -> str:
+    return "".join([chunk async for chunk in generate_stream(model_id, system, messages, keys)])
 
 
 async def generate_thorough(
-    reduce_model: str, question: str, sources: List[dict], history: Optional[List[dict]] = None
+    reduce_model: str,
+    question: str,
+    sources: List[dict],
+    history: Optional[List[dict]] = None,
+    keys: Optional[dict] = None,
 ) -> AsyncIterator[Tuple[str, str]]:
     """Map-reduce answer for library-wide questions.
 
@@ -305,7 +312,7 @@ async def generate_thorough(
         label = source.get("document") or source.get("document_id") or "source"
         groups.setdefault(label, []).append((index, source))
 
-    map_model = await pick_map_model(reduce_model)
+    map_model = await pick_map_model(reduce_model, keys)
     yield ("progress", f"Reading {len(groups)} documents with {_model_label(map_model)}…")
 
     async def _map_one(label: str, items: list) -> Tuple[str, str]:
@@ -317,7 +324,7 @@ async def generate_thorough(
             {"role": "user", "content": f"Question: {question}\n\nDocument: {label}\n\n{block}"}
         ]
         try:
-            notes = (await _complete(map_model, _MAP_SYSTEM, messages)).strip()
+            notes = (await _complete(map_model, _MAP_SYSTEM, messages, keys)).strip()
         except GenerationError as exc:
             logger.warning("Thorough map step failed for %s: %s", label, exc)
             return label, ""
@@ -339,7 +346,7 @@ async def generate_thorough(
     yield ("progress", f"Synthesising with {_model_label(reduce_model)}…")
     messages = list(history or [])
     messages.append({"role": "user", "content": f"Notes:\n\n{digest}\n\n---\n\nQuestion: {question}"})
-    async for chunk in generate_stream(reduce_model, _REDUCE_SYSTEM, messages):
+    async for chunk in generate_stream(reduce_model, _REDUCE_SYSTEM, messages, keys):
         yield ("token", chunk)
 
 
@@ -350,23 +357,31 @@ def _split_model_id(model_id: str) -> Tuple[str, str]:
     return provider, model
 
 
-async def generate_stream(model_id: str, system: str, messages: List[dict]) -> AsyncIterator[str]:
+async def generate_stream(
+    model_id: str, system: str, messages: List[dict], keys: Optional[dict] = None
+) -> AsyncIterator[str]:
     """Yield answer-text chunks from the provider named in ``model_id``.
 
     ``messages`` is a list of ``{"role": "user"|"assistant", "content": str}``.
-    Raises :class:`GenerationError` on any provider failure.
+    ``keys`` (``{provider: api_key}``) overrides the server env key for cloud
+    providers — the browser holds its own keys. Raises :class:`GenerationError`
+    on any provider failure.
     """
+    keys = keys or {}
     provider, model = _split_model_id(model_id)
-    if provider == "cloud-provider":
-        async for chunk in _cloud-provider_stream(model, system, messages):
-            yield chunk
-        return
     if provider == "ollama":
         async for chunk in _ollama_native_stream(model, system, messages):
             yield chunk
         return
+    if provider == "cloud-provider":
+        key = keys.get("cloud-provider") or _cloud_key("cloud-provider")
+        if not key:
+            raise GenerationError("cloud-provider is not configured (no API key)")
+        async for chunk in _cloud-provider_stream(model, system, messages, key):
+            yield chunk
+        return
     if provider in _CLOUD:
-        key = _cloud_key(provider)
+        key = keys.get(provider) or _cloud_key(provider)
         if not key:
             raise GenerationError(f"{provider} is not configured (no API key)")
         async for chunk in _openai_compatible_stream(
@@ -469,27 +484,24 @@ async def _openai_compatible_stream(
         raise GenerationError(f"{model}: request failed — {exc}") from exc
 
 
-_cloud-provider_client = None
-_cloud-provider_client_key = None
+_cloud-provider_clients: dict = {}  # api_key -> AsyncCloud provider
 
 
 async def _cloud-provider_stream(
-    model: str, system: str, messages: List[dict]
+    model: str, system: str, messages: List[dict], api_key: str
 ) -> AsyncIterator[str]:
-    global _cloud-provider_client, _cloud-provider_client_key
-    key = _cloud_key("cloud-provider")
-    if not key:
-        raise GenerationError("REMOTE_API_KEY is not set")
+    if not api_key:
+        raise GenerationError("no Cloud provider API key")
     try:
         import cloud-provider
     except ModuleNotFoundError as exc:  # pragma: no cover - deployment choice
         raise GenerationError("the 'cloud-provider' package is not installed") from exc
 
-    if _cloud-provider_client is None or _cloud-provider_client_key != key:
-        _cloud-provider_client = cloud-provider.AsyncCloud provider(api_key=key)
-        _cloud-provider_client_key = key
+    client = _cloud-provider_clients.get(api_key)
+    if client is None:
+        client = _cloud-provider_clients[api_key] = cloud-provider.AsyncCloud provider(api_key=api_key)
     try:
-        async with _cloud-provider_client.messages.stream(
+        async with client.messages.stream(
             model=model,
             max_tokens=GENERATION_MAX_TOKENS,
             system=system,

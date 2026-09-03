@@ -569,6 +569,60 @@ button:disabled {
   user-select: none;
 }
 
+.ask-keys {
+  border-bottom: 1px solid #e1e5e2;
+  background: #faf9f5;
+  padding: 14px 22px 16px;
+}
+
+.ask-keys-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  color: #24483d;
+}
+
+.ask-keys-note {
+  margin: 4px 0 12px;
+  color: #7b827f;
+  font-size: 0.78rem;
+  max-width: 60ch;
+}
+
+.ask-keys-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ask-keys-label {
+  flex: 0 0 150px;
+  color: #35443f;
+  font-size: 0.85rem;
+}
+
+.ask-keys-row input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #d7ddd8;
+  border-radius: 8px;
+  padding: 6px 9px;
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+button.link {
+  border: none;
+  background: none;
+  padding: 2px 4px;
+  color: #4a6f5f;
+  font: inherit;
+  font-size: 0.8rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .ask-thread {
   overflow-y: auto;
 }
