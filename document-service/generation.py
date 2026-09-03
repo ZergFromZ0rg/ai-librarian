@@ -2,34 +2,29 @@
 
 Retrieval (``embeddings`` + ``reranker`` + ``vector_store``) finds the source
 passages; this module asks an LLM to turn them into a grounded, cited answer.
-The backend is pluggable so the service stays self-hostable and air-gappable:
+The reader picks the model per session; a model is identified as
+``provider:model`` (split on the first colon):
 
-  ``GENERATION_BACKEND=llamacpp``  a llama.cpp server (default; fully local/offline)
-  ``GENERATION_BACKEND=anthropic`` the Claude API (needs ``ANTHROPIC_API_KEY`` + network)
-  ``GENERATION_BACKEND=off``       Ask mode disabled; ``/ask`` returns 503
+  ``ollama:<tag>``       a model served by a local Ollama — free, offline
+  ``anthropic:<model>``  the Claude API      (needs ``ANTHROPIC_API_KEY``)
+  ``openai:<model>``     the OpenAI API      (needs ``OPENAI_API_KEY``)
+  ``google:<model>``     the Gemini API      (needs ``GEMINI_API_KEY``)
 
-Each provider is reached through one coroutine, ``generate_stream(system,
-messages)``, that yields answer-text chunks as they arrive. ``anthropic`` is
-imported lazily so a llamacpp-only or offline deployment never needs the package.
+Cloud providers appear only when their key is set; Ollama models are discovered
+live from ``/api/tags``. ``anthropic`` is reached through its own SDK (imported
+lazily); ``ollama`` / ``openai`` / ``google`` share one OpenAI-compatible
+streaming path over ``httpx``.
 """
 
 import json
 import logging
 import os
+import time
 from typing import AsyncIterator, List, Optional, Tuple
 
 logger = logging.getLogger("ai_librarian")
 
-BACKEND = os.environ.get("GENERATION_BACKEND", "llamacpp").strip().lower()
-
-# llama.cpp server (OpenAI-compatible /v1/chat/completions).
-LLAMA_URL = os.environ.get("LLAMA_URL", "http://llm:8080").rstrip("/")
-LLAMA_MODEL = os.environ.get("LLAMA_MODEL", "local-gguf")
-
-# Claude API.
-GENERATION_MODEL = os.environ.get("GENERATION_MODEL", "claude-opus-5")
-
-# Shared decoding knobs.
+# Decoding knobs, shared across providers.
 GENERATION_MAX_TOKENS = int(os.environ.get("GENERATION_MAX_TOKENS", "2000"))
 GENERATION_TEMPERATURE = float(os.environ.get("GENERATION_TEMPERATURE", "0.2"))
 GENERATION_TIMEOUT = float(os.environ.get("GENERATION_TIMEOUT", "120"))
@@ -39,6 +34,22 @@ GENERATION_TIMEOUT = float(os.environ.get("GENERATION_TIMEOUT", "120"))
 # are already token-budgeted chunks).
 ASK_CONTEXT_PASSAGES = int(os.environ.get("ASK_CONTEXT_PASSAGES", "6"))
 ASK_MAX_CONTEXT_CHARS = int(os.environ.get("ASK_MAX_CONTEXT_CHARS", "6000"))
+
+# provider -> (default model list, API-key env var). Ollama is not here — it is
+# discovered, not configured.
+_CLOUD = {
+    "anthropic": ("claude-opus-5,claude-sonnet-5,claude-haiku-4-5", "ANTHROPIC_API_KEY"),
+    "openai": ("gpt-5.1,gpt-5.1-mini", "OPENAI_API_KEY"),
+    "google": ("gemini-2.5-pro,gemini-2.5-flash", "GEMINI_API_KEY"),
+}
+_CLOUD_ORDER = ("anthropic", "openai", "google")
+_OPENAI_COMPAT_BASE = {
+    "openai": "https://api.openai.com/v1",
+    "google": "https://generativelanguage.googleapis.com/v1beta/openai",
+}
+
+_OLLAMA_TTL = 5.0
+_ollama_cache: Tuple[float, Optional[List[dict]]] = (0.0, None)
 
 _SYSTEM_PROMPT = (
     "You are the assistant for a personal reading library. Answer the user's "
@@ -50,32 +61,115 @@ _SYSTEM_PROMPT = (
 
 
 class GenerationError(RuntimeError):
-    """A backend failed to produce an answer (network, auth, bad response)."""
+    """A provider failed to produce an answer (network, auth, bad response)."""
 
 
-def _anthropic_key() -> str:
-    return (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+def _ollama_url() -> str:
+    return os.environ.get("OLLAMA_URL", "http://host.docker.internal:11434").strip().rstrip("/")
 
 
-def backend_info() -> dict:
+def _default_model_env() -> str:
+    return os.environ.get("GENERATION_MODEL", "").strip()
+
+
+def _cloud_key(provider: str) -> str:
+    var = _CLOUD.get(provider, (None, None))[1]
+    return (os.environ.get(var) or "").strip() if var else ""
+
+
+def _cloud_models(provider: str) -> List[str]:
+    override = os.environ.get(f"{provider.upper()}_MODELS", "").strip()
+    raw = override or _CLOUD[provider][0]
+    return [name.strip() for name in raw.split(",") if name.strip()]
+
+
+def _parse_ollama_tags(payload: Optional[dict]) -> List[dict]:
+    out: List[dict] = []
+    for entry in (payload or {}).get("models") or []:
+        name = entry.get("name") or entry.get("model")
+        if name:
+            out.append({"id": f"ollama:{name}", "label": name, "provider": "ollama"})
+    return out
+
+
+async def _fetch_ollama_models() -> List[dict]:
+    """Local Ollama models, ``[]`` if it is not reachable. Cached ~5s."""
+    global _ollama_cache
+    url = _ollama_url()
+    if not url:
+        return []
+    now = time.monotonic()
+    fetched_at, cached = _ollama_cache
+    if cached is not None and now - fetched_at < _OLLAMA_TTL:
+        return cached
+
+    import httpx
+
+    models: List[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.get(f"{url}/api/tags")
+            response.raise_for_status()
+            models = _parse_ollama_tags(response.json())
+    except Exception as exc:  # unreachable, refused, bad JSON — all non-fatal
+        logger.debug("Ollama model list unavailable at %s: %s", url, exc)
+        models = []
+    _ollama_cache = (now, models)
+    return models
+
+
+async def list_models() -> List[dict]:
+    """Every model the reader may pick, ``{id, label, provider}`` each.
+
+    Ollama first (discovered), then each cloud provider whose key is set, in a
+    stable order. De-duplicated by id.
+    """
+    out: List[dict] = list(await _fetch_ollama_models())
+    for provider in _CLOUD_ORDER:
+        if _cloud_key(provider):
+            out.extend(
+                {"id": f"{provider}:{name}", "label": name, "provider": provider}
+                for name in _cloud_models(provider)
+            )
+    seen = set()
+    deduped = []
+    for model in out:
+        if model["id"] not in seen:
+            seen.add(model["id"])
+            deduped.append(model)
+    return deduped
+
+
+async def default_model() -> Optional[str]:
+    """The model used when the request names none: the env default if available,
+    otherwise the first listed (Ollama wins, then anthropic/openai/google)."""
+    models = await list_models()
+    if not models:
+        return None
+    ids = [model["id"] for model in models]
+    env_default = _default_model_env()
+    return env_default if env_default in ids else ids[0]
+
+
+async def enabled() -> bool:
+    return bool(await list_models())
+
+
+async def backend_info() -> dict:
     """What ``/config`` reports so the UI can show or hide the Ask tab."""
-    if BACKEND == "anthropic":
-        return {"backend": "anthropic", "model": GENERATION_MODEL, "enabled": bool(_anthropic_key())}
-    if BACKEND == "llamacpp":
-        return {"backend": "llamacpp", "model": LLAMA_MODEL, "enabled": True}
-    return {"backend": "off", "model": None, "enabled": False}
-
-
-def enabled() -> bool:
-    return backend_info()["enabled"]
+    models = await list_models()
+    return {
+        "enabled": bool(models),
+        "default_model": await default_model(),
+        "providers": sorted({model["provider"] for model in models}),
+    }
 
 
 def disabled_reason() -> str:
-    if BACKEND == "off":
-        return "Ask mode is disabled on this server (GENERATION_BACKEND=off)."
-    if BACKEND == "anthropic":
-        return "Ask mode is configured for the Claude API but ANTHROPIC_API_KEY is not set."
-    return f"Ask mode backend {BACKEND!r} is not available."
+    return (
+        "Ask mode has no models available — start Ollama on the server, or set "
+        "an API key (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY)."
+    )
 
 
 def _passage_location(source: dict) -> str:
@@ -120,22 +214,36 @@ def build_ask_prompt(
     return _SYSTEM_PROMPT, messages, used
 
 
-async def generate_stream(system: str, messages: List[dict]) -> AsyncIterator[str]:
-    """Yield answer-text chunks from the configured backend.
+def _split_model_id(model_id: str) -> Tuple[str, str]:
+    provider, sep, model = (model_id or "").partition(":")
+    if not sep or not provider or not model:
+        raise GenerationError(f"invalid model id: {model_id!r} (expected 'provider:model')")
+    return provider, model
+
+
+async def generate_stream(model_id: str, system: str, messages: List[dict]) -> AsyncIterator[str]:
+    """Yield answer-text chunks from the provider named in ``model_id``.
 
     ``messages`` is a list of ``{"role": "user"|"assistant", "content": str}``.
-    Raises :class:`GenerationError` on any backend failure.
+    Raises :class:`GenerationError` on any provider failure.
     """
-    if BACKEND == "anthropic":
-        async for chunk in _anthropic_stream(system, messages):
+    provider, model = _split_model_id(model_id)
+    if provider == "anthropic":
+        async for chunk in _anthropic_stream(model, system, messages):
             yield chunk
-    elif BACKEND == "llamacpp":
-        async for chunk in _llamacpp_stream(system, messages):
-            yield chunk
-    elif BACKEND == "off":
-        raise GenerationError(disabled_reason())
+        return
+    if provider == "ollama":
+        base_url = f"{_ollama_url()}/v1"
+        key = ""
+    elif provider in _CLOUD:
+        base_url = _OPENAI_COMPAT_BASE[provider]
+        key = _cloud_key(provider)
+        if not key:
+            raise GenerationError(f"{provider} is not configured (no API key)")
     else:
-        raise GenerationError(f"unknown GENERATION_BACKEND: {BACKEND!r}")
+        raise GenerationError(f"unknown provider: {provider!r}")
+    async for chunk in _openai_compatible_stream(base_url, key, model, system, messages):
+        yield chunk
 
 
 def _delta_from_sse_line(line: str) -> Optional[str]:
@@ -154,11 +262,14 @@ def _delta_from_sse_line(line: str) -> Optional[str]:
     return (choices[0].get("delta") or {}).get("content")
 
 
-async def _llamacpp_stream(system: str, messages: List[dict]) -> AsyncIterator[str]:
+async def _openai_compatible_stream(
+    base_url: str, api_key: str, model: str, system: str, messages: List[dict]
+) -> AsyncIterator[str]:
     import httpx
 
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     payload = {
-        "model": LLAMA_MODEL,
+        "model": model,
         "messages": [{"role": "system", "content": system}, *messages],
         "stream": True,
         "temperature": GENERATION_TEMPERATURE,
@@ -167,34 +278,41 @@ async def _llamacpp_stream(system: str, messages: List[dict]) -> AsyncIterator[s
     try:
         async with httpx.AsyncClient(timeout=GENERATION_TIMEOUT) as client:
             async with client.stream(
-                "POST", f"{LLAMA_URL}/v1/chat/completions", json=payload
+                "POST", f"{base_url}/chat/completions", json=payload, headers=headers
             ) as response:
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    body = (await response.aread()).decode("utf-8", "replace")[:300]
+                    raise GenerationError(f"{model}: upstream {response.status_code} — {body}")
                 async for line in response.aiter_lines():
                     text = _delta_from_sse_line(line)
                     if text:
                         yield text
     except httpx.HTTPError as exc:
-        raise GenerationError(f"llama.cpp backend at {LLAMA_URL} failed: {exc}") from exc
+        raise GenerationError(f"{model}: request failed — {exc}") from exc
 
 
 _anthropic_client = None
+_anthropic_client_key = None
 
 
-async def _anthropic_stream(system: str, messages: List[dict]) -> AsyncIterator[str]:
-    global _anthropic_client
-    if not _anthropic_key():
+async def _anthropic_stream(
+    model: str, system: str, messages: List[dict]
+) -> AsyncIterator[str]:
+    global _anthropic_client, _anthropic_client_key
+    key = _cloud_key("anthropic")
+    if not key:
         raise GenerationError("ANTHROPIC_API_KEY is not set")
     try:
         import anthropic
     except ModuleNotFoundError as exc:  # pragma: no cover - deployment choice
         raise GenerationError("the 'anthropic' package is not installed") from exc
 
-    if _anthropic_client is None:
-        _anthropic_client = anthropic.AsyncAnthropic(api_key=_anthropic_key())
+    if _anthropic_client is None or _anthropic_client_key != key:
+        _anthropic_client = anthropic.AsyncAnthropic(api_key=key)
+        _anthropic_client_key = key
     try:
         async with _anthropic_client.messages.stream(
-            model=GENERATION_MODEL,
+            model=model,
             max_tokens=GENERATION_MAX_TOKENS,
             system=system,
             messages=messages,

@@ -60,21 +60,32 @@ services:
       RERANK_CANDIDATES: ${RERANK_CANDIDATES:-60}
       RERANK_MIN_SCORE: ${RERANK_MIN_SCORE:--2.0}
       RERANK_LOWCONF_SCORE: ${RERANK_LOWCONF_SCORE:-0.0}
-      GENERATION_BACKEND: ${GENERATION_BACKEND:-off}
-      LLAMA_URL: ${LLAMA_URL:-http://llm:8080}
-      LLAMA_MODEL: ${LLAMA_MODEL:-local-gguf}
-      GENERATION_MODEL: ${GENERATION_MODEL:-claude-opus-5}
+      # Ask mode. Local models are discovered from Ollama on the host; each cloud
+      # provider appears only when its key is set. GENERATION_MODEL is an
+      # optional "provider:model" default (empty = first available).
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GENERATION_MODEL: ${GENERATION_MODEL:-}
+      ANTHROPIC_MODELS: ${ANTHROPIC_MODELS:-}
+      OPENAI_MODELS: ${OPENAI_MODELS:-}
+      GOOGLE_MODELS: ${GOOGLE_MODELS:-}
       GENERATION_MAX_TOKENS: ${GENERATION_MAX_TOKENS:-2000}
       GENERATION_TEMPERATURE: ${GENERATION_TEMPERATURE:-0.2}
       GENERATION_TIMEOUT: ${GENERATION_TIMEOUT:-120}
       ASK_CONTEXT_PASSAGES: ${ASK_CONTEXT_PASSAGES:-6}
       ASK_MAX_CONTEXT_CHARS: ${ASK_MAX_CONTEXT_CHARS:-6000}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CHUNK_TARGET_TOKENS: ${CHUNK_TARGET_TOKENS:-180}
       CHUNK_SOFT_MAX_TOKENS: ${CHUNK_SOFT_MAX_TOKENS:-220}
       CHUNK_HARD_MAX_TOKENS: ${CHUNK_HARD_MAX_TOKENS:-240}
       CHUNK_OVERLAP_TOKENS: ${CHUNK_OVERLAP_TOKENS:-32}
       HF_HOME: /models/huggingface
+    # Lets the container reach an Ollama running on the Docker host (Linux needs
+    # this mapping; it is built in on Docker Desktop). Ollama must listen on
+    # 0.0.0.0, not just 127.0.0.1 — see the README.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       qdrant-ready:
         condition: service_completed_successfully
@@ -87,37 +98,6 @@ services:
       interval: 15s
       timeout: 5s
       retries: 12
-      start_period: 30s
-    security_opt:
-      - no-new-privileges:true
-
-  # Ask mode's local LLM. Opt-in: only starts under `--profile ask`, and only
-  # matters when GENERATION_BACKEND=llamacpp. Drop a GGUF chat model into
-  # data/models/llm/ and set LLAMA_GGUF to its filename.
-  llm:
-    image: ghcr.io/ggml-org/llama.cpp:server
-    profiles: ["ask"]
-    restart: unless-stopped
-    volumes:
-      - ./data/models/llm:/models:ro
-    command:
-      - "-m"
-      - "/models/${LLAMA_GGUF:-model.gguf}"
-      - "--host"
-      - "0.0.0.0"
-      - "--port"
-      - "8080"
-      - "-c"
-      - "${LLAMA_CTX:-8192}"
-      - "--threads"
-      - "${LLAMA_THREADS:-4}"
-    expose:
-      - "8080"
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 20
       start_period: 30s
     security_opt:
       - no-new-privileges:true

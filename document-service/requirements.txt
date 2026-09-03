@@ -10,7 +10,8 @@ torch==2.13.0
 sentence-transformers==6.0.0
 qdrant-client==1.19.0
 
-# Ask mode, GENERATION_BACKEND=anthropic only. Imported lazily by generation.py
-# so a llamacpp / offline deployment that never selects this backend does not
-# need the package (or its httpx2 dependency) at all.
+# Ask mode: the native client for the Claude provider. Imported lazily by
+# generation.py, so a deployment that only uses Ollama / OpenAI / Gemini never
+# loads it (or its httpx2 dependency). Other providers use the OpenAI-compatible
+# REST path over httpx and need no SDK.
 anthropic==1.3.0

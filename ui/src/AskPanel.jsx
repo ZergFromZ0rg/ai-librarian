@@ -1,24 +1,39 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import ResultCard from "./ResultCard.jsx";
 import { streamAsk } from "./askStream.js";
 
-const STORAGE_KEY = "ai-librarian.ask.conversation";
+const CONVO_KEY = "ai-librarian.ask.conversation";
+const MODEL_KEY = "ai-librarian.ask.model";
 
-function loadConversation() {
+const PROVIDER_LABELS = {
+  ollama: "Local (Ollama)",
+  anthropic: "Claude",
+  openai: "OpenAI",
+  google: "Gemini",
+};
+
+function loadStored(key, fallback) {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
+    const raw = window.localStorage.getItem(key);
+    if (raw != null) return key === CONVO_KEY ? JSON.parse(raw) : raw;
   } catch (_error) {
-    // corrupt or unavailable storage — start fresh
+    // corrupt or unavailable storage
   }
-  return [];
+  return fallback;
 }
 
-// Wrap bracketed citation numbers ("[1]", "[2][3]") in a styled <span> so they
-// stand out from the prose. Presentational only.
+function saveStored(key, value) {
+  try {
+    window.localStorage.setItem(key, typeof value === "string" ? value : JSON.stringify(value));
+  } catch (_error) {
+    // best effort
+  }
+}
+
+// Wrap bracketed citation numbers ("[1]", "[2][3]") in a styled <span>.
 function citationRehype() {
   const pattern = /\[\d+\](?:\[\d+\])*/g;
   const split = (value) => {
@@ -61,23 +76,53 @@ function citationRehype() {
 }
 
 export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
-  const [conversation, setConversation] = useState(loadConversation);
+  const [conversation, setConversation] = useState(() => loadStored(CONVO_KEY, []));
+  const [models, setModels] = useState([]);
+  const [selectedModel, setSelectedModel] = useState(() => loadStored(MODEL_KEY, ""));
   const [question, setQuestion] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const scrollRef = useRef(null);
 
   useEffect(() => {
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(conversation));
-    } catch (_error) {
-      // best effort
-    }
+    let cancelled = false;
+    fetch(`${apiBase}/ask/models`)
+      .then((response) => (response.ok ? response.json() : { models: [] }))
+      .then((data) => {
+        if (cancelled) return;
+        const list = data.models || [];
+        setModels(list);
+        setSelectedModel((current) => {
+          if (current && list.some((m) => m.id === current)) return current;
+          return data.default || list[0]?.id || "";
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase]);
+
+  useEffect(() => {
+    if (selectedModel) saveStored(MODEL_KEY, selectedModel);
+  }, [selectedModel]);
+
+  useEffect(() => {
+    saveStored(CONVO_KEY, conversation);
   }, [conversation]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [conversation]);
+
+  const grouped = useMemo(() => {
+    const byProvider = new Map();
+    for (const model of models) {
+      if (!byProvider.has(model.provider)) byProvider.set(model.provider, []);
+      byProvider.get(model.provider).push(model);
+    }
+    return [...byProvider.entries()];
+  }, [models]);
 
   const patchLast = useCallback((mutate) => {
     setConversation((prev) => {
@@ -106,13 +151,13 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
       setConversation((prev) => [
         ...prev,
         { role: "user", content: clean },
-        { role: "assistant", content: "", sources: null, pending: true },
+        { role: "assistant", content: "", sources: null, pending: true, model: selectedModel },
       ]);
 
       try {
         await streamAsk(
           `${apiBase}/ask`,
-          { question: clean, history },
+          { question: clean, history, model: selectedModel || undefined },
           {
             onEvent: (evt) => {
               if (evt.type === "token") {
@@ -123,6 +168,7 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
                 patchLast((turn) => {
                   turn.sources = evt.results || [];
                   turn.lowConfidence = Boolean(evt.low_confidence);
+                  turn.usedModel = evt.model;
                   turn.pending = false;
                 });
               } else if (evt.type === "error") {
@@ -147,17 +193,31 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
         });
       }
     },
-    [apiBase, busy, conversation, patchLast, question],
+    [apiBase, busy, conversation, patchLast, question, selectedModel],
   );
 
   function reset() {
     setConversation([]);
     setError("");
     try {
-      window.localStorage.removeItem(STORAGE_KEY);
+      window.localStorage.removeItem(CONVO_KEY);
     } catch (_error) {
       // best effort
     }
+  }
+
+  const modelLabel = (id) => models.find((m) => m.id === id)?.label || id;
+
+  if (models.length === 0) {
+    return (
+      <div className="empty-state">
+        <div>
+          <strong>No models available.</strong>
+          Start Ollama on the server, or add an API key (Claude, OpenAI, Gemini), then
+          reload.
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -167,11 +227,31 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
           <h2>Ask your library</h2>
           <p>Answers are written from your documents and cite the passages they draw on.</p>
         </div>
-        {conversation.length > 0 && (
-          <button type="button" className="secondary" onClick={reset} disabled={busy}>
-            New conversation
-          </button>
-        )}
+        <div className="ask-header-controls">
+          <label className="ask-model-select">
+            <span>Model</span>
+            <select
+              value={selectedModel}
+              disabled={busy}
+              onChange={(event) => setSelectedModel(event.target.value)}
+            >
+              {grouped.map(([provider, list]) => (
+                <optgroup key={provider} label={PROVIDER_LABELS[provider] || provider}>
+                  {list.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.label}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          </label>
+          {conversation.length > 0 && (
+            <button type="button" className="secondary" onClick={reset} disabled={busy}>
+              New conversation
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="messages ask-thread" ref={scrollRef} aria-live="polite">
@@ -207,7 +287,9 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
               )}
               {turn.sources && turn.sources.length > 0 && (
                 <div className="ask-sources">
-                  <div className="ask-sources-label">Sources</div>
+                  <div className="ask-sources-label">
+                    Sources{turn.usedModel ? ` · ${modelLabel(turn.usedModel)}` : ""}
+                  </div>
                   {turn.sources.map((source, position) => (
                     <ResultCard
                       key={`${source.document_id}-${source.chunk_id}-${position}`}

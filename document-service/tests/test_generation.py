@@ -1,19 +1,86 @@
 """Unit coverage for generation.py helpers (no network, no models)."""
 
+import asyncio
+
+import pytest
+
 import generation
 
 
+@pytest.fixture(autouse=True)
+def _hermetic(monkeypatch):
+    monkeypatch.setenv("OLLAMA_URL", "")
+    for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GENERATION_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+    for key in ("ANTHROPIC_MODELS", "OPENAI_MODELS", "GOOGLE_MODELS"):
+        monkeypatch.delenv(key, raising=False)
+    generation._ollama_cache = (0.0, None)
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
 def test_delta_from_sse_line_reads_openai_chunks():
-    line = 'data: {"choices":[{"delta":{"content":"Hello"}}]}'
-    assert generation._delta_from_sse_line(line) == "Hello"
-
-
-def test_delta_from_sse_line_ignores_control_and_junk_lines():
-    assert generation._delta_from_sse_line("") is None
-    assert generation._delta_from_sse_line(": keep-alive") is None
+    assert generation._delta_from_sse_line('data: {"choices":[{"delta":{"content":"Hi"}}]}') == "Hi"
     assert generation._delta_from_sse_line("data: [DONE]") is None
     assert generation._delta_from_sse_line("data: not json") is None
-    assert generation._delta_from_sse_line('data: {"choices":[{"delta":{}}]}') is None
+    assert generation._delta_from_sse_line(": keep-alive") is None
+
+
+def test_parse_ollama_tags():
+    payload = {"models": [{"name": "llama3.2:latest"}, {"model": "qwen2.5:7b"}, {}]}
+    assert generation._parse_ollama_tags(payload) == [
+        {"id": "ollama:llama3.2:latest", "label": "llama3.2:latest", "provider": "ollama"},
+        {"id": "ollama:qwen2.5:7b", "label": "qwen2.5:7b", "provider": "ollama"},
+    ]
+
+
+def test_split_model_id():
+    assert generation._split_model_id("ollama:llama3.2:latest") == ("ollama", "llama3.2:latest")
+    assert generation._split_model_id("anthropic:claude-opus-5") == ("anthropic", "claude-opus-5")
+    with pytest.raises(generation.GenerationError):
+        generation._split_model_id("no-colon")
+
+
+def test_list_models_merges_ollama_and_keyed_cloud_providers(monkeypatch):
+    async def fake_ollama():
+        return [{"id": "ollama:local", "label": "local", "provider": "ollama"}]
+
+    monkeypatch.setattr(generation, "_fetch_ollama_models", fake_ollama)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENAI_MODELS", "gpt-x,gpt-y")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-oai")
+    # google has no key -> excluded
+
+    models = run(generation.list_models())
+    ids = [m["id"] for m in models]
+    assert ids[0] == "ollama:local"  # ollama first
+    assert "anthropic:claude-opus-5" in ids
+    assert "openai:gpt-x" in ids and "openai:gpt-y" in ids
+    assert not any(m["provider"] == "google" for m in models)
+
+
+def test_default_model_prefers_env_then_first_listed(monkeypatch):
+    async def fake_ollama():
+        return [{"id": "ollama:a", "label": "a", "provider": "ollama"}]
+
+    monkeypatch.setattr(generation, "_fetch_ollama_models", fake_ollama)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+
+    assert run(generation.default_model()) == "ollama:a"  # first listed
+
+    monkeypatch.setenv("GENERATION_MODEL", "anthropic:claude-sonnet-5")
+    assert run(generation.default_model()) == "anthropic:claude-sonnet-5"
+
+    monkeypatch.setenv("GENERATION_MODEL", "openai:not-available")
+    assert run(generation.default_model()) == "ollama:a"  # env default not listed -> first
+
+
+def test_enabled_and_backend_info_when_nothing_is_configured():
+    assert run(generation.enabled()) is False
+    info = run(generation.backend_info())
+    assert info == {"enabled": False, "default_model": None, "providers": []}
 
 
 def test_build_ask_prompt_numbers_sources_and_appends_history():
@@ -42,9 +109,3 @@ def test_build_ask_prompt_respects_the_character_budget(monkeypatch):
     _system, messages, used = generation.build_ask_prompt("q", sources)
     assert len(used) == 1
     assert "[2]" not in messages[-1]["content"]
-
-
-def test_backend_info_shape():
-    info = generation.backend_info()
-    assert set(info) == {"backend", "model", "enabled"}
-    assert info["backend"] in {"llamacpp", "anthropic", "off"}

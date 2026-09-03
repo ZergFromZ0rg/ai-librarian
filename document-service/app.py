@@ -271,6 +271,7 @@ def record_ask(
     candidate_count: int,
     latency_ms: float,
     rerank_dropped: int = 0,
+    model: Optional[str] = None,
 ) -> None:
     """Append one ask-log line (same JSONL file as search). Never raises."""
     if not SEARCH_LOG_ENABLED:
@@ -280,6 +281,7 @@ def record_ask(
             "ts": utc_now(),
             "mode": "ask",
             "query": request.question,
+            "model": model,
             "history_turns": len(request.history),
             "filters": {
                 key: value
@@ -346,6 +348,8 @@ class AskRequest(BaseModel):
     document_id: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{12}$")
     filename: Optional[str] = Field(default=None, max_length=255)
     top_k: int = Field(default=8, ge=1, le=20)
+    # "provider:model" from GET /ask/models; unknown or absent -> the server default.
+    model: Optional[str] = Field(default=None, max_length=120)
 
 
 @dataclass(frozen=True)
@@ -1146,7 +1150,7 @@ async def config():
         "reranker_model": RERANK_MODEL,
         "rerank_passage": RERANK_PASSAGE,
         "rerank_lowconf_score": RERANK_LOWCONF_SCORE,
-        "generation": generation.backend_info(),
+        "generation": await generation.backend_info(),
         "pipeline_version": PIPELINE_VERSION,
         "index_schema_version": INDEX_SCHEMA_VERSION,
         "fusion": FUSION_METHOD,
@@ -1452,6 +1456,22 @@ _ASK_NO_ANSWER = (
 )
 
 
+async def _resolve_ask_model(requested: Optional[str]) -> Optional[str]:
+    """The `provider:model` id to answer with: the request's choice if it is a
+    currently-available model, otherwise the server default (or None if none)."""
+    if requested:
+        known = {model["id"] for model in await generation.list_models()}
+        if requested in known:
+            return requested
+    return await generation.default_model()
+
+
+@app.get("/ask/models")
+async def ask_models():
+    """Models the reader may pick in the Ask panel, and the current default."""
+    return {"models": await generation.list_models(), "default": await generation.default_model()}
+
+
 @app.post("/ask")
 async def ask(request: AskRequest):
     """Retrieve passages for `question`, then stream a grounded, cited answer.
@@ -1460,9 +1480,11 @@ async def ask(request: AskRequest):
     generated, then one `{"type":"sources","results":[...],"low_confidence":b}`,
     or `{"type":"error","detail":...}` if generation fails after the stream
     opened. When retrieval finds nothing the answer is a fixed message and no LLM
-    call is made.
+    call is made. `request.model` ("provider:model") picks the model; an unknown
+    or absent value falls back to the server default.
     """
-    if not generation.enabled():
+    model = await _resolve_ask_model(request.model)
+    if model is None:
         raise HTTPException(status_code=503, detail=generation.disabled_reason())
 
     started = time.monotonic()
@@ -1487,7 +1509,12 @@ async def ask(request: AskRequest):
         and top_score < RERANK_LOWCONF_SCORE
     )
     record_ask(
-        request, hits, candidate_count, (time.monotonic() - started) * 1000, rerank_dropped
+        request,
+        hits,
+        candidate_count,
+        (time.monotonic() - started) * 1000,
+        rerank_dropped,
+        model=model,
     )
 
     async def event_stream():
@@ -1495,15 +1522,22 @@ async def ask(request: AskRequest):
         try:
             if not sources:
                 yield _sse({"type": "token", "text": _ASK_NO_ANSWER})
-                yield _sse({"type": "sources", "results": [], "low_confidence": False})
+                yield _sse(
+                    {"type": "sources", "results": [], "low_confidence": False, "model": model}
+                )
                 return
             system, messages, used = generation.build_ask_prompt(
                 request.question, sources, [turn.model_dump() for turn in request.history]
             )
-            async for chunk in generation.generate_stream(system, messages):
+            async for chunk in generation.generate_stream(model, system, messages):
                 yield _sse({"type": "token", "text": chunk})
             yield _sse(
-                {"type": "sources", "results": used, "low_confidence": low_confidence}
+                {
+                    "type": "sources",
+                    "results": used,
+                    "low_confidence": low_confidence,
+                    "model": model,
+                }
             )
         except generation.GenerationError as exc:
             logger.warning("Ask generation failed [request %s]: %s", rid, exc)

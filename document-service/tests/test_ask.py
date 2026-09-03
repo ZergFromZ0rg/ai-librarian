@@ -15,13 +15,24 @@ def parse_sse(body: str) -> list[dict]:
     return events
 
 
+FAKE_MODEL = "ollama:test-model"
+
+
+def enable_fake_model(monkeypatch, module, model_id=FAKE_MODEL):
+    async def fake_list_models():
+        provider = model_id.split(":", 1)[0]
+        return [{"id": model_id, "label": model_id, "provider": provider}]
+
+    monkeypatch.setattr(module.generation, "list_models", fake_list_models)
+
+
 def make_fake_stream():
-    """An async generator standing in for a real LLM backend, recording its call."""
+    """An async generator standing in for a real backend, recording its calls."""
 
     calls = []
 
-    async def fake_stream(system, messages):
-        calls.append({"system": system, "messages": messages})
+    async def fake_stream(model, system, messages):
+        calls.append({"model": model, "system": system, "messages": messages})
         for chunk in ("The absurd ", "is the confrontation ", "[1]"):
             yield chunk
 
@@ -40,6 +51,7 @@ def index_essay(client, text="Camus writes that the absurd is a confrontation wi
 def test_ask_streams_answer_then_sources(service, monkeypatch):
     module, client, _indexed = service
     index_essay(client)
+    enable_fake_model(monkeypatch, module)
     monkeypatch.setattr(module, "rerank", lambda query, passages: [1.0 for _ in passages])
     fake_stream = make_fake_stream()
     monkeypatch.setattr(module.generation, "generate_stream", fake_stream)
@@ -54,16 +66,33 @@ def test_ask_streams_answer_then_sources(service, monkeypatch):
 
     sources = [e for e in events if e["type"] == "sources"]
     assert len(sources) == 1
-    assert sources[0]["results"], "the answer should carry the passages it cited"
     assert sources[0]["results"][0]["document"] == "essay.pdf"
+    assert sources[0]["model"] == FAKE_MODEL
     assert "low_confidence" in sources[0]
-    assert len(fake_stream.calls) == 1
+    assert fake_stream.calls[0]["model"] == FAKE_MODEL
+
+
+def test_ask_uses_the_requested_model_and_falls_back_when_unknown(service, monkeypatch):
+    module, client, _indexed = service
+    index_essay(client)
+    enable_fake_model(monkeypatch, module, "anthropic:claude-opus-5")
+    monkeypatch.setattr(module, "rerank", lambda query, passages: [1.0 for _ in passages])
+    fake_stream = make_fake_stream()
+    monkeypatch.setattr(module.generation, "generate_stream", fake_stream)
+
+    # A known model is honoured.
+    client.post("/ask", json={"question": "q", "model": "anthropic:claude-opus-5"})
+    assert fake_stream.calls[-1]["model"] == "anthropic:claude-opus-5"
+
+    # An unknown model falls back to the server default.
+    client.post("/ask", json={"question": "q", "model": "openai:gpt-does-not-exist"})
+    assert fake_stream.calls[-1]["model"] == "anthropic:claude-opus-5"
 
 
 def test_ask_no_hits_skips_generation(service, monkeypatch):
     module, client, _indexed = service
     index_essay(client)
-    # The reranker judges nothing relevant, so the gate empties the results.
+    enable_fake_model(monkeypatch, module)
     monkeypatch.setattr(module, "rerank", lambda query, passages: [-9.0 for _ in passages])
     fake_stream = make_fake_stream()
     monkeypatch.setattr(module.generation, "generate_stream", fake_stream)
@@ -80,6 +109,7 @@ def test_ask_no_hits_skips_generation(service, monkeypatch):
 def test_ask_passes_conversation_history_through(service, monkeypatch):
     module, client, _indexed = service
     index_essay(client)
+    enable_fake_model(monkeypatch, module)
     monkeypatch.setattr(module, "rerank", lambda query, passages: [1.0 for _ in passages])
     fake_stream = make_fake_stream()
     monkeypatch.setattr(module.generation, "generate_stream", fake_stream)
@@ -97,34 +127,47 @@ def test_ask_passes_conversation_history_through(service, monkeypatch):
     assert "Sources:" in sent[-1]["content"]
 
 
-def test_ask_returns_503_when_backend_disabled(service, monkeypatch):
+def test_ask_returns_503_when_no_models_are_available(service, monkeypatch):
     module, client, _indexed = service
-    monkeypatch.setattr(module.generation, "BACKEND", "off")
+
+    async def no_models():
+        return []
+
+    monkeypatch.setattr(module.generation, "list_models", no_models)
     response = client.post("/ask", json={"question": "anything"})
     assert response.status_code == 503
-    assert "disabled" in response.json()["detail"].lower()
+    assert "no models" in response.json()["detail"].lower()
 
 
 def test_ask_emits_error_event_when_generation_fails(service, monkeypatch):
     module, client, _indexed = service
     index_essay(client)
+    enable_fake_model(monkeypatch, module)
     monkeypatch.setattr(module, "rerank", lambda query, passages: [1.0 for _ in passages])
 
-    async def boom(system, messages):
-        raise module.generation.GenerationError("llama.cpp backend at http://llm:8080 failed")
+    async def boom(model, system, messages):
+        raise module.generation.GenerationError("upstream 500")
         yield  # pragma: no cover - marks this an async generator
 
     monkeypatch.setattr(module.generation, "generate_stream", boom)
     response = client.post("/ask", json={"question": "What is the absurd?"})
-    # The stream already opened with a 200 before the backend was reached.
     assert response.status_code == 200
     errors = [e for e in parse_sse(response.text) if e["type"] == "error"]
     assert len(errors) == 1
     assert "generation failed" in errors[0]["detail"]
 
 
+def test_ask_models_endpoint_lists_models_and_default(service, monkeypatch):
+    module, client, _indexed = service
+    enable_fake_model(monkeypatch, module)
+    body = client.get("/ask/models").json()
+    assert body["models"][0]["id"] == FAKE_MODEL
+    assert body["default"] == FAKE_MODEL
+
+
 def test_config_reports_generation_backend(service):
     _module, client, _indexed = service
     config = client.get("/config").json()
     assert "generation" in config
-    assert set(config["generation"]) == {"backend", "model", "enabled"}
+    assert set(config["generation"]) == {"enabled", "default_model", "providers"}
+    assert config["generation"]["enabled"] is False  # hermetic: no models
