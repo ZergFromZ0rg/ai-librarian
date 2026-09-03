@@ -31,9 +31,16 @@ GENERATION_TIMEOUT = float(os.environ.get("GENERATION_TIMEOUT", "120"))
 
 # How many reranked passages to put in front of the model, and a character
 # ceiling on the whole context block (a rough proxy for tokens — the passages
-# are already token-budgeted chunks).
+# are already token-budgeted chunks). Cloud models get a larger slice because
+# their context windows dwarf a typical local model's.
 ASK_CONTEXT_PASSAGES = int(os.environ.get("ASK_CONTEXT_PASSAGES", "10"))
+ASK_CONTEXT_PASSAGES_CLOUD = int(os.environ.get("ASK_CONTEXT_PASSAGES_CLOUD", "30"))
 ASK_MAX_CONTEXT_CHARS = int(os.environ.get("ASK_MAX_CONTEXT_CHARS", "10000"))
+
+# Local models default to a 2K–4K context window and would silently truncate a
+# 10-passage prompt. Ask mode talks to Ollama over its native /api/chat so it can
+# raise num_ctx per request.
+OLLAMA_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "8192"))
 
 # provider -> (default model list, API-key env var). Ollama is not here — it is
 # discovered, not configured.
@@ -56,7 +63,10 @@ _SYSTEM_PROMPT = (
     "question using only the numbered sources below. Cite every claim with the "
     "number of the source it came from in square brackets, like [1] or [2][3]. "
     "If the sources do not contain the answer, say so plainly and do not guess. "
-    "Be concise and preserve any mathematical notation exactly as written."
+    "The sources are the top matches from a search, not the whole library — if "
+    "the question calls for broader coverage, answer from what is here and note "
+    "what may be missing. Be concise and preserve any mathematical notation "
+    "exactly as written."
 )
 
 
@@ -165,6 +175,12 @@ async def backend_info() -> dict:
     }
 
 
+def context_passages_for(model_id: str) -> int:
+    """How many retrieved passages to show `model_id` (and cite)."""
+    provider = (model_id or "").partition(":")[0]
+    return ASK_CONTEXT_PASSAGES if provider == "ollama" else ASK_CONTEXT_PASSAGES_CLOUD
+
+
 def disabled_reason() -> str:
     return (
         "Ask mode has no models available — start Ollama on the server, or set "
@@ -183,18 +199,22 @@ def _passage_location(source: dict) -> str:
 
 
 def build_ask_prompt(
-    question: str, sources: List[dict], history: Optional[List[dict]] = None
+    question: str,
+    sources: List[dict],
+    history: Optional[List[dict]] = None,
+    max_passages: Optional[int] = None,
 ) -> Tuple[str, List[dict], List[dict]]:
     """Build the ``(system, messages, used_sources)`` triple for a question.
 
     ``sources`` are ``format_hits`` dicts. ``used_sources`` is the prefix that
-    actually fit the context budget — the caller sends exactly that list to the
-    UI so the ``[n]`` citations line up with the passage cards.
+    actually fit the passage count and character budget — the caller sends
+    exactly that list to the UI so the ``[n]`` citations line up with the cards.
     """
+    limit = max_passages or ASK_CONTEXT_PASSAGES
     blocks: List[str] = []
     used: List[dict] = []
     chars = 0
-    for source in sources[:ASK_CONTEXT_PASSAGES]:
+    for source in sources[:limit]:
         text = (source.get("text") or "").strip()
         if not text:
             continue
@@ -233,17 +253,66 @@ async def generate_stream(model_id: str, system: str, messages: List[dict]) -> A
             yield chunk
         return
     if provider == "ollama":
-        base_url = f"{_ollama_url()}/v1"
-        key = ""
-    elif provider in _CLOUD:
-        base_url = _OPENAI_COMPAT_BASE[provider]
+        async for chunk in _ollama_native_stream(model, system, messages):
+            yield chunk
+        return
+    if provider in _CLOUD:
         key = _cloud_key(provider)
         if not key:
             raise GenerationError(f"{provider} is not configured (no API key)")
-    else:
-        raise GenerationError(f"unknown provider: {provider!r}")
-    async for chunk in _openai_compatible_stream(base_url, key, model, system, messages):
-        yield chunk
+        async for chunk in _openai_compatible_stream(
+            _OPENAI_COMPAT_BASE[provider], key, model, system, messages
+        ):
+            yield chunk
+        return
+    raise GenerationError(f"unknown provider: {provider!r}")
+
+
+def _delta_from_ollama_line(line: str) -> Optional[str]:
+    """The text delta from one line of Ollama's native /api/chat NDJSON stream."""
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return (obj.get("message") or {}).get("content")
+
+
+async def _ollama_native_stream(
+    model: str, system: str, messages: List[dict]
+) -> AsyncIterator[str]:
+    """Stream from Ollama's native endpoint so num_ctx can be set per request.
+
+    The OpenAI-compatible route ignores ``options``, leaving the model at its
+    2K–4K default window — which silently drops most of a 10-passage prompt.
+    """
+    import httpx
+
+    url = _ollama_url()
+    payload = {
+        "model": model,
+        "messages": [{"role": "system", "content": system}, *messages],
+        "stream": True,
+        "options": {
+            "num_ctx": OLLAMA_NUM_CTX,
+            "temperature": GENERATION_TEMPERATURE,
+            "num_predict": GENERATION_MAX_TOKENS,
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=GENERATION_TIMEOUT) as client:
+            async with client.stream("POST", f"{url}/api/chat", json=payload) as response:
+                if response.status_code >= 400:
+                    body = (await response.aread()).decode("utf-8", "replace")[:300]
+                    raise GenerationError(f"{model}: Ollama {response.status_code} — {body}")
+                async for line in response.aiter_lines():
+                    text = _delta_from_ollama_line(line)
+                    if text:
+                        yield text
+    except httpx.HTTPError as exc:
+        raise GenerationError(f"{model}: Ollama request failed — {exc}") from exc
 
 
 def _delta_from_sse_line(line: str) -> Optional[str]:

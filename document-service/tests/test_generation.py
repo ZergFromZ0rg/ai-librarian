@@ -28,6 +28,23 @@ def test_delta_from_sse_line_reads_openai_chunks():
     assert generation._delta_from_sse_line(": keep-alive") is None
 
 
+def test_delta_from_ollama_line_reads_native_chunks():
+    assert generation._delta_from_ollama_line('{"message":{"content":"Hi"},"done":false}') == "Hi"
+    assert generation._delta_from_ollama_line('{"done":true,"done_reason":"stop"}') is None
+    assert generation._delta_from_ollama_line("") is None
+    assert generation._delta_from_ollama_line("not json") is None
+
+
+def test_context_passages_scales_with_provider():
+    assert generation.context_passages_for("ollama:llama3.2:3b") == generation.ASK_CONTEXT_PASSAGES
+    assert generation.context_passages_for("anthropic:claude-opus-5") == generation.ASK_CONTEXT_PASSAGES_CLOUD
+    assert generation.context_passages_for("openai:gpt-5.1") == generation.ASK_CONTEXT_PASSAGES_CLOUD
+
+
+def test_system_prompt_flags_that_sources_are_a_sample():
+    assert "not the whole library" in generation._SYSTEM_PROMPT
+
+
 def test_parse_ollama_tags():
     payload = {"models": [{"name": "llama3.2:latest"}, {"model": "qwen2.5:7b"}, {}]}
     assert generation._parse_ollama_tags(payload) == [
@@ -109,3 +126,9 @@ def test_build_ask_prompt_respects_the_character_budget(monkeypatch):
     _system, messages, used = generation.build_ask_prompt("q", sources)
     assert len(used) == 1
     assert "[2]" not in messages[-1]["content"]
+
+
+def test_build_ask_prompt_respects_max_passages():
+    sources = [{"document": f"{i}.pdf", "page": i, "text": f"passage {i}"} for i in range(6)]
+    _system, _messages, used = generation.build_ask_prompt("q", sources, max_passages=2)
+    assert len(used) == 2

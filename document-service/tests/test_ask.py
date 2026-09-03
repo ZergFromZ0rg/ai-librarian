@@ -165,6 +165,50 @@ def test_ask_models_endpoint_lists_models_and_default(service, monkeypatch):
     assert body["default"] == FAKE_MODEL
 
 
+def _hit(doc, text, score):
+    return {"score": score, "payload": {"document_id": doc, "text": text}}
+
+
+def test_diversify_caps_passages_per_document(service):
+    module, _client, _indexed = service
+    hits = [_hit("a", f"alpha passage number {i}", 9 - i) for i in range(5)] + [
+        _hit("b", "beta content here", 3),
+        _hit("c", "gamma content here", 2),
+    ]
+    out = module.diversify_hits(hits, top_k=4, max_per_doc=2, dedup_jaccard=1.0)
+    docs = [h["payload"]["document_id"] for h in out]
+    assert len(out) == 4
+    assert docs.count("a") == 2  # one document can't dominate
+    assert set(docs) == {"a", "b", "c"}
+
+
+def test_diversify_drops_near_duplicate_passages(service):
+    module, _client, _indexed = service
+    dup = "the library of babel contains every possible book of four hundred ten pages"
+    hits = [
+        _hit("a", dup, 9),
+        _hit("b", dup + " indeed truly", 8),
+        _hit("c", "wormholes fold spacetime for interstellar travel", 7),
+    ]
+    out = module.diversify_hits(hits, top_k=2, max_per_doc=0, dedup_jaccard=0.6)
+    texts = {h["payload"]["text"] for h in out}
+    assert dup in texts
+    assert "wormholes fold spacetime for interstellar travel" in texts  # not the dup of 'a'
+
+
+def test_ask_sources_event_reports_document_spread(service, monkeypatch):
+    module, client, _indexed = service
+    index_essay(client)
+    enable_fake_model(monkeypatch, module)
+    monkeypatch.setattr(module, "rerank", lambda query, passages: [1.0 for _ in passages])
+    monkeypatch.setattr(module.generation, "generate_stream", make_fake_stream())
+
+    events = parse_sse(client.post("/ask", json={"question": "the absurd"}).text)
+    src = [e for e in events if e["type"] == "sources"][0]
+    assert src["documents"] >= 1
+    assert src["relevant_count"] >= len(src["results"])
+
+
 def test_config_reports_generation_backend(service):
     _module, client, _indexed = service
     config = client.get("/config").json()

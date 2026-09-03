@@ -169,6 +169,8 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
                   turn.sources = evt.results || [];
                   turn.lowConfidence = Boolean(evt.low_confidence);
                   turn.usedModel = evt.model;
+                  turn.documents = evt.documents;
+                  turn.relevantCount = evt.relevant_count;
                   turn.pending = false;
                 });
               } else if (evt.type === "error") {
@@ -288,7 +290,14 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
               {turn.sources && turn.sources.length > 0 && (
                 <div className="ask-sources">
                   <div className="ask-sources-label">
-                    Sources{turn.usedModel ? ` · ${modelLabel(turn.usedModel)}` : ""}
+                    {[
+                      `${turn.sources.length} passage${turn.sources.length === 1 ? "" : "s"}`,
+                      turn.documents ? `${turn.documents} document${turn.documents === 1 ? "" : "s"}` : null,
+                      turn.relevantCount > turn.sources.length ? `${turn.relevantCount} relevant matches` : null,
+                      turn.usedModel ? modelLabel(turn.usedModel) : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
                   </div>
                   {turn.sources.map((source, position) => (
                     <ResultCard

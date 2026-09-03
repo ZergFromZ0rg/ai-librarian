@@ -199,7 +199,10 @@ docker compose exec document-service python -c "import urllib.request; print(url
 ```
 
 Pull models with `ollama pull llama3.2` on the host; they show up in the picker within a
-few seconds. Set `OLLAMA_URL=` empty to disable Ollama discovery.
+few seconds. Set `OLLAMA_URL=` empty to disable Ollama discovery. Ask mode talks to Ollama
+over its native `/api/chat` and raises the context window to `OLLAMA_NUM_CTX` (default 8192)
+per request — otherwise a local model's ~2–4K default would silently truncate a
+multi-passage prompt.
 
 ### Cloud APIs
 
@@ -210,14 +213,28 @@ when picked); OpenAI and Gemini use their OpenAI-compatible REST endpoints over 
 SDK. `GENERATION_MODEL` optionally sets the default model (`provider:model`, e.g.
 `ollama:llama3.2:latest`) before the reader picks.
 
-### Shared knobs
+### Coverage across many documents
+
+Ask retrieval favours breadth so a large library doesn't answer from ten near-identical
+paragraphs of one chapter:
+
+- `ASK_CONTEXT_PASSAGES` / `ASK_CONTEXT_PASSAGES_CLOUD` — passages shown and cited, per
+  answer (default 10 for a local model, 30 for a big-context cloud model).
+- `ASK_MAX_PER_DOC` (default 3) — cap on how many of those may come from one document.
+- `ASK_DEDUP_JACCARD` (default 0.6) — drop a passage whose wording overlaps an
+  already-picked one by more than this.
+- `RERANK_CANDIDATES` (default 100) — how deep the reranker looks; raise it as the library
+  grows past a few hundred documents.
+
+Each answer's source header shows the spread — "*N passages · M documents · K relevant
+matches*" — so you can see when coverage is thin.
+
+### Other knobs
 
 `GENERATION_MAX_TOKENS` (answer length ceiling), `GENERATION_TEMPERATURE`,
-`GENERATION_TIMEOUT`, `ASK_CONTEXT_PASSAGES` (how many passages the model sees and cites,
-default 10), and `ASK_MAX_CONTEXT_CHARS` (a character budget over those passages,
-default 10000). `GET /config` reports
-whether Ask mode is enabled and which providers are configured; the UI shows the **Ask**
-tab only when at least one model is available.
+`GENERATION_TIMEOUT`, `ASK_MAX_CONTEXT_CHARS` (a character budget over the passages,
+default 10000). `GET /config` reports whether Ask mode is enabled and which providers are
+configured; the UI shows the **Ask** tab only when at least one model is available.
 
 ## Storage and backups
 
