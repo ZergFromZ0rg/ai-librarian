@@ -49,6 +49,14 @@ def service(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("INGEST_ROOT", str(tmp_path / "library"))
     monkeypatch.setenv("RERANK_TIMEOUT", "1")
+    # Keep Ask mode hermetic: no Ollama probe, no cloud keys. Tests that exercise
+    # generation monkeypatch generation.list_models / generate_stream directly.
+    monkeypatch.setenv("OLLAMA_URL", "")
+    for _key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GENERATION_MODEL"):
+        monkeypatch.delenv(_key, raising=False)
+    import generation
+
+    generation._ollama_cache = (0.0, None)
 
     sys.modules.pop("app", None)
     module = importlib.import_module("app")
