@@ -16,3 +16,6 @@ ui/node_modules/
 ui/dist/
 .pytest_cache/
 .coverage
+
+# Personal Claude Code settings
+.claude/settings.local.json
