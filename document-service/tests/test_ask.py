@@ -31,8 +31,8 @@ def make_fake_stream():
 
     calls = []
 
-    async def fake_stream(model, system, messages):
-        calls.append({"model": model, "system": system, "messages": messages})
+    async def fake_stream(model, system, messages, keys=None):
+        calls.append({"model": model, "system": system, "messages": messages, "keys": keys})
         for chunk in ("The absurd ", "is the confrontation ", "[1]"):
             yield chunk
 
@@ -87,6 +87,60 @@ def test_ask_uses_the_requested_model_and_falls_back_when_unknown(service, monke
     # An unknown model falls back to the server default.
     client.post("/ask", json={"question": "q", "model": "openai:gpt-does-not-exist"})
     assert fake_stream.calls[-1]["model"] == "anthropic:claude-opus-5"
+
+
+def test_ask_accepts_a_browser_supplied_api_key_for_an_unlisted_model(service, monkeypatch):
+    module, client, _indexed = service
+    index_essay(client)
+    # Only a local model is server-listed; the browser brings its own Claude key.
+    enable_fake_model(monkeypatch, module, "ollama:local")
+    monkeypatch.setattr(module, "rerank", lambda query, passages: [1.0 for _ in passages])
+    fake_stream = make_fake_stream()
+    monkeypatch.setattr(module.generation, "generate_stream", fake_stream)
+
+    response = client.post(
+        "/ask",
+        json={
+            "question": "the absurd",
+            "model": "anthropic:claude-sonnet-5",
+            "provider_keys": {"anthropic": "sk-ant-xyz", "bogus": "x", "openai": ""},
+        },
+    )
+    assert response.status_code == 200
+    call = fake_stream.calls[-1]
+    assert call["model"] == "anthropic:claude-sonnet-5"
+    assert call["keys"] == {"anthropic": "sk-ant-xyz"}  # sanitised: bogus + empty dropped
+
+
+def test_sanitize_provider_keys(service):
+    module, _client, _indexed = service
+    assert module._sanitize_provider_keys({"anthropic": " sk-1 ", "openai": "", "x": "y"}) == {
+        "anthropic": "sk-1"
+    }
+    assert module._sanitize_provider_keys("nope") == {}
+    assert module._sanitize_provider_keys({"google": 123}) == {}
+
+
+def test_ask_thorough_uses_a_looser_gate(service, monkeypatch):
+    module, client, _indexed = service
+    index_essay(client)
+    enable_fake_model(monkeypatch, module)
+    # Score every passage in the band that a -2.0 gate rejects but -5.0 keeps.
+    monkeypatch.setattr(module, "rerank", lambda query, passages: [-3.5 for _ in passages])
+    monkeypatch.setattr(module.generation, "generate_stream", make_fake_stream())
+
+    async def fake_thorough(model, question, sources, history=None, keys=None):
+        yield ("token", f"answer over {len(sources)} passages")
+
+    monkeypatch.setattr(module.generation, "generate_thorough", fake_thorough)
+
+    quick = parse_sse(client.post("/ask", json={"question": "the absurd", "mode": "quick"}).text)
+    assert [e for e in quick if e["type"] == "sources"][0]["results"] == []  # gated out at -2.0
+
+    thorough = parse_sse(
+        client.post("/ask", json={"question": "the absurd", "mode": "thorough"}).text
+    )
+    assert [e for e in thorough if e["type"] == "sources"][0]["results"]  # survives at -5.0
 
 
 def test_ask_no_hits_skips_generation(service, monkeypatch):
@@ -145,7 +199,7 @@ def test_ask_emits_error_event_when_generation_fails(service, monkeypatch):
     enable_fake_model(monkeypatch, module)
     monkeypatch.setattr(module, "rerank", lambda query, passages: [1.0 for _ in passages])
 
-    async def boom(model, system, messages):
+    async def boom(model, system, messages, keys=None):
         raise module.generation.GenerationError("upstream 500")
         yield  # pragma: no cover - marks this an async generator
 
@@ -215,7 +269,7 @@ def test_ask_thorough_mode_streams_progress_then_synthesis(service, monkeypatch)
     enable_fake_model(monkeypatch, module)
     monkeypatch.setattr(module, "rerank", lambda query, passages: [1.0 for _ in passages])
 
-    async def fake_thorough(model, question, sources, history=None):
+    async def fake_thorough(model, question, sources, history=None, keys=None):
         yield ("progress", "Reading 1 documents…")
         yield ("token", "Across the sources, ")
         yield ("token", "the absurd is a confrontation [1].")

@@ -206,12 +206,21 @@ multi-passage prompt.
 
 ### Cloud APIs
 
-Set any of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`. The picker then offers a
-small default set of models per provider — override with `ANTHROPIC_MODELS` / `OPENAI_MODELS`
-/ `GOOGLE_MODELS` (comma-separated). Claude uses the `anthropic` SDK (bundled, imported only
-when picked); OpenAI and Gemini use their OpenAI-compatible REST endpoints over `httpx`, no
-SDK. `GENERATION_MODEL` optionally sets the default model (`provider:model`, e.g.
-`ollama:llama3.2:latest`) before the reader picks.
+Two ways to add Claude / OpenAI / Gemini:
+
+- **In the browser** — the Ask tab's **API keys** button opens a panel; paste a key and
+  that provider's models appear in the picker immediately. The key is held in that
+  browser's `localStorage` and sent with each question — it is **never written to the
+  server**. Re-enter it per browser/device. Because the key rides in the request body,
+  only do this over localhost/LAN or behind `APP_TOKEN` + a TLS proxy.
+- **On the server** — set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` in
+  `.env`; those models are then available to everyone with no per-browser step.
+
+Either way the picker offers a small default model set per provider — override with
+`ANTHROPIC_MODELS` / `OPENAI_MODELS` / `GOOGLE_MODELS` (comma-separated, server-side). Claude
+uses the `anthropic` SDK (bundled, imported only when picked); OpenAI and Gemini use their
+OpenAI-compatible REST endpoints over `httpx`, no SDK. `GENERATION_MODEL` optionally sets
+the default model (`provider:model`, e.g. `ollama:llama3.2:latest`).
 
 ### Coverage across many documents
 
@@ -225,6 +234,11 @@ paragraphs of one chapter:
   already-picked one by more than this.
 - `RERANK_CANDIDATES` (default 100) — how deep the reranker looks; raise it as the library
   grows past a few hundred documents.
+- Conversational framing ("across my library, how is X described?") is stripped to its
+  topic before retrieval — the cross-encoder is a short-query ranker and the framing
+  tanks its scores. The model still gets your exact question.
+- `ASK_THOROUGH_MIN_SCORE` (default −5.0) — Thorough mode uses a much looser reranker gate
+  than Quick mode's `RERANK_MIN_SCORE`, since its per-document map step is the real filter.
 
 Each answer's source header shows the spread — "*N passages · M documents · K relevant
 matches*" — so you can see when coverage is thin.
