@@ -8,16 +8,17 @@ _model = None
 _model_name = None
 _model_lock = threading.Lock()
 
-# all-MiniLM-L6-v2 (2021) trails current small models on retrieval quality and
-# only reads ~256 word-pieces of a chunk. e5-small-v2 is a same-size, same-speed
-# 384-dimensional replacement with a 512-token window. It was trained with each
-# input labelled by role, so a query and a stored passage must be prefixed
-# differently or results degrade measurably.
-DEFAULT_MODEL = os.environ.get("EMBEDDING_MODEL", "intfloat/e5-small-v2")
-# Role prefixes the model expects. Set both to "" for an unprefixed model such as
-# sentence-transformers/all-MiniLM-L6-v2 (also switch EMBEDDING_MODEL back).
-QUERY_PREFIX = os.environ.get("EMBEDDING_QUERY_PREFIX", "query: ")
-PASSAGE_PREFIX = os.environ.get("EMBEDDING_PASSAGE_PREFIX", "passage: ")
+# bge-base-en-v1.5 is a 768-dimensional, 512-token retrieval model that scores
+# markedly higher than the 384-dim e5-small-v2 on the reference library (which
+# has dense material where the smaller model missed the answer entirely). It
+# asks for an instruction prefix on the query only; stored passages go in raw.
+# For e5-* models use "query: " / "passage: "; for an unprefixed model such as
+# sentence-transformers/all-MiniLM-L6-v2 set both to "".
+DEFAULT_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+QUERY_PREFIX = os.environ.get(
+    "EMBEDDING_QUERY_PREFIX", "Represent this sentence for searching relevant passages: "
+)
+PASSAGE_PREFIX = os.environ.get("EMBEDDING_PASSAGE_PREFIX", "")
 _PREFIX = {"query": QUERY_PREFIX, "passage": PASSAGE_PREFIX}
 # Matryoshka models (nomic-embed, mxbai) stay accurate when truncated to a
 # shorter prefix of their output, keeping storage flat. 0/unset uses the model's
