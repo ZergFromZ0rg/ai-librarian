@@ -333,6 +333,25 @@ button:disabled {
   font-weight: 500;
 }
 
+.empty-state.low-confidence {
+  flex: none;
+  place-items: stretch;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  border: 1px solid #e2d9c3;
+  border-radius: 8px;
+  background: #fbf7ec;
+  color: #7a6f52;
+  text-align: left;
+}
+
+.empty-state.low-confidence strong {
+  margin-bottom: 2px;
+  color: #8a6d3b;
+  font-family: inherit;
+  font-size: 1rem;
+}
+
 .message {
   max-width: 86%;
   border-radius: 15px;
