@@ -530,6 +530,32 @@ button:disabled {
   gap: 12px;
 }
 
+.ask-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.ask-model-select {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #7b827f;
+  font-size: 0.78rem;
+}
+
+.ask-model-select select {
+  border: 1px solid #d7ddd8;
+  border-radius: 8px;
+  background: #fff;
+  padding: 6px 8px;
+  color: #24483d;
+  font: inherit;
+  font-size: 0.82rem;
+  max-width: 220px;
+}
+
 .ask-thread {
   overflow-y: auto;
 }
