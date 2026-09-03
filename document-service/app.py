@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import concurrent.futures
 import contextvars
 import hashlib
@@ -287,6 +288,7 @@ def record_ask(
         entry = {
             "ts": utc_now(),
             "mode": "ask",
+            "ask_mode": request.mode,
             "query": request.question,
             "model": model,
             "history_turns": len(request.history),
@@ -357,6 +359,8 @@ class AskRequest(BaseModel):
     top_k: int = Field(default=10, ge=1, le=20)
     # "provider:model" from GET /ask/models; unknown or absent -> the server default.
     model: Optional[str] = Field(default=None, max_length=120)
+    # "quick" = one grounded pass; "thorough" = map-reduce over a wider pool.
+    mode: str = Field(default="quick", pattern=r"^(quick|thorough)$")
 
 
 @dataclass(frozen=True)
@@ -1543,9 +1547,16 @@ async def ask(request: AskRequest):
     if model is None:
         raise HTTPException(status_code=503, detail=generation.disabled_reason())
 
-    # How many passages this model sees and cites — more for big-context cloud
-    # models, fewer for a local one. The request's top_k is a floor.
-    passages = max(request.top_k, generation.context_passages_for(model))
+    thorough = request.mode == "thorough"
+    if thorough:
+        # A wider pool, grouped by document for the per-document map step.
+        passages = generation.ASK_THOROUGH_PASSAGES
+        max_per_doc = generation.ASK_THOROUGH_MAX_PER_DOC
+    else:
+        # How many passages this model sees and cites — more for big-context
+        # cloud models, fewer for a local one. The request's top_k is a floor.
+        passages = max(request.top_k, generation.context_passages_for(model))
+        max_per_doc = ASK_MAX_PER_DOC
 
     started = time.monotonic()
     try:
@@ -1557,7 +1568,7 @@ async def ask(request: AskRequest):
             True,
             SearchRequest.model_fields["rerank_k"].default,
             RERANK_MIN_SCORE,
-            max_per_doc=ASK_MAX_PER_DOC,
+            max_per_doc=max_per_doc,
             dedup_jaccard=ASK_DEDUP_JACCARD,
         )
     except Exception as exc:
@@ -1579,6 +1590,8 @@ async def ask(request: AskRequest):
         model=model,
     )
 
+    history_turns = [turn.model_dump() for turn in request.history]
+
     async def event_stream():
         rid = REQUEST_ID.get()
         try:
@@ -1588,14 +1601,25 @@ async def ask(request: AskRequest):
                     {"type": "sources", "results": [], "low_confidence": False, "model": model}
                 )
                 return
-            system, messages, used = generation.build_ask_prompt(
-                request.question,
-                sources,
-                [turn.model_dump() for turn in request.history],
-                max_passages=passages,
-            )
-            async for chunk in generation.generate_stream(model, system, messages):
-                yield _sse({"type": "token", "text": chunk})
+            if thorough:
+                grouped = collections.OrderedDict()
+                for source in sources:
+                    grouped.setdefault(source.get("document_id"), []).append(source)
+                used = [
+                    src
+                    for group in list(grouped.values())[: generation.ASK_THOROUGH_MAX_DOCS]
+                    for src in group
+                ]
+                async for kind, text in generation.generate_thorough(
+                    model, request.question, used, history_turns
+                ):
+                    yield _sse({"type": kind, "text": text})
+            else:
+                system, messages, used = generation.build_ask_prompt(
+                    request.question, sources, history_turns, max_passages=passages
+                )
+                async for chunk in generation.generate_stream(model, system, messages):
+                    yield _sse({"type": "token", "text": chunk})
             yield _sse(
                 {
                     "type": "sources",

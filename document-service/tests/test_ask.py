@@ -209,6 +209,28 @@ def test_ask_sources_event_reports_document_spread(service, monkeypatch):
     assert src["relevant_count"] >= len(src["results"])
 
 
+def test_ask_thorough_mode_streams_progress_then_synthesis(service, monkeypatch):
+    module, client, _indexed = service
+    index_essay(client)
+    enable_fake_model(monkeypatch, module)
+    monkeypatch.setattr(module, "rerank", lambda query, passages: [1.0 for _ in passages])
+
+    async def fake_thorough(model, question, sources, history=None):
+        yield ("progress", "Reading 1 documents…")
+        yield ("token", "Across the sources, ")
+        yield ("token", "the absurd is a confrontation [1].")
+
+    monkeypatch.setattr(module.generation, "generate_thorough", fake_thorough)
+
+    events = parse_sse(
+        client.post("/ask", json={"question": "the absurd", "mode": "thorough"}).text
+    )
+    assert any(e["type"] == "progress" for e in events)
+    answer = "".join(e["text"] for e in events if e["type"] == "token")
+    assert answer == "Across the sources, the absurd is a confrontation [1]."
+    assert [e for e in events if e["type"] == "sources"][0]["results"]
+
+
 def test_config_reports_generation_backend(service):
     _module, client, _indexed = service
     config = client.get("/config").json()

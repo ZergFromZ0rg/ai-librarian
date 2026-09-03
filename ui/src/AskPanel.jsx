@@ -7,6 +7,7 @@ import { streamAsk } from "./askStream.js";
 
 const CONVO_KEY = "ai-librarian.ask.conversation";
 const MODEL_KEY = "ai-librarian.ask.model";
+const THOROUGH_KEY = "ai-librarian.ask.thorough";
 
 const PROVIDER_LABELS = {
   ollama: "Local (Ollama)",
@@ -79,6 +80,7 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
   const [conversation, setConversation] = useState(() => loadStored(CONVO_KEY, []));
   const [models, setModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState(() => loadStored(MODEL_KEY, ""));
+  const [thorough, setThorough] = useState(() => loadStored(THOROUGH_KEY, "") === "1");
   const [question, setQuestion] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -106,6 +108,10 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
   useEffect(() => {
     if (selectedModel) saveStored(MODEL_KEY, selectedModel);
   }, [selectedModel]);
+
+  useEffect(() => {
+    saveStored(THOROUGH_KEY, thorough ? "1" : "0");
+  }, [thorough]);
 
   useEffect(() => {
     saveStored(CONVO_KEY, conversation);
@@ -157,12 +163,21 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
       try {
         await streamAsk(
           `${apiBase}/ask`,
-          { question: clean, history, model: selectedModel || undefined },
+          {
+            question: clean,
+            history,
+            model: selectedModel || undefined,
+            mode: thorough ? "thorough" : "quick",
+          },
           {
             onEvent: (evt) => {
               if (evt.type === "token") {
                 patchLast((turn) => {
                   turn.content += evt.text;
+                });
+              } else if (evt.type === "progress") {
+                patchLast((turn) => {
+                  turn.progress = evt.text;
                 });
               } else if (evt.type === "sources") {
                 patchLast((turn) => {
@@ -195,7 +210,7 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
         });
       }
     },
-    [apiBase, busy, conversation, patchLast, question, selectedModel],
+    [apiBase, busy, conversation, patchLast, question, selectedModel, thorough],
   );
 
   function reset() {
@@ -248,6 +263,15 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
               ))}
             </select>
           </label>
+          <label className="ask-thorough" title="Read a wider set of passages, grouped by document, and synthesise across them. Slower.">
+            <input
+              type="checkbox"
+              checked={thorough}
+              disabled={busy}
+              onChange={(event) => setThorough(event.target.checked)}
+            />
+            <span>Thorough</span>
+          </label>
           {conversation.length > 0 && (
             <button type="button" className="secondary" onClick={reset} disabled={busy}>
               New conversation
@@ -280,7 +304,9 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
                   </ReactMarkdown>
                 </div>
               )}
-              {turn.pending && !turn.content && <div className="ask-thinking">Reading the sources…</div>}
+              {turn.pending && !turn.content && (
+                <div className="ask-thinking">{turn.progress || "Reading the sources…"}</div>
+              )}
               {turn.error && <div className="status-message error">{turn.error}</div>}
               {turn.lowConfidence && (
                 <div className="status-message">

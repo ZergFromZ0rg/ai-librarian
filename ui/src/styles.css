@@ -559,6 +559,16 @@ button:disabled {
   max-width: 220px;
 }
 
+.ask-thorough {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #7b827f;
+  font-size: 0.8rem;
+  cursor: pointer;
+  user-select: none;
+}
+
 .ask-thread {
   overflow-y: auto;
 }
