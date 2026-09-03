@@ -145,6 +145,24 @@ def test_build_ask_prompt_respects_max_passages():
     assert len(used) == 2
 
 
+def test_generate_stream_uses_a_request_key_for_a_cloud_provider(monkeypatch):
+    seen = {}
+
+    async def fake_compat(base_url, api_key, model, system, messages):
+        seen.update(base_url=base_url, api_key=api_key, model=model)
+        yield "ok"
+
+    monkeypatch.setattr(generation, "_openai_compatible_stream", fake_compat)
+    out = run(_collect(generation.generate_stream("openai:gpt-5.1", "sys", [], keys={"openai": "k-123"})))
+    assert "".join(out) == "ok"
+    assert seen == {"base_url": "https://api.openai.com/v1", "api_key": "k-123", "model": "gpt-5.1"}
+
+
+def test_generate_stream_errors_when_a_cloud_provider_has_no_key():
+    with pytest.raises(generation.GenerationError):
+        run(_collect(generation.generate_stream("google:gemini-2.5-pro", "s", [], keys={})))
+
+
 def test_pick_map_model_prefers_local_then_cheap_cloud(monkeypatch):
     monkeypatch.setattr(generation, "_fetch_ollama_models", _aret([]))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
@@ -160,7 +178,7 @@ def test_pick_map_model_prefers_local_then_cheap_cloud(monkeypatch):
 def _fake_stream_by_role():
     calls = []
 
-    async def fake(model, system, messages):
+    async def fake(model, system, messages, keys=None):
         calls.append({"model": model, "system": system, "messages": messages})
         if system == generation._MAP_SYSTEM:
             doc = messages[0]["content"].split("Document: ", 1)[1].splitlines()[0]
@@ -201,7 +219,7 @@ def test_generate_thorough_reports_when_nothing_is_relevant(monkeypatch):
         generation, "_fetch_ollama_models", _aret([{"id": "ollama:m", "label": "m", "provider": "ollama"}])
     )
 
-    async def all_none(model, system, messages):
+    async def all_none(model, system, messages, keys=None):
         yield "NONE"
 
     monkeypatch.setattr(generation, "generate_stream", all_none)

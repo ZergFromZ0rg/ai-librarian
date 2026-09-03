@@ -361,6 +361,9 @@ class AskRequest(BaseModel):
     model: Optional[str] = Field(default=None, max_length=120)
     # "quick" = one grounded pass; "thorough" = map-reduce over a wider pool.
     mode: str = Field(default="quick", pattern=r"^(quick|thorough)$")
+    # Per-request cloud API keys the browser holds (it never persists them
+    # server-side). {"anthropic"|"openai"|"google": "<key>"}. Never logged.
+    provider_keys: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -1066,6 +1069,74 @@ def _word_set(text: str) -> set:
     return set(_WORD_RE.findall((text or "").lower()))
 
 
+# Conversational scaffolding that carries no topic signal but drags the
+# cross-encoder's score down (it is a short-query passage ranker). Stripped from
+# the string handed to retrieval only — the LLM still gets the real question.
+_QUERY_LEAD_RE = re.compile(
+    r"^(?:"
+    r"please|kindly|hey|"
+    r"can you|could you|would you|will you|"
+    r"i(?:'d| would) like to know|i want to know|i'm curious|help me|"
+    r"tell me|show me|find|give me (?:a|an)?\s*(?:summary|overview|rundown)?(?:\s+of)?|"
+    r"according to (?:my|the) (?:books?|library|notes?|collection),?|"
+    r"across (?:my|the) (?:books?|library|notes?|collection),?|"
+    r"in (?:my|the) (?:books?|library|notes?|collection),?|"
+    r"from (?:my|the) (?:books?|library|notes?|collection),?|"
+    r"what do (?:my|the) (?:books?|library|notes?)\s+(?:say|tell me)(?:\s+about)?|"
+    r"what(?:'s| is| are| was| were)|"
+    r"how (?:is|are|was|were|does|do|did|has|have|can|could)|"
+    r"why (?:is|are|does|do|did)|"
+    r"when (?:is|are|did|does)|where (?:is|are)|who (?:is|are|was|were)|"
+    r"summar(?:ise|ize)(?:\s+(?:what(?:'s| is)|the))?|"
+    r"(?:currently\s+)?known|about|"
+    r"compare (?:and contrast\s+)?(?:how\s+)?|contrast\s+|"
+    r"explain|describe|discuss|outline|list|overview of|"
+    r"do (?:my|the) (?:books?|library)\s+(?:say|mention|cover|discuss|address)|"
+    r"how|why|when|where|it|this|that"
+    r")\b[\s,:-]*",
+    re.IGNORECASE,
+)
+_QUERY_TRAIL_RE = re.compile(
+    r"[\s,]*(?:"
+    r"(?:is|are|was|were)?\s*(?:it|this|that|they|there)?\s*"
+    r"(?:described|discussed|covered|treated|explained|mentioned|presented|"
+    r"handled|addressed|portrayed|characteri[sz]ed|defined)|"
+    r"in (?:my|the) (?:books?|library|notes?|collection)|"
+    r"across (?:my|the) (?:books?|library|notes?)|"
+    r"according to (?:my|the) (?:books?|library)"
+    r")?[\s?]*$",
+    re.IGNORECASE,
+)
+
+
+_QUERY_GENERIC_WORDS = {
+    "it", "this", "that", "they", "them", "these", "those", "one", "work",
+    "why", "how", "what", "who", "when", "where", "thing", "things", "about",
+    "known", "described", "the", "a", "an",
+}
+
+
+def clean_query(text: str) -> str:
+    """Strip question framing so the reranker scores on topic, not phrasing.
+
+    Falls back to the original when stripping would gut it — a bare "why?", or a
+    query that was almost entirely scaffolding.
+    """
+    original = (text or "").strip()
+    cleaned = original
+    for _ in range(5):  # peel nested lead-ins: "tell me how is X ..."
+        stepped = _QUERY_LEAD_RE.sub("", cleaned, count=1).strip()
+        if stepped == cleaned:
+            break
+        cleaned = stepped
+    cleaned = _QUERY_TRAIL_RE.sub("", cleaned).strip(" ?,.-:")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    words = re.findall(r"[a-zA-Z]+", cleaned)
+    if len(cleaned) < 3 or not words or all(w.lower() in _QUERY_GENERIC_WORDS for w in words):
+        return original
+    return cleaned
+
+
 def diversify_hits(
     hits: List[dict], top_k: int, max_per_doc: int = 0, dedup_jaccard: float = 1.0
 ) -> List[dict]:
@@ -1441,7 +1512,7 @@ async def search(request: SearchRequest):
     min_score = request.rerank_min_score if request.rerank_min_score is not None else RERANK_MIN_SCORE
     try:
         hits, candidate_count, rerank_dropped, _ = await retrieve(
-            request.query,
+            clean_query(request.query),
             request.top_k,
             request.document_id,
             request.filename,
@@ -1516,12 +1587,31 @@ _ASK_NO_ANSWER = (
 )
 
 
-async def _resolve_ask_model(requested: Optional[str]) -> Optional[str]:
-    """The `provider:model` id to answer with: the request's choice if it is a
-    currently-available model, otherwise the server default (or None if none)."""
+_CLOUD_PROVIDERS = ("anthropic", "openai", "google")
+ASK_THOROUGH_MIN_SCORE = _parse_min_score(os.environ.get("ASK_THOROUGH_MIN_SCORE", "-5.0"))
+
+
+def _sanitize_provider_keys(raw) -> dict:
+    """Keep only well-formed {provider: key} entries; drop everything else."""
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        provider: value.strip()
+        for provider, value in raw.items()
+        if provider in _CLOUD_PROVIDERS and isinstance(value, str) and 0 < len(value.strip()) <= 500
+    }
+
+
+async def _resolve_ask_model(requested: Optional[str], provider_keys: dict) -> Optional[str]:
+    """The `provider:model` id to answer with: the request's choice if it is
+    server-listed or the browser supplied that provider's key; else the server
+    default (or None if nothing is available)."""
     if requested:
         known = {model["id"] for model in await generation.list_models()}
         if requested in known:
+            return requested
+        provider = requested.split(":", 1)[0]
+        if provider in _CLOUD_PROVIDERS and provider_keys.get(provider):
             return requested
     return await generation.default_model()
 
@@ -1543,31 +1633,35 @@ async def ask(request: AskRequest):
     call is made. `request.model` ("provider:model") picks the model; an unknown
     or absent value falls back to the server default.
     """
-    model = await _resolve_ask_model(request.model)
+    provider_keys = _sanitize_provider_keys(request.provider_keys)
+    model = await _resolve_ask_model(request.model, provider_keys)
     if model is None:
         raise HTTPException(status_code=503, detail=generation.disabled_reason())
 
     thorough = request.mode == "thorough"
     if thorough:
-        # A wider pool, grouped by document for the per-document map step.
+        # A wider pool, grouped by document for the per-document map step, and a
+        # looser gate — the map step is the real relevance filter.
         passages = generation.ASK_THOROUGH_PASSAGES
         max_per_doc = generation.ASK_THOROUGH_MAX_PER_DOC
+        gate = ASK_THOROUGH_MIN_SCORE
     else:
         # How many passages this model sees and cites — more for big-context
         # cloud models, fewer for a local one. The request's top_k is a floor.
         passages = max(request.top_k, generation.context_passages_for(model))
         max_per_doc = ASK_MAX_PER_DOC
+        gate = RERANK_MIN_SCORE
 
     started = time.monotonic()
     try:
         hits, candidate_count, rerank_dropped, relevant_count = await retrieve(
-            request.question,
+            clean_query(request.question),
             passages,
             request.document_id,
             request.filename,
             True,
             SearchRequest.model_fields["rerank_k"].default,
-            RERANK_MIN_SCORE,
+            gate,
             max_per_doc=max_per_doc,
             dedup_jaccard=ASK_DEDUP_JACCARD,
         )
@@ -1611,14 +1705,16 @@ async def ask(request: AskRequest):
                     for src in group
                 ]
                 async for kind, text in generation.generate_thorough(
-                    model, request.question, used, history_turns
+                    model, request.question, used, history_turns, keys=provider_keys
                 ):
                     yield _sse({"type": kind, "text": text})
             else:
                 system, messages, used = generation.build_ask_prompt(
                     request.question, sources, history_turns, max_passages=passages
                 )
-                async for chunk in generation.generate_stream(model, system, messages):
+                async for chunk in generation.generate_stream(
+                    model, system, messages, keys=provider_keys
+                ):
                     yield _sse({"type": "token", "text": chunk})
             yield _sse(
                 {

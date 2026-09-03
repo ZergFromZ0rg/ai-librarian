@@ -8,6 +8,7 @@ import { streamAsk } from "./askStream.js";
 const CONVO_KEY = "ai-librarian.ask.conversation";
 const MODEL_KEY = "ai-librarian.ask.model";
 const THOROUGH_KEY = "ai-librarian.ask.thorough";
+const KEYS_KEY = "ai-librarian.ask.keys";
 
 const PROVIDER_LABELS = {
   ollama: "Local (Ollama)",
@@ -16,10 +17,18 @@ const PROVIDER_LABELS = {
   google: "Gemini",
 };
 
-function loadStored(key, fallback) {
+// Cloud providers the reader can add a key for, and the models each offers
+// (kept in step with the server's generation._CLOUD defaults).
+const CLOUD_PROVIDERS = [
+  { id: "anthropic", label: "Anthropic (Claude)", placeholder: "sk-ant-…", models: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"] },
+  { id: "openai", label: "OpenAI (GPT)", placeholder: "sk-…", models: ["gpt-5.1", "gpt-5.1-mini"] },
+  { id: "google", label: "Google (Gemini)", placeholder: "AIza…", models: ["gemini-2.5-pro", "gemini-2.5-flash"] },
+];
+
+function loadStored(key, fallback, parse = false) {
   try {
     const raw = window.localStorage.getItem(key);
-    if (raw != null) return key === CONVO_KEY ? JSON.parse(raw) : raw;
+    if (raw != null) return parse ? JSON.parse(raw) : raw;
   } catch (_error) {
     // corrupt or unavailable storage
   }
@@ -77,8 +86,11 @@ function citationRehype() {
 }
 
 export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
-  const [conversation, setConversation] = useState(() => loadStored(CONVO_KEY, []));
-  const [models, setModels] = useState([]);
+  const [conversation, setConversation] = useState(() => loadStored(CONVO_KEY, [], true));
+  const [serverModels, setServerModels] = useState([]);
+  const [serverDefault, setServerDefault] = useState("");
+  const [apiKeys, setApiKeys] = useState(() => loadStored(KEYS_KEY, {}, true) || {});
+  const [showKeys, setShowKeys] = useState(false);
   const [selectedModel, setSelectedModel] = useState(() => loadStored(MODEL_KEY, ""));
   const [thorough, setThorough] = useState(() => loadStored(THOROUGH_KEY, "") === "1");
   const [question, setQuestion] = useState("");
@@ -92,12 +104,8 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
       .then((response) => (response.ok ? response.json() : { models: [] }))
       .then((data) => {
         if (cancelled) return;
-        const list = data.models || [];
-        setModels(list);
-        setSelectedModel((current) => {
-          if (current && list.some((m) => m.id === current)) return current;
-          return data.default || list[0]?.id || "";
-        });
+        setServerModels(data.models || []);
+        setServerDefault(data.default || "");
       })
       .catch(() => {});
     return () => {
@@ -105,9 +113,37 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
     };
   }, [apiBase]);
 
+  // Server-listed models + a row for each cloud model whose key the browser holds.
+  const models = useMemo(() => {
+    const merged = [...serverModels];
+    const seen = new Set(merged.map((m) => m.id));
+    for (const provider of CLOUD_PROVIDERS) {
+      if (!apiKeys[provider.id]) continue;
+      for (const name of provider.models) {
+        const id = `${provider.id}:${name}`;
+        if (!seen.has(id)) {
+          seen.add(id);
+          merged.push({ id, label: name, provider: provider.id });
+        }
+      }
+    }
+    return merged;
+  }, [serverModels, apiKeys]);
+
+  useEffect(() => {
+    setSelectedModel((current) => {
+      if (current && models.some((m) => m.id === current)) return current;
+      return serverDefault || models[0]?.id || "";
+    });
+  }, [models, serverDefault]);
+
   useEffect(() => {
     if (selectedModel) saveStored(MODEL_KEY, selectedModel);
   }, [selectedModel]);
+
+  useEffect(() => {
+    saveStored(KEYS_KEY, apiKeys);
+  }, [apiKeys]);
 
   useEffect(() => {
     saveStored(THOROUGH_KEY, thorough ? "1" : "0");
@@ -161,6 +197,9 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
       ]);
 
       try {
+        const providerKeys = Object.fromEntries(
+          Object.entries(apiKeys).filter(([, v]) => v && v.trim()),
+        );
         await streamAsk(
           `${apiBase}/ask`,
           {
@@ -168,6 +207,7 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
             history,
             model: selectedModel || undefined,
             mode: thorough ? "thorough" : "quick",
+            ...(Object.keys(providerKeys).length ? { provider_keys: providerKeys } : {}),
           },
           {
             onEvent: (evt) => {
@@ -210,7 +250,7 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
         });
       }
     },
-    [apiBase, busy, conversation, patchLast, question, selectedModel, thorough],
+    [apiBase, apiKeys, busy, conversation, patchLast, question, selectedModel, thorough],
   );
 
   function reset() {
@@ -224,18 +264,7 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
   }
 
   const modelLabel = (id) => models.find((m) => m.id === id)?.label || id;
-
-  if (models.length === 0) {
-    return (
-      <div className="empty-state">
-        <div>
-          <strong>No models available.</strong>
-          Start Ollama on the server, or add an API key (Claude, OpenAI, Gemini), then
-          reload.
-        </div>
-      </div>
-    );
-  }
+  const noModels = models.length === 0;
 
   return (
     <>
@@ -245,33 +274,45 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
           <p>Answers are written from your documents and cite the passages they draw on.</p>
         </div>
         <div className="ask-header-controls">
-          <label className="ask-model-select">
-            <span>Model</span>
-            <select
-              value={selectedModel}
-              disabled={busy}
-              onChange={(event) => setSelectedModel(event.target.value)}
-            >
-              {grouped.map(([provider, list]) => (
-                <optgroup key={provider} label={PROVIDER_LABELS[provider] || provider}>
-                  {list.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.label}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
-          </label>
-          <label className="ask-thorough" title="Read a wider set of passages, grouped by document, and synthesise across them. Slower.">
-            <input
-              type="checkbox"
-              checked={thorough}
-              disabled={busy}
-              onChange={(event) => setThorough(event.target.checked)}
-            />
-            <span>Thorough</span>
-          </label>
+          {!noModels && (
+            <label className="ask-model-select">
+              <span>Model</span>
+              <select
+                value={selectedModel}
+                disabled={busy}
+                onChange={(event) => setSelectedModel(event.target.value)}
+              >
+                {grouped.map(([provider, list]) => (
+                  <optgroup key={provider} label={PROVIDER_LABELS[provider] || provider}>
+                    {list.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.label}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+            </label>
+          )}
+          {!noModels && (
+            <label className="ask-thorough" title="Read a wider set of passages, grouped by document, and synthesise across them. Slower.">
+              <input
+                type="checkbox"
+                checked={thorough}
+                disabled={busy}
+                onChange={(event) => setThorough(event.target.checked)}
+              />
+              <span>Thorough</span>
+            </label>
+          )}
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => setShowKeys((v) => !v)}
+            aria-expanded={showKeys}
+          >
+            API keys
+          </button>
           {conversation.length > 0 && (
             <button type="button" className="secondary" onClick={reset} disabled={busy}>
               New conversation
@@ -280,8 +321,20 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
         </div>
       </div>
 
+      {showKeys && (
+        <ApiKeyPanel apiKeys={apiKeys} setApiKeys={setApiKeys} onClose={() => setShowKeys(false)} />
+      )}
+
       <div className="messages ask-thread" ref={scrollRef} aria-live="polite">
-        {conversation.length === 0 && (
+        {noModels && (
+          <div className="empty-state">
+            <div>
+              <strong>No models available.</strong>
+              Pull a model with Ollama on the server, or add a cloud API key above.
+            </div>
+          </div>
+        )}
+        {!noModels && conversation.length === 0 && (
           <div className="empty-state">
             <div>
               <strong>Ask a question about your reading.</strong>
@@ -355,10 +408,72 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
           placeholder="Ask a question about your library…"
           aria-label="Question"
         />
-        <button className="primary" type="submit" disabled={!question.trim() || busy || indexedCount === 0}>
+        <button
+          className="primary"
+          type="submit"
+          disabled={!question.trim() || busy || indexedCount === 0 || noModels}
+        >
           {busy ? "Answering…" : "Ask"}
         </button>
       </form>
     </>
+  );
+}
+
+function ApiKeyPanel({ apiKeys, setApiKeys, onClose }) {
+  const [draft, setDraft] = useState({});
+
+  function save(providerId) {
+    const value = (draft[providerId] || "").trim();
+    if (!value) return;
+    setApiKeys({ ...apiKeys, [providerId]: value });
+    setDraft((d) => ({ ...d, [providerId]: "" }));
+  }
+
+  function remove(providerId) {
+    const next = { ...apiKeys };
+    delete next[providerId];
+    setApiKeys(next);
+  }
+
+  return (
+    <div className="ask-keys">
+      <div className="ask-keys-head">
+        <strong>Cloud API keys</strong>
+        <button type="button" className="link" onClick={onClose}>
+          Done
+        </button>
+      </div>
+      <p className="ask-keys-note">
+        Keys stay in this browser (localStorage) and are sent with each question. They are
+        never stored on the server.
+      </p>
+      {CLOUD_PROVIDERS.map((provider) => (
+        <div className="ask-keys-row" key={provider.id}>
+          <span className="ask-keys-label">{provider.label}</span>
+          <input
+            type="password"
+            autoComplete="off"
+            placeholder={apiKeys[provider.id] ? "•••••• saved" : provider.placeholder}
+            value={draft[provider.id] || ""}
+            onChange={(event) => setDraft((d) => ({ ...d, [provider.id]: event.target.value }))}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                save(provider.id);
+              }
+            }}
+          />
+          <button type="button" className="secondary" onClick={() => save(provider.id)}>
+            Save
+          </button>
+          {apiKeys[provider.id] && (
+            <button type="button" className="link" onClick={() => remove(provider.id)}>
+              Remove
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }
