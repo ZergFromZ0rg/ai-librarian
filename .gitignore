@@ -16,3 +16,6 @@ ui/node_modules/
 ui/dist/
 .pytest_cache/
 .coverage
+
+# Personal Cloud Code settings
+.cloud/settings.local.json
