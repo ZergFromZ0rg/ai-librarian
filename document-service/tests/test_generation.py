@@ -21,6 +21,17 @@ def run(coro):
     return asyncio.run(coro)
 
 
+def _aret(value):
+    async def _f(*_a, **_k):
+        return value
+
+    return _f
+
+
+async def _collect(agen):
+    return [item async for item in agen]
+
+
 def test_delta_from_sse_line_reads_openai_chunks():
     assert generation._delta_from_sse_line('data: {"choices":[{"delta":{"content":"Hi"}}]}') == "Hi"
     assert generation._delta_from_sse_line("data: [DONE]") is None
@@ -132,3 +143,68 @@ def test_build_ask_prompt_respects_max_passages():
     sources = [{"document": f"{i}.pdf", "page": i, "text": f"passage {i}"} for i in range(6)]
     _system, _messages, used = generation.build_ask_prompt("q", sources, max_passages=2)
     assert len(used) == 2
+
+
+def test_pick_map_model_prefers_local_then_cheap_cloud(monkeypatch):
+    monkeypatch.setattr(generation, "_fetch_ollama_models", _aret([]))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("ANTHROPIC_MODELS", "claude-opus-5,claude-haiku-4-5")
+    assert run(generation.pick_map_model("anthropic:claude-opus-5")) == "anthropic:claude-haiku-4-5"
+
+    monkeypatch.setattr(
+        generation, "_fetch_ollama_models", _aret([{"id": "ollama:m", "label": "m", "provider": "ollama"}])
+    )
+    assert run(generation.pick_map_model("anthropic:claude-opus-5")) == "ollama:m"
+
+
+def _fake_stream_by_role():
+    calls = []
+
+    async def fake(model, system, messages):
+        calls.append({"model": model, "system": system, "messages": messages})
+        if system == generation._MAP_SYSTEM:
+            doc = messages[0]["content"].split("Document: ", 1)[1].splitlines()[0]
+            yield f"- a point from {doc} [1]"
+        else:
+            yield "Synthesised answer [1]."
+
+    fake.calls = calls
+    return fake
+
+
+def test_generate_thorough_maps_each_document_then_synthesises(monkeypatch):
+    monkeypatch.setattr(
+        generation, "_fetch_ollama_models", _aret([{"id": "ollama:m", "label": "m", "provider": "ollama"}])
+    )
+    fake = _fake_stream_by_role()
+    monkeypatch.setattr(generation, "generate_stream", fake)
+
+    sources = [
+        {"document": "A.pdf", "page": 1, "text": "alpha one"},
+        {"document": "A.pdf", "page": 2, "text": "alpha two"},
+        {"document": "B.pdf", "page": 5, "text": "beta"},
+    ]
+    frames = run(_collect(generation.generate_thorough("ollama:m", "q?", sources)))
+
+    assert any(kind == "progress" for kind, _ in frames)
+    assert "".join(t for k, t in frames if k == "token") == "Synthesised answer [1]."
+
+    systems = [c["system"] for c in fake.calls]
+    assert systems.count(generation._MAP_SYSTEM) == 2  # one per document
+    assert systems.count(generation._REDUCE_SYSTEM) == 1
+    reduce_notes = fake.calls[-1]["messages"][-1]["content"]
+    assert "## A.pdf" in reduce_notes and "## B.pdf" in reduce_notes
+
+
+def test_generate_thorough_reports_when_nothing_is_relevant(monkeypatch):
+    monkeypatch.setattr(
+        generation, "_fetch_ollama_models", _aret([{"id": "ollama:m", "label": "m", "provider": "ollama"}])
+    )
+
+    async def all_none(model, system, messages):
+        yield "NONE"
+
+    monkeypatch.setattr(generation, "generate_stream", all_none)
+    frames = run(_collect(generation.generate_thorough("ollama:m", "q?", [{"document": "A.pdf", "page": 1, "text": "x"}])))
+    text = "".join(t for k, t in frames if k == "token")
+    assert "don't contain anything" in text

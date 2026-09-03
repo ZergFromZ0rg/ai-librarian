@@ -16,6 +16,8 @@ lazily); ``ollama`` / ``openai`` / ``google`` share one OpenAI-compatible
 streaming path over ``httpx``.
 """
 
+import asyncio
+import collections
 import json
 import logging
 import os
@@ -42,6 +44,15 @@ ASK_MAX_CONTEXT_CHARS = int(os.environ.get("ASK_MAX_CONTEXT_CHARS", "10000"))
 # raise num_ctx per request.
 OLLAMA_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "8192"))
 
+# "Thorough" (map-reduce) mode: a wider passage pool, grouped by document; a
+# cheap model extracts evidence from each group in parallel, then the chosen
+# model synthesises the answer from those notes.
+ASK_THOROUGH_PASSAGES = int(os.environ.get("ASK_THOROUGH_PASSAGES", "40"))
+ASK_THOROUGH_MAX_PER_DOC = int(os.environ.get("ASK_THOROUGH_MAX_PER_DOC", "6"))
+ASK_THOROUGH_MAX_DOCS = int(os.environ.get("ASK_THOROUGH_MAX_DOCS", "15"))
+# Order cheap cloud models are tried for the map step when no local model exists.
+_MAP_FALLBACKS = ("anthropic:claude-haiku-4-5", "openai:gpt-5.1-mini", "google:gemini-2.5-flash")
+
 # provider -> (default model list, API-key env var). Ollama is not here — it is
 # discovered, not configured.
 _CLOUD = {
@@ -67,6 +78,24 @@ _SYSTEM_PROMPT = (
     "the question calls for broader coverage, answer from what is here and note "
     "what may be missing. Be concise and preserve any mathematical notation "
     "exactly as written."
+)
+
+_MAP_SYSTEM = (
+    "You are extracting evidence for a research question from one document's "
+    "passages. List every point in the passages that bears on the question — "
+    "include partial or tangential relevance — each as a short bullet ending "
+    "with its source number in brackets, like [3]. Quote figures and terms "
+    "exactly. If nothing in these passages is relevant, reply with exactly NONE."
+)
+
+_REDUCE_SYSTEM = (
+    "You are the assistant for a personal reading library. Below are notes "
+    "extracted from several documents in it; each point is tagged with the "
+    "number of the passage it came from. Answer the user's question from these "
+    "notes only. Cite every claim with its source number in brackets, like [1] "
+    "or [2][3]. If the notes do not answer the question, say so; point out where "
+    "coverage looks thin. Organise the answer well and keep it concise; preserve "
+    "mathematical notation exactly."
 )
 
 
@@ -232,6 +261,86 @@ def build_ask_prompt(
         {"role": "user", "content": f"Sources:\n\n{context}\n\n---\n\nQuestion: {question}"}
     )
     return _SYSTEM_PROMPT, messages, used
+
+
+def _model_label(model_id: str) -> str:
+    return (model_id or "").partition(":")[2] or model_id
+
+
+async def pick_map_model(reduce_model: str) -> str:
+    """The cheapest available model for the per-document extraction step.
+
+    ``ASK_THOROUGH_MAP_MODEL`` wins if set and available; then any local Ollama
+    model (free); then a small cloud model whose provider is configured; finally
+    the model doing the synthesis.
+    """
+    ids = {model["id"] for model in await list_models()}
+    override = os.environ.get("ASK_THOROUGH_MAP_MODEL", "").strip()
+    if override and override in ids:
+        return override
+    for model_id in ids:
+        if model_id.startswith("ollama:"):
+            return model_id
+    for candidate in _MAP_FALLBACKS:
+        if candidate in ids:
+            return candidate
+    return reduce_model
+
+
+async def _complete(model_id: str, system: str, messages: List[dict]) -> str:
+    return "".join([chunk async for chunk in generate_stream(model_id, system, messages)])
+
+
+async def generate_thorough(
+    reduce_model: str, question: str, sources: List[dict], history: Optional[List[dict]] = None
+) -> AsyncIterator[Tuple[str, str]]:
+    """Map-reduce answer for library-wide questions.
+
+    Yields ``("progress", text)`` while the per-document extraction runs, then
+    ``("token", text)`` as the synthesis streams. ``sources`` are ``format_hits``
+    dicts; they are numbered globally so the citations match the passage cards.
+    """
+    groups: "collections.OrderedDict[str, list]" = collections.OrderedDict()
+    for index, source in enumerate(sources, start=1):
+        label = source.get("document") or source.get("document_id") or "source"
+        groups.setdefault(label, []).append((index, source))
+
+    map_model = await pick_map_model(reduce_model)
+    yield ("progress", f"Reading {len(groups)} documents with {_model_label(map_model)}…")
+
+    async def _map_one(label: str, items: list) -> Tuple[str, str]:
+        block = "\n\n".join(
+            f"[{idx}] {_passage_location(src)}\n{(src.get('text') or '').strip()}"
+            for idx, src in items
+        )
+        messages = [
+            {"role": "user", "content": f"Question: {question}\n\nDocument: {label}\n\n{block}"}
+        ]
+        try:
+            notes = (await _complete(map_model, _MAP_SYSTEM, messages)).strip()
+        except GenerationError as exc:
+            logger.warning("Thorough map step failed for %s: %s", label, exc)
+            return label, ""
+        return label, ("" if notes.upper().startswith("NONE") else notes)
+
+    tasks = [asyncio.ensure_future(_map_one(label, items)) for label, items in groups.items()]
+    digests: List[Tuple[str, str]] = []
+    done = 0
+    for future in asyncio.as_completed(tasks):
+        digests.append(await future)
+        done += 1
+        yield ("progress", f"Read {done}/{len(tasks)} documents…")
+
+    digest = "\n\n".join(f"## {label}\n{notes}" for label, notes in digests if notes)
+    if not digest:
+        yield ("token", "The retrieved passages don't contain anything that answers that.")
+        return
+
+    yield ("progress", f"Synthesising with {_model_label(reduce_model)}…")
+    messages = list(history or [])
+    messages.append({"role": "user", "content": f"Notes:\n\n{digest}\n\n---\n\nQuestion: {question}"})
+    async for chunk in generate_stream(reduce_model, _REDUCE_SYSTEM, messages):
+        yield ("token", chunk)
 
 
 def _split_model_id(model_id: str) -> Tuple[str, str]:
