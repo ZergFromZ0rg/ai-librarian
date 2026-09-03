@@ -418,13 +418,16 @@ button:disabled {
   margin-bottom: 0;
 }
 
-.search-result-text h1,
-.search-result-text h2,
-.search-result-text h3,
-.search-result-text h4 {
-  margin: 1em 0 0.4em;
-  color: #263b34;
-  line-height: 1.25;
+/* Passage text is an excerpt, not a document — a stray leading "# Heading"
+   should read as one line of the passage, not a billboard. Keep every level at
+   body size, only mildly emphasised. */
+.search-result-text :is(h1, h2, h3, h4, h5, h6),
+.ask-answer :is(h1, h2, h3, h4, h5, h6) {
+  margin: 0.9em 0 0.3em;
+  color: inherit;
+  font-size: 1em;
+  font-weight: 600;
+  line-height: 1.4;
 }
 
 .search-result-text p,
