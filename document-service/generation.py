@@ -32,8 +32,8 @@ GENERATION_TIMEOUT = float(os.environ.get("GENERATION_TIMEOUT", "120"))
 # How many reranked passages to put in front of the model, and a character
 # ceiling on the whole context block (a rough proxy for tokens — the passages
 # are already token-budgeted chunks).
-ASK_CONTEXT_PASSAGES = int(os.environ.get("ASK_CONTEXT_PASSAGES", "6"))
-ASK_MAX_CONTEXT_CHARS = int(os.environ.get("ASK_MAX_CONTEXT_CHARS", "6000"))
+ASK_CONTEXT_PASSAGES = int(os.environ.get("ASK_CONTEXT_PASSAGES", "10"))
+ASK_MAX_CONTEXT_CHARS = int(os.environ.get("ASK_MAX_CONTEXT_CHARS", "10000"))
 
 # provider -> (default model list, API-key env var). Ollama is not here — it is
 # discovered, not configured.

@@ -347,7 +347,7 @@ class AskRequest(BaseModel):
     history: List[AskTurn] = Field(default_factory=list, max_length=20)
     document_id: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{12}$")
     filename: Optional[str] = Field(default=None, max_length=255)
-    top_k: int = Field(default=8, ge=1, le=20)
+    top_k: int = Field(default=10, ge=1, le=20)
     # "provider:model" from GET /ask/models; unknown or absent -> the server default.
     model: Optional[str] = Field(default=None, max_length=120)
 

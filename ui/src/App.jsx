@@ -284,7 +284,7 @@ export default function App() {
       const result = await api("/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: cleanQuery, top_k: 8, rerank: true, rerank_k: 20, max_text_chars: 20000 }),
+        body: JSON.stringify({ query: cleanQuery, top_k: 10, rerank: true, rerank_k: 20, max_text_chars: 20000 }),
       });
       setResults(result.results || []);
       setLowConfidence(Boolean(result.low_confidence));
