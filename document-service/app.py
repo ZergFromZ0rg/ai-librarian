@@ -22,10 +22,11 @@ from typing import List, Optional
 import pymupdf
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.datastructures import Headers, MutableHeaders
 
+import generation
 from chunking import build_semantic_groups, normalize_for_embedding, parse_typed_blocks
 from database import MetadataStore
 from embeddings import DEFAULT_MODEL as EMBEDDING_MODEL, embed_texts
@@ -209,6 +210,19 @@ def _rounded(value, places: int = 4):
     return round(value, places) if isinstance(value, (int, float)) else None
 
 
+def _hit_log_fields(hit: dict) -> dict:
+    payload = hit.get("payload") or {}
+    return {
+        "document_id": payload.get("document_id"),
+        "filename": payload.get("filename"),
+        "page": payload.get("page"),
+        "group_id": payload.get("group_id"),
+        "retrieval_kind": payload.get("retrieval_kind"),
+        "dense_score": _rounded(hit.get("score")),
+        "rerank_score": _rounded(hit.get("rerank_score")),
+    }
+
+
 def record_search(
     request: "SearchRequest",
     hits: List[dict],
@@ -244,22 +258,47 @@ def record_search(
             "candidate_count": candidate_count,
             "result_count": len(hits),
             "latency_ms": round(latency_ms, 1),
-            "hits": [
-                {
-                    "document_id": (hit.get("payload") or {}).get("document_id"),
-                    "filename": (hit.get("payload") or {}).get("filename"),
-                    "page": (hit.get("payload") or {}).get("page"),
-                    "group_id": (hit.get("payload") or {}).get("group_id"),
-                    "retrieval_kind": (hit.get("payload") or {}).get("retrieval_kind"),
-                    "dense_score": _rounded(hit.get("score")),
-                    "rerank_score": _rounded(hit.get("rerank_score")),
-                }
-                for hit in hits
-            ],
+            "hits": [_hit_log_fields(hit) for hit in hits],
         }
         search_logger.info(json.dumps(entry, ensure_ascii=False))
     except Exception:
         logger.exception("Could not write search-log entry")
+
+
+def record_ask(
+    request: "AskRequest",
+    hits: List[dict],
+    candidate_count: int,
+    latency_ms: float,
+    rerank_dropped: int = 0,
+) -> None:
+    """Append one ask-log line (same JSONL file as search). Never raises."""
+    if not SEARCH_LOG_ENABLED:
+        return
+    try:
+        entry = {
+            "ts": utc_now(),
+            "mode": "ask",
+            "query": request.question,
+            "history_turns": len(request.history),
+            "filters": {
+                key: value
+                for key, value in {
+                    "document_id": request.document_id,
+                    "filename": request.filename,
+                }.items()
+                if value
+            }
+            or None,
+            "candidate_count": candidate_count,
+            "result_count": len(hits),
+            "rerank_dropped": rerank_dropped or None,
+            "latency_ms": round(latency_ms, 1),
+            "hits": [_hit_log_fields(hit) for hit in hits],
+        }
+        search_logger.info(json.dumps(entry, ensure_ascii=False))
+    except Exception:
+        logger.exception("Could not write ask-log entry")
 
 
 STORE = MetadataStore(DATA_DIR / "library.db")
@@ -292,6 +331,21 @@ class SearchRequest(BaseModel):
 
 class IngestFolderRequest(BaseModel):
     folder: Optional[str] = Field(default=None, max_length=1_024)
+
+
+class AskTurn(BaseModel):
+    role: str = Field(pattern=r"^(user|assistant)$")
+    content: str = Field(min_length=1, max_length=20_000)
+
+
+class AskRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=2_000)
+    # Prior turns of this conversation, oldest first. The client keeps the
+    # history; the server is stateless and re-retrieves from the new question.
+    history: List[AskTurn] = Field(default_factory=list, max_length=20)
+    document_id: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{12}$")
+    filename: Optional[str] = Field(default=None, max_length=255)
+    top_k: int = Field(default=8, ge=1, le=20)
 
 
 @dataclass(frozen=True)
@@ -1092,6 +1146,7 @@ async def config():
         "reranker_model": RERANK_MODEL,
         "rerank_passage": RERANK_PASSAGE,
         "rerank_lowconf_score": RERANK_LOWCONF_SCORE,
+        "generation": generation.backend_info(),
         "pipeline_version": PIPELINE_VERSION,
         "index_schema_version": INDEX_SCHEMA_VERSION,
         "fusion": FUSION_METHOD,
@@ -1385,6 +1440,83 @@ async def search_get(
         dense_weight=dense_weight,
     )
     return await search(request)
+
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+_ASK_NO_ANSWER = (
+    "I couldn't find anything in your library about that. Try rephrasing, or add "
+    "a document that covers the topic."
+)
+
+
+@app.post("/ask")
+async def ask(request: AskRequest):
+    """Retrieve passages for `question`, then stream a grounded, cited answer.
+
+    Server-Sent Events: `{"type":"token","text":...}` chunks as the answer is
+    generated, then one `{"type":"sources","results":[...],"low_confidence":b}`,
+    or `{"type":"error","detail":...}` if generation fails after the stream
+    opened. When retrieval finds nothing the answer is a fixed message and no LLM
+    call is made.
+    """
+    if not generation.enabled():
+        raise HTTPException(status_code=503, detail=generation.disabled_reason())
+
+    started = time.monotonic()
+    try:
+        hits, candidate_count, rerank_dropped = await retrieve(
+            request.question,
+            request.top_k,
+            request.document_id,
+            request.filename,
+            True,
+            SearchRequest.model_fields["rerank_k"].default,
+            RERANK_MIN_SCORE,
+        )
+    except Exception as exc:
+        raise _sanitized_http_error(503, "retrieval failed", exc) from exc
+
+    sources = format_hits(hits)
+    top_score = hits[0].get("rerank_score") if hits else None
+    low_confidence = (
+        RERANK_LOWCONF_SCORE is not None
+        and top_score is not None
+        and top_score < RERANK_LOWCONF_SCORE
+    )
+    record_ask(
+        request, hits, candidate_count, (time.monotonic() - started) * 1000, rerank_dropped
+    )
+
+    async def event_stream():
+        rid = REQUEST_ID.get()
+        try:
+            if not sources:
+                yield _sse({"type": "token", "text": _ASK_NO_ANSWER})
+                yield _sse({"type": "sources", "results": [], "low_confidence": False})
+                return
+            system, messages, used = generation.build_ask_prompt(
+                request.question, sources, [turn.model_dump() for turn in request.history]
+            )
+            async for chunk in generation.generate_stream(system, messages):
+                yield _sse({"type": "token", "text": chunk})
+            yield _sse(
+                {"type": "sources", "results": used, "low_confidence": low_confidence}
+            )
+        except generation.GenerationError as exc:
+            logger.warning("Ask generation failed [request %s]: %s", rid, exc)
+            yield _sse({"type": "error", "detail": f"answer generation failed (request {rid})"})
+        except Exception:
+            logger.exception("Unexpected error while streaming an answer [request %s]", rid)
+            yield _sse({"type": "error", "detail": f"answer generation failed (request {rid})"})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/admin/search-log")

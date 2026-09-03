@@ -60,6 +60,16 @@ services:
       RERANK_CANDIDATES: ${RERANK_CANDIDATES:-60}
       RERANK_MIN_SCORE: ${RERANK_MIN_SCORE:--2.0}
       RERANK_LOWCONF_SCORE: ${RERANK_LOWCONF_SCORE:-0.0}
+      GENERATION_BACKEND: ${GENERATION_BACKEND:-off}
+      LLAMA_URL: ${LLAMA_URL:-http://llm:8080}
+      LLAMA_MODEL: ${LLAMA_MODEL:-local-gguf}
+      GENERATION_MODEL: ${GENERATION_MODEL:-claude-opus-5}
+      GENERATION_MAX_TOKENS: ${GENERATION_MAX_TOKENS:-2000}
+      GENERATION_TEMPERATURE: ${GENERATION_TEMPERATURE:-0.2}
+      GENERATION_TIMEOUT: ${GENERATION_TIMEOUT:-120}
+      ASK_CONTEXT_PASSAGES: ${ASK_CONTEXT_PASSAGES:-6}
+      ASK_MAX_CONTEXT_CHARS: ${ASK_MAX_CONTEXT_CHARS:-6000}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CHUNK_TARGET_TOKENS: ${CHUNK_TARGET_TOKENS:-180}
       CHUNK_SOFT_MAX_TOKENS: ${CHUNK_SOFT_MAX_TOKENS:-220}
       CHUNK_HARD_MAX_TOKENS: ${CHUNK_HARD_MAX_TOKENS:-240}
@@ -77,6 +87,37 @@ services:
       interval: 15s
       timeout: 5s
       retries: 12
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+  # Ask mode's local LLM. Opt-in: only starts under `--profile ask`, and only
+  # matters when GENERATION_BACKEND=llamacpp. Drop a GGUF chat model into
+  # data/models/llm/ and set LLAMA_GGUF to its filename.
+  llm:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    profiles: ["ask"]
+    restart: unless-stopped
+    volumes:
+      - ./data/models/llm:/models:ro
+    command:
+      - "-m"
+      - "/models/${LLAMA_GGUF:-model.gguf}"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "-c"
+      - "${LLAMA_CTX:-8192}"
+      - "--threads"
+      - "${LLAMA_THREADS:-4}"
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
       start_period: 30s
     security_opt:
       - no-new-privileges:true

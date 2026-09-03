@@ -1,27 +1,10 @@
-import importlib
 import json
 import logging
-import math
 import os
-import sys
 import time
 
 import fitz
-import pytest
-from fastapi.testclient import TestClient
-
-
-def make_pdf(text: str, pages: int = 1) -> bytes:
-    document = fitz.open()
-    for _ in range(pages):
-        page = document.new_page()
-        y = 72
-        for line in text.split("\n"):
-            page.insert_text((72, y), line)
-            y += 14
-    content = document.tobytes()
-    document.close()
-    return content
+from conftest import make_pdf, wait_for_status
 
 
 def make_scanned_pdf(image_pages: int, text_pages: int = 0) -> bytes:
@@ -74,93 +57,6 @@ def make_pdf_pages(texts) -> bytes:
     content = document.tobytes()
     document.close()
     return content
-
-
-def wait_for_status(client: TestClient, doc_id: str, expected: str, timeout: float = 3) -> dict:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        response = client.get(f"/documents/{doc_id}")
-        assert response.status_code == 200
-        metadata = response.json()
-        if metadata["indexing_status"] == expected:
-            return metadata
-        time.sleep(0.02)
-    pytest.fail(f"document {doc_id} did not reach {expected}")
-
-
-@pytest.fixture
-def service(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("INGEST_ROOT", str(tmp_path / "library"))
-    monkeypatch.setenv("RERANK_TIMEOUT", "1")
-
-    service_path = str(__file__).rsplit("/tests/", 1)[0]
-    sys.path.insert(0, service_path)
-    sys.modules.pop("app", None)
-    module = importlib.import_module("app")
-
-    indexed = {}
-
-    def fake_embed(texts, kind="passage", model_name=None):
-        vectors = []
-        for text in texts:
-            lowered = text.lower()
-            vectors.append([
-                float(lowered.count("absurd")),
-                float(lowered.count("freedom")),
-                1.0,
-            ])
-        return vectors
-
-    def fake_upsert(chunks):
-        for chunk in chunks:
-            indexed[chunk["chunk_id"]] = {
-                "vector": chunk["embedding"],
-                "payload": {
-                    "chunk_id": chunk["chunk_id"],
-                    "group_id": chunk.get("group_id"),
-                    "document_id": chunk["document_id"],
-                    "filename": chunk["filename"],
-                    "page": chunk["page"],
-                    "page_end": chunk.get("page_end", chunk["page"]),
-                    "chunk_index": chunk["chunk_index"],
-                    "text": chunk["text"],
-                    "retrieval_text": chunk.get("retrieval_text", chunk["text"]),
-                    "embedding_text": chunk.get("embedding_text", chunk["text"]),
-                    "block_types": chunk.get("block_types", []),
-                    "protected_type": chunk.get("protected_type"),
-                },
-            }
-
-    def fake_delete(document_id):
-        for chunk_id in [
-            key for key, value in indexed.items() if value["payload"]["document_id"] == document_id
-        ]:
-            del indexed[chunk_id]
-
-    def fake_search(vector, top_k=5, filters=None, query_text=None, **_kwargs):
-        hits = []
-        vector_norm = math.sqrt(sum(value * value for value in vector)) or 1
-        for chunk_id, item in indexed.items():
-            if filters and any(item["payload"].get(key) != value for key, value in filters.items()):
-                continue
-            candidate = item["vector"]
-            candidate_norm = math.sqrt(sum(value * value for value in candidate)) or 1
-            score = sum(left * right for left, right in zip(vector, candidate)) / (vector_norm * candidate_norm)
-            hits.append({"id": chunk_id, "score": score, "payload": item["payload"]})
-        return sorted(hits, key=lambda hit: hit["score"], reverse=True)[:top_k]
-
-    monkeypatch.setattr(module, "embed_texts", fake_embed)
-    monkeypatch.setattr(module, "upsert_chunks", fake_upsert)
-    monkeypatch.setattr(module, "delete_document_vectors", fake_delete)
-    monkeypatch.setattr(module, "search_vectors", fake_search)
-    monkeypatch.setattr(module, "vector_healthcheck", lambda: True)
-
-    with TestClient(module.app) as client:
-        yield module, client, indexed
-
-    module.STORE.close()
-    sys.path.remove(service_path)
 
 
 def test_upload_index_search_deduplicate_and_delete(service):

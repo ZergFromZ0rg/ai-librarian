@@ -2,7 +2,7 @@
 
 AI Librarian is a self-hosted, local-first knowledge library for PDF documents. It extracts layout-aware Markdown, parses typed document blocks, builds structure-aware token-budgeted passages, and combines semantic and BM25 keyword retrieval in Qdrant before reranking passages with page-level source references.
 
-No hosted AI API or generative model is required. After the container images and search models have been downloaded, document processing and search stay on your server.
+No hosted AI API is required for extraction or search: once the container images and search models are downloaded, document processing and retrieval stay on your server. The optional [Ask mode](#ask-mode) adds LLM-written answers over the retrieved passages — served by a bundled local model (fully offline) or, if you prefer, the Claude API.
 
 ## What it does
 
@@ -12,6 +12,7 @@ No hosted AI API or generative model is required. After the container images and
 - Retry failed indexing jobs and recover queued work after a restart.
 - Avoid duplicate documents using a SHA-256 content hash.
 - Search concepts, passages, names, and ideas semantically across the full library.
+- Optionally ask questions in natural language and get an answer written from the retrieved passages, with `[n]` citations back to the source pages ([Ask mode](#ask-mode)).
 - Preserve headings, lists, tables, whitespace, Unicode symbols, and mathematical notation when the PDF text layer contains them.
 - Keep equations and tables attached to their introductions, captions, and explanations, including continuations across page boundaries.
 - Index smaller child blocks for precise matching while returning their complete parent passage for context.
@@ -28,7 +29,9 @@ Nginx UI ── /api ──► FastAPI document service
                          ├── Typed paragraph/heading/equation/table/caption blocks
                          ├── 180-token target, protected groups, 32-token overlap
                          ├── Sentence Transformer embeddings/reranking
-                         └── Qdrant dense + sparse hybrid retrieval
+                         ├── Qdrant dense + sparse hybrid retrieval
+                         └── Ask mode (optional): grounded answer generation
+                             via a local llama.cpp server or the Claude API
 ```
 
 Qdrant is private to the Compose network. Only the UI and API are published, and both bind to `127.0.0.1` by default.
@@ -78,6 +81,8 @@ docker compose up -d
 ```
 
 `PREBAKE_MODELS=1` adds roughly 550 MB to the image (the embedding + reranker models); on first start the entrypoint copies the baked models into an empty `data/models/`. Alternatively, run `warm_models.py` on a networked machine and copy `data/models/` to the air-gapped host.
+
+[Ask mode](#ask-mode) stays air-gap friendly with `GENERATION_BACKEND=llamacpp`: the GGUF you drop into `data/models/llm/` is never fetched automatically. The `anthropic` backend obviously needs network egress and is not for air-gapped hosts.
 
 When upgrading from an older pipeline version, or after changing `EMBEDDING_MODEL`, existing stored PDFs are automatically reindexed on first start — re-extracted when the pipeline changed, otherwise just re-embedded. The original PDFs remain unchanged. During this one-time migration, document badges move through `queued` and `indexing` again.
 
@@ -158,6 +163,45 @@ Absolute paths and paths outside `/library` are rejected. Folder imports scan PD
 
 If `MAX_UPLOAD_MB` is raised above 100, also update `client_max_body_size` in `ui/nginx.conf.template`.
 
+## Ask mode
+
+Ask mode turns the retrieved passages into a written answer with `[n]` citations back to the
+source pages. Retrieval is unchanged — the same hybrid search and reranker feed the model —
+so the answer is only as good as what search finds, and the "view source" links let you
+check every claim against the original page.
+
+It is **off by default**. Pick a backend with `GENERATION_BACKEND`:
+
+| Value | What runs | Trade-off |
+| --- | --- | --- |
+| `off` | nothing; the UI shows Search only | — |
+| `llamacpp` | a bundled [llama.cpp](https://github.com/ggml-org/llama.cpp) server | fully local, works air-gapped, no API key; CPU generation takes tens of seconds |
+| `anthropic` | the Claude API | fast and strong; needs network egress and an API key, and bills per query |
+
+### Local model (`llamacpp`)
+
+1. Download a GGUF chat model (e.g. `Qwen2.5-7B-Instruct-Q4_K_M.gguf`, ~4.7 GB) into
+   `data/models/llm/`.
+2. In `.env`: `GENERATION_BACKEND=llamacpp` and `LLAMA_GGUF=<the file name>`.
+3. Start the extra service: `docker compose --profile ask up -d --build`.
+
+A 7B Q4 model needs roughly 5–6 GB of RAM. Tune `LLAMA_THREADS` and `LLAMA_CTX` for your
+host. The model file is never fetched automatically, so this path is air-gap friendly once
+the file is in place.
+
+### Claude API (`anthropic`)
+
+Set `GENERATION_BACKEND=anthropic`, `ANTHROPIC_API_KEY=…`, and optionally `GENERATION_MODEL`
+(default `claude-opus-5`). No extra service; the `anthropic` package ships in the image and
+is imported only when this backend is selected.
+
+### Shared knobs
+
+`GENERATION_MAX_TOKENS` (answer length ceiling), `GENERATION_TEMPERATURE`,
+`GENERATION_TIMEOUT`, `ASK_CONTEXT_PASSAGES` (how many passages the model sees, default 6),
+and `ASK_MAX_CONTEXT_CHARS` (a character budget over those passages). `GET /config` reports
+the active backend; the UI shows the **Ask** tab only when a backend is enabled.
+
 ## Storage and backups
 
 Persistent state lives under:
@@ -218,7 +262,7 @@ Everything the library needs lives under `data/`:
 | `data/app/extracted/`, `data/app/chunks/` | extracted text and passages | yes, from the PDFs |
 | `data/app/jobs/`, `data/app/logs/` | folder-import state, search log | not needed |
 | `data/qdrant/` | the vector index | yes, by re-indexing |
-| `data/models/` | downloaded embedding and reranker models | yes, re-downloaded |
+| `data/models/` | downloaded embedding and reranker models; `data/models/llm/` holds the Ask-mode GGUF you place there | yes, re-downloaded (the GGUF must be re-added by hand) |
 
 **Minimum backup** — stop the stack, then copy `data/app/library.db` and
 `data/app/documents/`. On restore, put them back and `docker compose up -d`;
@@ -242,6 +286,7 @@ Important endpoints:
 - `POST /documents/{id}/retry` — retry failed indexing
 - `DELETE /documents/{id}` — delete stored files and vectors
 - `POST /search` — semantic retrieval (set `rerank: true` to reorder and relevance-gate; `rerank_min_score`, `fusion`, and `dense_weight` override the server defaults per request)
+- `POST /ask` — retrieve, then stream a grounded answer as Server-Sent Events (`token` chunks, then one `sources` event); body: `{"question", "history": [{"role", "content"}]}`. Returns 503 when Ask mode is off. See [Ask mode](#ask-mode)
 - `POST /admin/ingest-folder` — import the mounted library folder
 - `GET /admin/search-log` — recent queries with their returned pages and scores
 - `GET /health/live` — process liveness
@@ -272,7 +317,7 @@ npm test
 npm run build
 ```
 
-`npm test` runs the Vitest unit tests (currently the search-result match highlighter).
+`npm test` runs the Vitest unit tests (the search-result match highlighter and the Ask-mode SSE stream parser).
 
 ## Current limitations
 
@@ -282,5 +327,6 @@ npm run build
 - Front and back matter — tables of contents, back-of-book indexes, bibliographies — is detected by shape and dropped before indexing, so those keyword-dense pages don't outrank real passages. Detection is conservative and skips nothing when it would flag more than 40% of a document.
 - Layout extraction can preserve mathematical symbols only when the PDF exposes usable text or glyph information. Equations stored solely as images are not recovered.
 - Chunk sizes are measured with the embedding model's own tokenizer (loaded on its own, without the model). If that tokenizer cannot be loaded — no `transformers`, or offline before it is cached — the chunker falls back to a conservative regex estimate and logs a warning.
+- [Ask mode](#ask-mode) answers are only as good as what retrieval surfaces and what the chosen model can do with it — a small local model will be weaker than the Claude API. Answers are grounded in the retrieved passages and cite them, but always spot-check the cited pages. Conversation history is kept in the browser, not on the server.
 - The document service intentionally runs as one process. The indexing backlog is durable (the worker pulls `queued` documents straight from SQLite, so a restart or a full-library re-index never loses or fails work), but the folder-import queue is still in-process. Moving to Redis or another external worker system would be the next step for horizontal scaling.
 - Search returns relevant source passages; it does not generate or summarize answers.
