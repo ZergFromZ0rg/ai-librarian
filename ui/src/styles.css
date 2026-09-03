@@ -494,6 +494,115 @@ button:disabled {
   resize: vertical;
 }
 
+/* Search / Ask tabs ------------------------------------------------------- */
+
+.panel-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid #e1e5e2;
+  padding: 10px 14px 0;
+  background: rgba(250, 249, 245, 0.6);
+}
+
+.panel-tabs button {
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  padding: 8px 14px;
+  color: #7b827f;
+  font: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.panel-tabs button.active {
+  color: #24483d;
+  border-bottom-color: #24483d;
+  font-weight: 600;
+}
+
+/* Ask mode -------------------------------------------------------------- */
+
+.ask-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ask-thread {
+  overflow-y: auto;
+}
+
+.ask-turn {
+  max-width: 100%;
+  line-height: 1.58;
+  overflow-wrap: anywhere;
+}
+
+.ask-turn.user {
+  align-self: flex-end;
+  max-width: 80%;
+  border-radius: 14px 14px 4px 14px;
+  background: #24483d;
+  color: #f4f2ec;
+  padding: 10px 14px;
+  white-space: pre-wrap;
+}
+
+.ask-turn.assistant {
+  align-self: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ask-answer {
+  color: #35443f;
+}
+
+.ask-answer > :first-child {
+  margin-top: 0;
+}
+
+.ask-answer > :last-child {
+  margin-bottom: 0;
+}
+
+.ask-answer .cite {
+  color: #6b7cff;
+  font-size: 0.82em;
+  font-weight: 600;
+  vertical-align: 0.15em;
+}
+
+.ask-thinking {
+  color: #9aa39e;
+  font-style: italic;
+}
+
+.ask-sources {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ask-sources-label {
+  color: #77807c;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.citation-tag {
+  color: #6b7cff;
+  font-weight: 700;
+}
+
+.ask-error {
+  margin: 0 16px;
+}
+
 @media (max-width: 850px) {
   .app-shell {
     padding: 18px;
