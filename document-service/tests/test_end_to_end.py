@@ -267,6 +267,26 @@ def test_reranker_score_gate_drops_low_scoring_hits(service, monkeypatch):
     assert len(boundary.json()["results"]) >= 1
 
 
+def test_low_confidence_flag_tracks_the_top_reranked_score(service, monkeypatch):
+    module, client, _indexed = service
+    monkeypatch.setattr(module, "RERANK_LOWCONF_SCORE", 0.0)
+    upload = client.post(
+        "/documents",
+        files={"file": ("m.pdf", make_pdf("Freedom and the absurd condition."), "application/pdf")},
+    )
+    wait_for_status(client, upload.json()["document_id"], "indexed")
+    q = {"query": "absurd freedom", "rerank": True}
+
+    monkeypatch.setattr(module, "rerank", lambda query, passages: [-2.0 for _ in passages])
+    assert client.post("/search", json=q).json()["low_confidence"] is True
+
+    monkeypatch.setattr(module, "rerank", lambda query, passages: [5.0 for _ in passages])
+    assert client.post("/search", json=q).json()["low_confidence"] is False
+
+    # No flag when reranking is off (there is no reranker score to judge).
+    assert client.post("/search", json={**q, "rerank": False}).json()["low_confidence"] is False
+
+
 def test_rerank_passage_prefers_the_matched_unit_when_it_is_distinct(service, monkeypatch):
     module, _client, _indexed = service
     group = "Long unrelated introduction. " * 20

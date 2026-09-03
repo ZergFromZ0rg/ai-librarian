@@ -118,19 +118,19 @@ INGEST_QUEUE_SIZE = int(os.environ.get("INGEST_QUEUE_SIZE", "10"))
 # case a wake-up signal is ever missed.
 INDEX_POLL_SECONDS = float(os.environ.get("INDEX_POLL_SECONDS", "30"))
 RERANK_MAX_WORKERS = int(os.environ.get("RERANK_MAX_WORKERS", "2"))
-RERANK_TIMEOUT = float(os.environ.get("RERANK_TIMEOUT", "30"))
+RERANK_TIMEOUT = float(os.environ.get("RERANK_TIMEOUT", "15"))
 # How many fused candidates the cross-encoder actually scores. Dense+sparse
 # fusion is only a coarse filter; the reranker is what picks the winning
 # passage, so it needs a wide enough pool. `rerank_k` from the request acts as
-# a floor on top of this. ~60 costs a few seconds per query with the default
-# bge-reranker-base on a CPU-only host; drop it (or switch to ms-marco-MiniLM)
-# if that latency hurts.
+# a floor on top of this. The default ms-marco-MiniLM scores ~60 in well under a
+# second on CPU; a heavier RERANK_MODEL (bge-reranker-base) makes this the main
+# latency knob -- drop it to ~25 there.
 RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "60"))
 # What text the cross-encoder scores against the query: "group" = the whole
 # parent passage (default), "matched" = just the specific retrieval unit that
-# won (a paragraph, an equation). "group" gives bge-reranker-base enough context
-# to separate near-duplicates in dense survey prose; "matched" tends to saturate
-# its score on short fragments and bare headings. A request may override this.
+# won (a paragraph, an equation). "group" gives the reranker enough context to
+# separate near-duplicates in dense survey prose; "matched" tends to saturate a
+# 0..1 model's score on short fragments and bare headings. A request may override.
 RERANK_PASSAGE = os.environ.get("RERANK_PASSAGE", "group").strip().lower()
 
 
@@ -146,15 +146,19 @@ def _parse_min_score(raw: str):
         return None
 
 
-# Optional floor on the reranker score: hits below it are dropped, so a query
-# with no real answer in the library can come back empty. Off by default -- on
-# the reference library bge-reranker-base occasionally scores an unrelated
-# passage above 0.9 (e.g. a sentence about moving geometric curves for "chess en
-# passant"), so no single floor separates junk from real answers without also
-# deleting legitimate low-confidence hits. Set a float (bge emits a 0..1
-# probability; ms-marco-MiniLM emits logits centred on 0) to re-enable it for a
-# library where `eval/harness.py calibrate` finds a clean cutoff.
+# Optional hard floor on the reranker score: hits below it are dropped, so a
+# query with no real answer in the library can come back empty. Off by default --
+# neither reranker separates unanswerable queries from real ones cleanly enough
+# (bge-reranker-base scored a geometry sentence 0.93 for "chess en passant";
+# ms-marco-MiniLM scores real literary-prose answers below 0). Set a float
+# (MiniLM: logits around 0; bge: 0..1 probability) only where `eval/harness.py
+# calibrate` finds a clean cutoff.
 RERANK_MIN_SCORE = _parse_min_score(os.environ.get("RERANK_MIN_SCORE", "off"))
+# Soft signal instead: when the top reranked hit scores below this, the response
+# is flagged `low_confidence` and the UI shows a "nothing clearly matched"
+# banner without hiding anything. 0.0 suits MiniLM logits; raise it (~0.3) for a
+# 0..1 model. `off` disables the flag.
+RERANK_LOWCONF_SCORE = _parse_min_score(os.environ.get("RERANK_LOWCONF_SCORE", "0.0"))
 CHUNK_TARGET_TOKENS = int(os.environ.get("CHUNK_TARGET_TOKENS", "180"))
 CHUNK_SOFT_MAX_TOKENS = int(os.environ.get("CHUNK_SOFT_MAX_TOKENS", "220"))
 CHUNK_HARD_MAX_TOKENS = int(os.environ.get("CHUNK_HARD_MAX_TOKENS", "240"))
@@ -1087,6 +1091,7 @@ async def config():
         "embedding_model": EMBEDDING_MODEL,
         "reranker_model": RERANK_MODEL,
         "rerank_passage": RERANK_PASSAGE,
+        "rerank_lowconf_score": RERANK_LOWCONF_SCORE,
         "pipeline_version": PIPELINE_VERSION,
         "index_schema_version": INDEX_SCHEMA_VERSION,
         "fusion": FUSION_METHOD,
@@ -1338,7 +1343,18 @@ async def search(request: SearchRequest):
         rerank_min_score=min_score if request.rerank else None,
         rerank_dropped=rerank_dropped,
     )
-    return {"query": request.query, "results": format_hits(hits, request.max_text_chars)}
+    top_score = hits[0].get("rerank_score") if hits else None
+    low_confidence = (
+        request.rerank
+        and RERANK_LOWCONF_SCORE is not None
+        and top_score is not None
+        and top_score < RERANK_LOWCONF_SCORE
+    )
+    return {
+        "query": request.query,
+        "results": format_hits(hits, request.max_text_chars),
+        "low_confidence": low_confidence,
+    }
 
 
 @app.get("/search")

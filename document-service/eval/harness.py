@@ -73,7 +73,9 @@ def _request(method: str, path: str, body: Optional[dict] = None) -> dict:
     if APP_TOKEN:
         req.add_header("Authorization", f"Bearer {APP_TOKEN}")
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
+        # A reranked search on a CPU host (bge-base embed + bge-reranker over the
+        # full candidate pool) can take 20 s+, so give it generous headroom.
+        with urllib.request.urlopen(req, timeout=120) as response:
             return json.loads(response.read())
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")

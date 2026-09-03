@@ -57,7 +57,7 @@ The first indexing request takes longer because the document service downloads i
 | Role | Model | Download |
 | --- | --- | --- |
 | embeddings | `BAAI/bge-base-en-v1.5` | ~440 MB |
-| reranker | `BAAI/bge-reranker-base` | ~1.1 GB |
+| reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` | ~90 MB |
 
 The embedding model is a 768-dimensional, 512-token retrieval model. It wants an instruction prefix on the query only — the service prepends `Represent this sentence for searching relevant passages: ` to search strings and stores passages raw (both configurable). Override `EMBEDDING_MODEL` for a different model; for e5-\* set the prefixes to `query: ` / `passage: `, for an unprefixed one such as `sentence-transformers/all-MiniLM-L6-v2` set both empty. A model change re-embeds the whole library on the next start; if the new model's vector width differs from the indexed one, also set `ALLOW_INDEX_RESET=1` for that one start.
 
@@ -77,7 +77,7 @@ echo "OFFLINE=1" >> .env
 docker compose up -d
 ```
 
-`PREBAKE_MODELS=1` adds roughly 1.3 GB to the image (mostly the reranker; set `RERANK_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2` before building to trade quality for ~1 GB); on first start the entrypoint copies the baked models into an empty `data/models/`. Alternatively, run `warm_models.py` on a networked machine and copy `data/models/` to the air-gapped host.
+`PREBAKE_MODELS=1` adds roughly 550 MB to the image (the embedding + reranker models); on first start the entrypoint copies the baked models into an empty `data/models/`. Alternatively, run `warm_models.py` on a networked machine and copy `data/models/` to the air-gapped host.
 
 When upgrading from an older pipeline version, or after changing `EMBEDDING_MODEL`, existing stored PDFs are automatically reindexed on first start — re-extracted when the pipeline changed, otherwise just re-embedded. The original PDFs remain unchanged. During this one-time migration, document badges move through `queued` and `indexing` again.
 
@@ -144,11 +144,12 @@ Absolute paths and paths outside `/library` are rejected. Folder imports scan PD
 | `LEXICAL_AVGDL` | `180` | BM25 reference passage length (weighted terms); a re-index picks up a change |
 | `FUSION_METHOD` | `rrf` | How the semantic and lexical lists merge: `rrf` (rank only), `dbsf` (score, Qdrant-normalised), `rsf` (min-max + weight). Query-time only |
 | `FUSION_DENSE_WEIGHT` | `0.5` | `rsf` only: 0..1 weight on the semantic list (lexical gets the rest) |
-| `RERANK_MODEL` | `BAAI/bge-reranker-base` | Cross-encoder that re-sorts the shortlist; the default is strong on scholarly prose. `cross-encoder/ms-marco-MiniLM-L-6-v2` is ~10x smaller and faster on CPU but far noisier. Re-run `eval/harness.py calibrate` after a change |
-| `RERANK_PASSAGE` | `group` | Text the reranker scores: `group` (the whole passage) or `matched` (just the winning retrieval unit). `group` gives bge-reranker-base the context to separate near-duplicates; `matched` saturates on short fragments. A search request may override it |
-| `RERANK_TIMEOUT` | `30` | Maximum reranker time in seconds; on a timeout the fused order is returned unranked |
-| `RERANK_CANDIDATES` | `60` | Fused candidates the cross-encoder scores per query; higher lifts recall for ~linearly more latency |
-| `RERANK_MIN_SCORE` | `off` | Optional floor on the reranker score; hits below it are dropped so an unanswerable query can return empty. Off by default — bge-reranker-base occasionally scores unrelated text above 0.9 on this library, so no floor cleanly separates junk from genuine low-confidence answers. Set a float only where `eval/harness.py calibrate` finds a clean cutoff |
+| `RERANK_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder that re-sorts the shortlist. Tiny and fast (~1 s for 60 candidates on CPU). `BAAI/bge-reranker-base` is stronger on scholarly prose but ~15x slower and saturates its score on this library — with a strong dense model the extra cost didn't pay off |
+| `RERANK_PASSAGE` | `group` | Text the reranker scores: `group` (the whole passage) or `matched` (just the winning retrieval unit). `group` gives the reranker context to separate near-duplicates; `matched` saturates a 0..1 model on short fragments. A search request may override it |
+| `RERANK_TIMEOUT` | `15` | Maximum reranker time in seconds; on a timeout the fused order is returned unranked |
+| `RERANK_CANDIDATES` | `60` | Fused candidates the cross-encoder scores per query; cheap at 60 with MiniLM, the main latency knob with a heavier model |
+| `RERANK_MIN_SCORE` | `off` | Optional hard floor on the reranker score; hits below it are dropped so an unanswerable query can return empty. Off by default — neither reranker separates unanswerable queries from real ones cleanly enough. Set a float only where `eval/harness.py calibrate` finds a clean cutoff |
+| `RERANK_LOWCONF_SCORE` | `0.0` | Soft version: when the top reranked hit scores below this, the response is flagged `low_confidence` and the UI shows a "nothing clearly matched" banner without hiding results. `0.0` suits MiniLM logits; raise (~0.3) for a 0..1 model; `off` disables |
 | `CHUNK_TARGET_TOKENS` | `180` | Preferred token budget for a searchable passage |
 | `CHUNK_SOFT_MAX_TOKENS` | `220` | Size allowed for an intact semantic group before child splitting |
 | `CHUNK_HARD_MAX_TOKENS` | `240` | Maximum estimated tokens in an embedding child |

@@ -127,6 +127,7 @@ export default function App() {
   const [noticeError, setNoticeError] = useState(false);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
+  const [lowConfidence, setLowConfidence] = useState(false);
   const [searched, setSearched] = useState(false);
   const [searching, setSearching] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -273,11 +274,13 @@ export default function App() {
         body: JSON.stringify({ query: cleanQuery, top_k: 8, rerank: true, rerank_k: 20, max_text_chars: 20000 }),
       });
       setResults(result.results || []);
+      setLowConfidence(Boolean(result.low_confidence));
       setSearched(true);
       setNotice(`Found ${result.results?.length || 0} relevant passages.`);
       setNoticeError(false);
     } catch (error) {
       setResults([]);
+      setLowConfidence(false);
       setSearched(true);
       setNotice(error.message);
       setNoticeError(true);
@@ -388,17 +391,15 @@ export default function App() {
                 </div>
               </div>
             )}
-            {results.length > 0 &&
-              results[0].rerank_score != null &&
-              results[0].rerank_score < 0.1 && (
-                <div className="empty-state low-confidence">
-                  <div>
-                    <strong>Low confidence.</strong>
-                    Nothing in your library scored as a clear match for this query — the
-                    passages below are the closest available, not necessarily an answer.
-                  </div>
+            {results.length > 0 && lowConfidence && (
+              <div className="empty-state low-confidence">
+                <div>
+                  <strong>Low confidence.</strong>
+                  Nothing in your library scored as a clear match for this query — the
+                  passages below are the closest available, not necessarily an answer.
                 </div>
-              )}
+              </div>
+            )}
             {results.map((result) => {
               const highlighter = makeMatchHighlighter(result.matched);
               return (
