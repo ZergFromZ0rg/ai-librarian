@@ -10,6 +10,8 @@ export default function Settings({
   onThemeChange,
   apiKeys,
   setApiKeys,
+  ollamaModels,
+  setOllamaModels,
   libraryRoot,
   hostPath,
   settingRoot,
@@ -23,6 +25,7 @@ export default function Settings({
     libraryRoot ? (hostPath ? `${hostPath}/${libraryRoot}` : libraryRoot) : "",
   );
   const [keyDraft, setKeyDraft] = useState({});
+  const [ollamaDraft, setOllamaDraft] = useState("");
 
   useEffect(() => {
     setPathInput(libraryRoot ? (hostPath ? `${hostPath}/${libraryRoot}` : libraryRoot) : "");
@@ -54,6 +57,17 @@ export default function Settings({
     const next = { ...apiKeys };
     delete next[providerId];
     setApiKeys(next);
+  }
+
+  function addOllamaModel() {
+    const name = ollamaDraft.trim();
+    if (!name || ollamaModels.includes(name)) return;
+    setOllamaModels([...ollamaModels, name]);
+    setOllamaDraft("");
+  }
+
+  function removeOllamaModel(name) {
+    setOllamaModels(ollamaModels.filter((existing) => existing !== name));
   }
 
   return (
@@ -127,6 +141,42 @@ export default function Settings({
         </p>
         {rootError && <div className="status-message error">{rootError}</div>}
         {rootNotice && !rootError && <div className="status-message">{rootNotice}</div>}
+      </section>
+
+      <section className="settings-section">
+        <h3>Local (Ollama)</h3>
+        <p className="settings-note">
+          Models already pulled on the server's Ollama show up automatically. Add one here if
+          you've pulled a model there that hasn't been picked up yet, or want to name one directly.
+        </p>
+        <form
+          className="field-row"
+          onSubmit={(event) => {
+            event.preventDefault();
+            addOllamaModel();
+          }}
+        >
+          <input
+            value={ollamaDraft}
+            onChange={(event) => setOllamaDraft(event.target.value)}
+            placeholder="e.g. llama3.1:8b"
+          />
+          <button className="primary" type="submit" disabled={!ollamaDraft.trim()}>
+            Add
+          </button>
+        </form>
+        {ollamaModels.length > 0 && (
+          <ul className="settings-model-list">
+            {ollamaModels.map((name) => (
+              <li key={name}>
+                <span>{name}</span>
+                <button type="button" className="link" onClick={() => removeOllamaModel(name)}>
+                  Remove
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       <section className="settings-section">

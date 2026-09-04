@@ -12,6 +12,7 @@ const THEME_KEY = "ai-librarian.theme";
 const SIDEBAR_KEY = "ai-librarian.sidebar-collapsed";
 const ACTIVE_CHAT_KEY = "ai-librarian.ask.active";
 const KEYS_KEY = "ai-librarian.ask.keys";
+const OLLAMA_KEY = "ai-librarian.ask.ollama-models";
 
 function currentTheme() {
   const stored = document.documentElement.dataset.theme;
@@ -220,6 +221,13 @@ export default function App() {
 
   // Cloud API keys — edited from Settings, consumed by AskPanel.
   const [apiKeys, setApiKeys] = useState(() => loadStored(KEYS_KEY, {}, true) || {});
+  // Ollama models the reader has pulled on their own server but that this
+  // app doesn't already know about — typed in from Settings, not fetched.
+  const [ollamaModels, setOllamaModelsState] = useState(() => loadStored(OLLAMA_KEY, [], true) || []);
+  const setOllamaModels = useCallback((models) => {
+    setOllamaModelsState(models);
+    saveStored(OLLAMA_KEY, models);
+  }, []);
 
   // Chat history — the list lives in the sidebar; AskPanel just renders
   // whichever conversation `activeChatId` points at.
@@ -443,9 +451,12 @@ export default function App() {
     if (pdfs.length) uploadFiles(pdfs);
   }
 
-  async function attachLibraryFolder() {
+  // A convenience only: auto-ingest already scans `libraryRoot` on its own
+  // (default every 60s), and setting a new root already triggers an import.
+  // This just forces that scan to happen right now instead of waiting.
+  async function rescanLibraryFolder() {
     setAttaching(true);
-    setNotice("Queueing the library folder for import…");
+    setNotice("Rescanning the library folder…");
     setNoticeError(false);
     try {
       const result = await api("/library/import", {
@@ -454,7 +465,7 @@ export default function App() {
         body: JSON.stringify({ path: libraryRoot || "." }),
       });
       setJob(result);
-      setNotice(`Import job ${result.job_id} is queued.`);
+      setNotice(`Rescan job ${result.job_id} is queued.`);
     } catch (error) {
       setNotice(error.message);
       setNoticeError(true);
@@ -567,205 +578,205 @@ export default function App() {
   const showSearchIntro = results.length === 0 && !searching && !searched;
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div className="brand">
-          <h1>AI Librarian</h1>
-          <p>Your private, searchable reading room.</p>
-        </div>
-        <div className="topbar-status">
-          <div className="health" title={`Qdrant: ${health?.qdrant ? "ready" : "offline"}`}>
-            <span className={`health-dot ${healthReady ? "ready" : ""}`} />
-            {healthReady ? "Library ready" : health?.status || "Connecting"}
-          </div>
-          <div className="settings-anchor">
-            <button
-              type="button"
-              className="settings-trigger"
-              onClick={() => setSettingsOpen((open) => !open)}
-              aria-label="Settings"
-              aria-expanded={settingsOpen}
-              title="Settings"
-            >
-              ⚙
-            </button>
-            {settingsOpen && (
-              <Settings
-                theme={theme}
-                onThemeChange={setTheme}
-                apiKeys={apiKeys}
-                setApiKeys={setApiKeys}
-                libraryRoot={libraryRoot}
-                hostPath={hostPath}
-                settingRoot={settingRoot}
-                rootNotice={rootNotice}
-                rootError={rootError}
-                onSetLibraryFolder={setLibraryFolder}
-                onClose={() => setSettingsOpen(false)}
-              />
-            )}
-          </div>
-        </div>
-      </header>
+    <div className="app-root">
+      <aside className={`sidebar${sidebarCollapsed ? " collapsed" : ""}`}>
+        <button
+          type="button"
+          className="sidebar-toggle"
+          onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+          aria-label={sidebarCollapsed ? "Expand library panel" : "Collapse library panel"}
+          title={sidebarCollapsed ? "Expand library panel" : "Collapse library panel"}
+        >
+          {sidebarCollapsed ? "»" : "«"}
+        </button>
 
-      <div className={`layout${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
-        <section className={`panel library-panel${sidebarCollapsed ? " collapsed" : ""}`}>
-          <button
-            type="button"
-            className="sidebar-toggle"
-            onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
-            aria-label={sidebarCollapsed ? "Expand library panel" : "Collapse library panel"}
-            title={sidebarCollapsed ? "Expand library panel" : "Collapse library panel"}
-          >
-            {sidebarCollapsed ? "»" : "«"}
-          </button>
+        <div className="sidebar-body">
+          {askEnabled && (
+            <div className="panel-tabs sidebar-section-tabs" role="tablist">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sidebarSection === "library"}
+                className={sidebarSection === "library" ? "active" : ""}
+                onClick={() => setSidebarSection("library")}
+              >
+                Library
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sidebarSection === "chats"}
+                className={sidebarSection === "chats" ? "active" : ""}
+                onClick={() => setSidebarSection("chats")}
+              >
+                Chats{chats.length ? ` (${chats.length})` : ""}
+              </button>
+            </div>
+          )}
 
-          <div className="library-panel-body">
-            {askEnabled && (
-              <div className="panel-tabs sidebar-section-tabs" role="tablist">
+          {sidebarSection === "chats" && askEnabled ? (
+            <ChatList
+              chats={chats}
+              activeId={activeChatId}
+              onSelect={selectChat}
+              onNew={newChat}
+              onDelete={deleteChat}
+            />
+          ) : (
+            <>
+              <div className="panel-title">
+                <h2>Library</h2>
+                <span className="muted">{indexedCount} ready · {documents.length} total</span>
+              </div>
+
+              <div className="panel-tabs library-tabs" role="tablist">
                 <button
                   type="button"
                   role="tab"
-                  aria-selected={sidebarSection === "library"}
-                  className={sidebarSection === "library" ? "active" : ""}
-                  onClick={() => setSidebarSection("library")}
+                  aria-selected={libraryTab === "browse"}
+                  className={libraryTab === "browse" ? "active" : ""}
+                  onClick={() => setLibraryTab("browse")}
                 >
-                  Library
+                  Browse
                 </button>
                 <button
                   type="button"
                   role="tab"
-                  aria-selected={sidebarSection === "chats"}
-                  className={sidebarSection === "chats" ? "active" : ""}
-                  onClick={() => setSidebarSection("chats")}
+                  aria-selected={libraryTab === "indexed"}
+                  className={libraryTab === "indexed" ? "active" : ""}
+                  onClick={() => setLibraryTab("indexed")}
                 >
-                  Chats{chats.length ? ` (${chats.length})` : ""}
+                  Indexed{documents.length ? ` (${documents.length})` : ""}
                 </button>
               </div>
-            )}
 
-            {sidebarSection === "chats" && askEnabled ? (
-              <ChatList
-                chats={chats}
-                activeId={activeChatId}
-                onSelect={selectChat}
-                onNew={newChat}
-                onDelete={deleteChat}
-              />
-            ) : (
-              <>
-                <div className="panel-title">
-                  <h2>Library</h2>
-                  <span className="muted">{indexedCount} ready · {documents.length} total</span>
-                </div>
-
-                <div className="panel-tabs library-tabs" role="tablist">
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={libraryTab === "browse"}
-                    className={libraryTab === "browse" ? "active" : ""}
-                    onClick={() => setLibraryTab("browse")}
+              {libraryTab === "browse" ? (
+                <>
+                  <label
+                    className={`dropzone${dragActive ? " drag-active" : ""}${uploading ? " busy" : ""}`}
+                    onDragEnter={handleDragEnter}
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDrop}
                   >
-                    Browse
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={libraryTab === "indexed"}
-                    className={libraryTab === "indexed" ? "active" : ""}
-                    onClick={() => setLibraryTab("indexed")}
-                  >
-                    Indexed{documents.length ? ` (${documents.length})` : ""}
-                  </button>
-                </div>
-
-                {libraryTab === "browse" ? (
-                  <>
-                    <div className="library-attach">
-                      <button
-                        type="button"
-                        className="primary"
-                        disabled={attaching}
-                        onClick={attachLibraryFolder}
-                      >
-                        {attaching ? "Attaching…" : "Attach main library folder"}
-                      </button>
-                      <p className="muted">Recursively imports every PDF under the mounted library folder, in place — nothing is copied.</p>
-                    </div>
-
-                    <label
-                      className={`dropzone${dragActive ? " drag-active" : ""}${uploading ? " busy" : ""}`}
-                      onDragEnter={handleDragEnter}
-                      onDragOver={handleDragOver}
-                      onDragLeave={handleDragLeave}
-                      onDrop={handleDrop}
-                    >
-                      <input
-                        type="file"
-                        multiple
-                        accept="application/pdf,.pdf"
-                        disabled={uploading}
-                        onChange={(event) => {
-                          uploadFiles(event.target.files);
-                          event.target.value = "";
-                        }}
-                      />
-                      <span className="dropzone-icon" aria-hidden="true">⇪</span>
-                      <span>
-                        {uploading ? "Uploading…" : dragActive ? "Drop to upload" : (
-                          <>Drop PDFs here, or <strong>browse</strong></>
-                        )}
-                      </span>
-                    </label>
-
-                    <LibraryBrowser
-                      apiBase={API_BASE}
-                      onImported={refreshDocuments}
-                      onJob={setJob}
-                      libraryRoot={libraryRoot}
-                      settingRoot={settingRoot}
-                      onSetLibraryFolder={setLibraryFolder}
+                    <input
+                      type="file"
+                      multiple
+                      accept="application/pdf,.pdf"
+                      disabled={uploading}
+                      onChange={(event) => {
+                        uploadFiles(event.target.files);
+                        event.target.value = "";
+                      }}
                     />
-                  </>
-                ) : (
-                  <div className="document-list">
-                    {documents.length === 0 && <p className="muted">Nothing indexed yet. Import a PDF from the Browse tab.</p>}
-                    {documents.map((document) => (
-                      <article className="document-card" key={document.document_id}>
-                        <div className="document-name" title={document.filename}>{document.filename}</div>
-                        <div className="document-meta">
-                          <span className={`badge ${document.indexing_status}`}>{document.indexing_status}</span>
-                          <span>{document.pages} pages</span>
-                          <span>{document.chunks} chunks</span>
-                        </div>
-                        {document.source_path && (
-                          <div className="document-meta"><span title={document.source_path}>↪ {document.source_path}</span></div>
+                    <span className="dropzone-icon" aria-hidden="true">⇪</span>
+                    <span>
+                      {uploading ? "Uploading…" : dragActive ? "Drop to upload" : (
+                        <>Drop PDFs here, or <strong>browse</strong></>
+                      )}
+                    </span>
+                  </label>
+
+                  <button
+                    type="button"
+                    className="link rescan-link"
+                    disabled={attaching}
+                    onClick={rescanLibraryFolder}
+                    title="Auto-ingest already scans the library folder on its own — this just forces it now instead of waiting."
+                  >
+                    {attaching ? "Rescanning…" : "↻ Rescan library folder now"}
+                  </button>
+
+                  <LibraryBrowser
+                    apiBase={API_BASE}
+                    onImported={refreshDocuments}
+                    onJob={setJob}
+                    libraryRoot={libraryRoot}
+                    settingRoot={settingRoot}
+                    onSetLibraryFolder={setLibraryFolder}
+                  />
+                </>
+              ) : (
+                <div className="document-list">
+                  {documents.length === 0 && <p className="muted">Nothing indexed yet. Import a PDF from the Browse tab.</p>}
+                  {documents.map((document) => (
+                    <article className="document-card" key={document.document_id}>
+                      <div className="document-name" title={document.filename}>{document.filename}</div>
+                      <div className="document-meta">
+                        <span className={`badge ${document.indexing_status}`}>{document.indexing_status}</span>
+                        <span>{document.pages} pages</span>
+                        <span>{document.chunks} chunks</span>
+                      </div>
+                      {document.source_path && (
+                        <div className="document-meta"><span title={document.source_path}>↪ {document.source_path}</span></div>
+                      )}
+                      {document.indexing_error && <div className="status-message error">{document.indexing_error}</div>}
+                      {document.extraction_notes && <div className="status-message">{document.extraction_notes}</div>}
+                      <div className="document-actions">
+                        {document.indexing_status === "error" && (
+                          <button className="secondary" type="button" onClick={() => retryDocument(document.document_id)}>Retry</button>
                         )}
-                        {document.indexing_error && <div className="status-message error">{document.indexing_error}</div>}
-                        {document.extraction_notes && <div className="status-message">{document.extraction_notes}</div>}
-                        <div className="document-actions">
-                          {document.indexing_status === "error" && (
-                            <button className="secondary" type="button" onClick={() => retryDocument(document.document_id)}>Retry</button>
-                          )}
-                          <button className="danger" type="button" onClick={() => removeDocument(document)}>Remove</button>
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                )}
+                        <button className="danger" type="button" onClick={() => removeDocument(document)}>Remove</button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
 
-                {notice && <div className={`status-message ${noticeError ? "error" : ""}`}>{notice}</div>}
+              {notice && <div className={`status-message ${noticeError ? "error" : ""}`}>{notice}</div>}
 
-                {job?.files?.length > 0 && !TERMINAL_JOB_STATES.has(job.state) && (
-                  <div className="status-message">
-                    {job.files.filter((file) => ["indexed", "duplicate"].includes(file.status)).length}/{job.files.length} files ready
-                  </div>
-                )}
-              </>
-            )}
+              {job?.files?.length > 0 && !TERMINAL_JOB_STATES.has(job.state) && (
+                <div className="status-message">
+                  {job.files.filter((file) => ["indexed", "duplicate"].includes(file.status)).length}/{job.files.length} files ready
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </aside>
+
+      <div className="main-area">
+        <header className="topbar">
+          <div className="brand">
+            <h1>AI Librarian</h1>
+            <p>Your private, searchable reading room.</p>
           </div>
-        </section>
+          <div className="topbar-status">
+            <div className="health" title={`Qdrant: ${health?.qdrant ? "ready" : "offline"}`}>
+              <span className={`health-dot ${healthReady ? "ready" : ""}`} />
+              {healthReady ? "Library ready" : health?.status || "Connecting"}
+            </div>
+            <div className="settings-anchor">
+              <button
+                type="button"
+                className="settings-trigger"
+                onClick={() => setSettingsOpen((open) => !open)}
+                aria-label="Settings"
+                aria-expanded={settingsOpen}
+                title="Settings"
+              >
+                ⚙
+              </button>
+              {settingsOpen && (
+                <Settings
+                  theme={theme}
+                  onThemeChange={setTheme}
+                  apiKeys={apiKeys}
+                  setApiKeys={setApiKeys}
+                  ollamaModels={ollamaModels}
+                  setOllamaModels={setOllamaModels}
+                  libraryRoot={libraryRoot}
+                  hostPath={hostPath}
+                  settingRoot={settingRoot}
+                  rootNotice={rootNotice}
+                  rootError={rootError}
+                  onSetLibraryFolder={setLibraryFolder}
+                  onClose={() => setSettingsOpen(false)}
+                />
+              )}
+            </div>
+          </div>
+        </header>
 
         <section className="panel chat-panel">
           {askEnabled && (
@@ -800,6 +811,7 @@ export default function App() {
               onActiveIdChange={setActiveChatId}
               onConversationsChanged={refreshChatList}
               apiKeys={apiKeys}
+              ollamaModels={ollamaModels}
             />
           ) : (
             <>
@@ -867,6 +879,6 @@ export default function App() {
           {source && <SourceViewer source={source} onClose={() => setSource(null)} />}
         </section>
       </div>
-    </main>
+    </div>
   );
 }
