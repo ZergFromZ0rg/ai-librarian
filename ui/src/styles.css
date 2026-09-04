@@ -567,6 +567,17 @@ button:disabled {
   color: #2f4941;
 }
 
+.library-path-form p.muted code {
+  background: #eef1ee;
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 0.85em;
+}
+
+.library-path-constraint {
+  color: #8a6d3b;
+}
+
 .library-root-bar {
   display: flex;
   flex-wrap: wrap;

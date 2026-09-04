@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 import AskPanel from "./AskPanel.jsx";
 import LibraryBrowser from "./LibraryBrowser.jsx";
@@ -65,7 +66,14 @@ function SourceViewer({ source, onClose }) {
     setStatus("loading");
   }, [imageSrc]);
 
-  return (
+  // Rendered through a portal straight onto <body>: any ancestor panel with
+  // its own backdrop-filter/filter/transform (the .panel cards use
+  // backdrop-filter for their glass effect) turns `position: fixed` into
+  // "fixed to that ancestor" instead of the viewport — which silently
+  // shrank/mispositioned this overlay whenever the panel it was nested in
+  // had scrollable content taller than the screen (most visibly in Ask mode,
+  // where the sources list grows long). A portal sidesteps that entirely.
+  return createPortal(
     <div className="source-overlay" onClick={onClose}>
       <div className="source-panel" onClick={(event) => event.stopPropagation()}>
         <div className="source-bar">
@@ -114,7 +122,8 @@ function SourceViewer({ source, onClose }) {
           />
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
