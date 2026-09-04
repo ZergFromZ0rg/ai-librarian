@@ -246,19 +246,20 @@ button:disabled {
   opacity: 0.55;
 }
 
-.app-shell {
+.app-root {
+  display: flex;
+  height: 100vh;
+  width: 100%;
+}
+
+.main-area {
   display: flex;
   flex-direction: column;
-  width: min(1440px, 100%);
-  /* A ceiling, not just a floor: min-height lets tall content grow the
-     shell past the viewport, which left .layout's flex:1 nothing fixed to
-     divide and defeated the panels' internal scrolling. height:100vh pins
-     the shell to the viewport so panels genuinely scroll their own content
-     instead of pushing the whole page down. Desktop only — the mobile
-     breakpoint below reverts to natural, content-sized stacking. */
-  height: 100vh;
-  margin: 0 auto;
-  padding: 16px 28px 28px;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  padding: 14px 28px 28px;
 }
 
 .topbar {
@@ -269,7 +270,7 @@ button:disabled {
   align-items: flex-start;
   justify-content: space-between;
   gap: 20px;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
 }
 
 .topbar-status {
@@ -278,17 +279,23 @@ button:disabled {
   gap: 10px;
 }
 
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+
 .brand h1 {
   margin: 0;
   color: var(--heading-strong);
   font-family: var(--font-serif);
-  font-size: clamp(2rem, 4vw, 3.25rem);
+  font-size: clamp(1.7rem, 3.2vw, 2.6rem);
   font-weight: 500;
   letter-spacing: -0.04em;
 }
 
 .brand p {
-  margin: 5px 0 0;
+  margin: 0;
   color: var(--muted);
 }
 
@@ -416,23 +423,24 @@ button:disabled {
   color: var(--accent-strong);
 }
 
-.layout {
-  display: grid;
-  grid-template-columns: minmax(300px, 390px) minmax(0, 1fr);
-  /* Without this, an implicit "auto" row sizes itself to fit whatever tall
-     content is inside it (e.g. a long Ask thread) instead of being capped to
-     the space flex gave .layout — which defeated the panels' internal
-     scrolling and made the whole page grow instead. */
-  grid-template-rows: 1fr;
-  gap: 22px;
-  align-items: stretch;
-  flex: 1;
-  min-height: 0;
-  transition: grid-template-columns 0.18s ease;
+.settings-model-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
-.layout.sidebar-collapsed {
-  grid-template-columns: 52px minmax(0, 1fr);
+.settings-model-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--border);
+  padding: 6px 9px;
+  color: var(--ink-soft);
+  font-size: 0.82rem;
 }
 
 .panel {
@@ -442,14 +450,24 @@ button:disabled {
   box-shadow: var(--shadow-panel);
 }
 
-.library-panel {
+/* A true sidebar, not a floating card in a grid: flush to the viewport
+   edge, full height, no shadow/gap separating it from the rest of the app
+   the way .panel cards get — it reads as chrome, not as another tile of
+   content. */
+.sidebar {
   position: relative;
+  flex: 0 0 300px;
   min-height: 0;
-  padding: 20px;
+  height: 100%;
   overflow-y: auto;
+  border-right: 1px solid var(--border);
+  background: var(--surface-tint-solid);
+  padding: 20px;
+  transition: flex-basis 0.18s ease;
 }
 
-.library-panel.collapsed {
+.sidebar.collapsed {
+  flex: 0 0 52px;
   padding: 16px 8px;
   overflow: visible;
 }
@@ -475,16 +493,16 @@ button:disabled {
   color: var(--heading);
 }
 
-.library-panel.collapsed .sidebar-toggle {
+.sidebar.collapsed .sidebar-toggle {
   position: static;
   margin: 0 auto;
 }
 
-.library-panel-body {
+.sidebar-body {
   display: block;
 }
 
-.library-panel.collapsed .library-panel-body {
+.sidebar.collapsed .sidebar-body {
   display: none;
 }
 
@@ -510,25 +528,8 @@ button:disabled {
   font-size: 0.82rem;
 }
 
-.library-attach {
-  border: 1px solid var(--border-strong);
-  border-radius: 0;
-  background: var(--accent-tint-bg);
-  padding: 16px;
-  text-align: center;
-}
-
-.library-attach .primary {
-  width: 100%;
-}
-
-.library-attach .muted {
-  margin: 8px 0 0;
-}
-
 .dropzone {
   display: block;
-  margin-top: 12px;
   border: 1.5px dashed var(--border-strong);
   border-radius: 0;
   background: var(--surface-tint-soft);
@@ -573,6 +574,22 @@ button:disabled {
   height: 1px;
   overflow: hidden;
   clip: rect(0, 0, 0, 0);
+}
+
+button.rescan-link {
+  display: block;
+  margin: 10px 0 16px;
+  padding: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+button.rescan-link:hover {
+  color: var(--link);
+}
+
+button.rescan-link:disabled {
+  text-decoration: none;
 }
 
 .field-row {
@@ -696,6 +713,9 @@ button:disabled {
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
 }
 
 .chat-header {
@@ -1317,7 +1337,7 @@ button.link {
 button.cite {
   border: none;
   background: none;
-  padding: 0 0.05em;
+  padding: 0 0.15em;
   font: inherit;
   line-height: 1;
   cursor: pointer;
@@ -1326,6 +1346,12 @@ button.cite {
 button.cite:hover {
   color: var(--citation-strong);
   text-decoration: underline;
+}
+
+button.cite.open {
+  background: var(--citation-hover);
+  color: var(--surface);
+  text-decoration: none;
 }
 
 .ask-src {
@@ -1352,12 +1378,6 @@ button.cite:hover {
   font-style: italic;
 }
 
-.ask-sources {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
 .ask-sources-label {
   color: var(--muted);
   font-size: 0.72rem;
@@ -1375,12 +1395,25 @@ button.cite:hover {
 }
 
 @media (max-width: 850px) {
-  .app-shell {
-    padding: 18px;
+  .app-root {
+    display: block;
+    height: auto;
   }
 
-  .topbar,
-  .layout {
+  .sidebar {
+    flex: none;
+    height: auto;
+    max-height: 60vh;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .main-area {
+    height: auto;
+    padding: 14px 18px 18px;
+  }
+
+  .topbar {
     display: block;
   }
 
@@ -1388,12 +1421,9 @@ button.cite:hover {
     margin-top: 14px;
   }
 
-  .library-panel {
-    margin-bottom: 18px;
-  }
-
   .chat-panel {
     min-height: 600px;
+    max-width: none;
   }
 
   /* Collapsing the sidebar only makes sense next to a fixed-height chat
@@ -1403,11 +1433,11 @@ button.cite:hover {
     display: none;
   }
 
-  .library-panel.collapsed .library-panel-body {
+  .sidebar.collapsed .sidebar-body {
     display: block;
   }
 
-  .library-panel.collapsed {
+  .sidebar.collapsed {
     padding: 20px;
   }
 

@@ -91,23 +91,92 @@ function citationRehype() {
   return (tree) => walk(tree);
 }
 
-// Scroll the nth source card of a given turn into view and flash it.
-function focusSource(turnIndex, n) {
-  const el = document.getElementById(`ask-src-${turnIndex}-${n}`);
-  if (!el) return;
-  // Instant, not smooth: smooth scrollIntoView silently no-ops in some
-  // embedded/automated browser contexts. The flash is the "you moved" cue.
-  el.scrollIntoView({ block: "center" });
-  el.classList.remove("flash");
-  void el.offsetWidth; // restart the animation if it is still running
-  el.classList.add("flash");
+// One assistant turn. Split out (rather than inlined in the .map() below) so
+// opening a citation can scroll+flash the newly-revealed card via its own
+// effect — that only works cleanly with a ref scoped to this one turn.
+function AssistantTurn({ turn, index, onViewSource, onToggleCitation, modelLabel }) {
+  const sourceRef = useRef(null);
+
+  useEffect(() => {
+    if (turn.openCitation == null || !sourceRef.current) return;
+    const el = sourceRef.current;
+    // Instant, not smooth: smooth scrollIntoView silently no-ops in some
+    // embedded/automated browser contexts. The flash is the "you moved" cue.
+    el.scrollIntoView({ block: "nearest" });
+    el.classList.remove("flash");
+    void el.offsetWidth; // restart the animation if it is still running
+    el.classList.add("flash");
+  }, [turn.openCitation]);
+
+  const openSource = turn.openCitation != null ? turn.sources?.[turn.openCitation - 1] : null;
+
+  return (
+    <div className="ask-turn assistant">
+      {turn.content && (
+        <div className="ask-answer">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            rehypePlugins={[citationRehype]}
+            skipHtml
+            components={{
+              sup: ({ node, children }) => {
+                const n = Number(node?.properties?.dataN);
+                if (!n) return <sup>{children}</sup>;
+                return (
+                  <button
+                    type="button"
+                    className={`cite${turn.openCitation === n ? " open" : ""}`}
+                    title={`${turn.openCitation === n ? "Hide" : "Show"} source ${n}`}
+                    onClick={() => onToggleCitation(index, n)}
+                  >
+                    {children}
+                  </button>
+                );
+              },
+            }}
+          >
+            {turn.content}
+          </ReactMarkdown>
+        </div>
+      )}
+      {turn.pending && !turn.content && (
+        <div className="ask-thinking">{turn.progress || "Reading the sources…"}</div>
+      )}
+      {turn.error && <div className="status-message error">{turn.error}</div>}
+      {turn.lowConfidence && (
+        <div className="status-message">
+          Nothing in your library scored as a clear match — treat this answer with care.
+        </div>
+      )}
+      {turn.sources && turn.sources.length > 0 && (
+        <div className="ask-sources-label">
+          {[
+            `${turn.sources.length} passage${turn.sources.length === 1 ? "" : "s"}`,
+            turn.documents ? `${turn.documents} document${turn.documents === 1 ? "" : "s"}` : null,
+            turn.relevantCount > turn.sources.length ? `${turn.relevantCount} relevant matches` : null,
+            turn.usedModel ? modelLabel(turn.usedModel) : null,
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+          {" — click a "}
+          <span className="citation-tag">[n]</span>
+          {" in the answer above to view its source."}
+        </div>
+      )}
+      {openSource && (
+        <div className="ask-src" ref={sourceRef}>
+          <ResultCard result={openSource} index={turn.openCitation} onViewSource={onViewSource} />
+        </div>
+      )}
+    </div>
+  );
 }
 
 // `activeId`/`onActiveIdChange` are controlled from above (the sidebar chat
 // list owns switching/creating/deleting conversations); this component just
 // loads whichever conversation that id points at and streams new turns into
 // it. `apiKeys` is likewise owned by Settings now.
-export default function AskPanel({ apiBase, onViewSource, indexedCount, activeId, onActiveIdChange, onConversationsChanged, apiKeys }) {
+export default function AskPanel({ apiBase, onViewSource, indexedCount, activeId, onActiveIdChange, onConversationsChanged, apiKeys, ollamaModels }) {
   const [conversation, setConversation] = useState([]);
   const [serverModels, setServerModels] = useState([]);
   const [serverDefault, setServerDefault] = useState("");
@@ -172,7 +241,8 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount, activeId
   // Every model, each tagged `usable`. Ollama models come from the server and
   // are always usable; each cloud provider's catalogue is always shown but only
   // usable when a key exists — server-side (its provider is in the server list)
-  // or pasted into the browser.
+  // or pasted into the browser. Models typed into Settings under "Local
+  // (Ollama)" are just as usable — the reader is asserting they've pulled it.
   const models = useMemo(() => {
     const out = [];
     const seen = new Set();
@@ -187,6 +257,9 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount, activeId
       add({ ...m, usable: true });
       if (m.provider !== "ollama") keyedProviders.add(m.provider);
     }
+    for (const name of ollamaModels || []) {
+      add({ id: `ollama:${name}`, label: name, provider: "ollama", usable: true });
+    }
     for (const provider of CLOUD_PROVIDERS) {
       const usable = keyedProviders.has(provider.id) || !!apiKeys[provider.id];
       for (const name of provider.models) {
@@ -194,7 +267,7 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount, activeId
       }
     }
     return out;
-  }, [serverModels, apiKeys]);
+  }, [serverModels, apiKeys, ollamaModels]);
 
   const usableModels = useMemo(() => models.filter((m) => m.usable), [models]);
 
@@ -354,6 +427,14 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount, activeId
   const modelLabel = (id) => models.find((m) => m.id === id)?.label || id;
   const noModels = usableModels.length === 0;
 
+  // Clicking an already-open citation closes it; clicking a different one
+  // swaps to it. Only one source shown at a time per turn, kept minimal.
+  function toggleCitation(turnIndex, n) {
+    setConversation((prev) =>
+      prev.map((turn, i) => (i === turnIndex ? { ...turn, openCitation: turn.openCitation === n ? null : n } : turn)),
+    );
+  }
+
   return (
     <>
       <div className={`chat-header ask-header${conversation.length > 0 ? " compact" : ""}`}>
@@ -428,67 +509,14 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount, activeId
               {turn.content}
             </div>
           ) : (
-            <div className="ask-turn assistant" key={index}>
-              {turn.content && (
-                <div className="ask-answer">
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    rehypePlugins={[citationRehype]}
-                    skipHtml
-                    components={{
-                      sup: ({ node, children }) => {
-                        const n = Number(node?.properties?.dataN);
-                        if (!n) return <sup>{children}</sup>;
-                        return (
-                          <button
-                            type="button"
-                            className="cite"
-                            title={`Jump to source ${n}`}
-                            onClick={() => focusSource(index, n)}
-                          >
-                            {children}
-                          </button>
-                        );
-                      },
-                    }}
-                  >
-                    {turn.content}
-                  </ReactMarkdown>
-                </div>
-              )}
-              {turn.pending && !turn.content && (
-                <div className="ask-thinking">{turn.progress || "Reading the sources…"}</div>
-              )}
-              {turn.error && <div className="status-message error">{turn.error}</div>}
-              {turn.lowConfidence && (
-                <div className="status-message">
-                  Nothing in your library scored as a clear match — treat this answer with care.
-                </div>
-              )}
-              {turn.sources && turn.sources.length > 0 && (
-                <div className="ask-sources">
-                  <div className="ask-sources-label">
-                    {[
-                      `${turn.sources.length} passage${turn.sources.length === 1 ? "" : "s"}`,
-                      turn.documents ? `${turn.documents} document${turn.documents === 1 ? "" : "s"}` : null,
-                      turn.relevantCount > turn.sources.length ? `${turn.relevantCount} relevant matches` : null,
-                      turn.usedModel ? modelLabel(turn.usedModel) : null,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ")}
-                  </div>
-                  {turn.sources.map((source, position) => (
-                    <div
-                      className="ask-src"
-                      id={`ask-src-${index}-${position + 1}`}
-                      key={`${source.document_id}-${source.chunk_id}-${position}`}
-                    >
-                      <ResultCard result={source} index={position + 1} onViewSource={onViewSource} />
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+            <AssistantTurn
+              key={index}
+              turn={turn}
+              index={index}
+              onViewSource={onViewSource}
+              onToggleCitation={toggleCitation}
+              modelLabel={modelLabel}
+            />
           ),
         )}
       </div>
