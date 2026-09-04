@@ -76,9 +76,9 @@ def test_list_models_merges_ollama_and_keyed_cloud_providers(monkeypatch):
         return [{"id": "ollama:local", "label": "local", "provider": "ollama"}]
 
     monkeypatch.setattr(generation, "_fetch_ollama_models", fake_ollama)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-" + "x" * 40)
     monkeypatch.setenv("OPENAI_MODELS", "gpt-x,gpt-y")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-oai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-" + "y" * 40)
     # google has no key -> excluded
 
     models = run(generation.list_models())
@@ -94,7 +94,7 @@ def test_default_model_prefers_env_then_first_listed(monkeypatch):
         return [{"id": "ollama:a", "label": "a", "provider": "ollama"}]
 
     monkeypatch.setattr(generation, "_fetch_ollama_models", fake_ollama)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-" + "x" * 40)
 
     assert run(generation.default_model()) == "ollama:a"  # first listed
 
@@ -103,6 +103,13 @@ def test_default_model_prefers_env_then_first_listed(monkeypatch):
 
     monkeypatch.setenv("GENERATION_MODEL", "openai:not-available")
     assert run(generation.default_model()) == "ollama:a"  # env default not listed -> first
+
+
+def test_cloud_key_ignores_placeholders(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-PUT_YOURS_HERE")  # from .env.example
+    assert generation._cloud_key("anthropic") == ""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-" + "z" * 90)
+    assert generation._cloud_key("anthropic").startswith("sk-ant-api03-")
 
 
 def test_enabled_and_backend_info_when_nothing_is_configured():
@@ -165,7 +172,7 @@ def test_generate_stream_errors_when_a_cloud_provider_has_no_key():
 
 def test_pick_map_model_prefers_local_then_cheap_cloud(monkeypatch):
     monkeypatch.setattr(generation, "_fetch_ollama_models", _aret([]))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-" + "x" * 40)
     monkeypatch.setenv("ANTHROPIC_MODELS", "claude-opus-5,claude-haiku-4-5")
     assert run(generation.pick_map_model("anthropic:claude-opus-5")) == "anthropic:claude-haiku-4-5"
 
