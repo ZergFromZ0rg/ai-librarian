@@ -29,6 +29,7 @@ from starlette.datastructures import Headers, MutableHeaders
 
 import generation
 from chunking import build_semantic_groups, normalize_for_embedding, parse_typed_blocks
+from conversations import ConversationStore
 from database import MetadataStore
 from embeddings import DEFAULT_MODEL as EMBEDDING_MODEL, embed_texts
 from extraction import (
@@ -317,6 +318,9 @@ _imported = STORE.import_legacy(METADATA_DIR)
 if _imported:
     logger.info("Imported %d legacy metadata records into %s", _imported, DATA_DIR / "library.db")
 
+# Ask-mode conversations (its own DB file, see conversations.py).
+CONVERSATIONS = ConversationStore(DATA_DIR / "conversations.db")
+
 
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=1_000)
@@ -338,6 +342,14 @@ class SearchRequest(BaseModel):
     fusion: Optional[str] = Field(default=None, pattern=r"^(rrf|dbsf|rsf)$")
     dense_weight: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     max_text_chars: int = Field(default=20_000, ge=100, le=50_000)
+
+
+class ConversationBody(BaseModel):
+    # The client owns the turn objects (role, content, sources, …); the server
+    # stores them verbatim and never interprets them beyond the size cap.
+    messages: list = Field(default_factory=list)
+    model: Optional[str] = Field(default=None, max_length=120)
+    title: Optional[str] = Field(default=None, max_length=200)
 
 
 class IngestFolderRequest(BaseModel):
@@ -1004,7 +1016,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins or [],
     allow_credentials="*" not in cors_origins,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -1738,6 +1750,60 @@ async def ask(request: AskRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
+
+
+_CONV_ID = re.compile(r"^[a-f0-9]{12}$")
+
+
+def _valid_conv_id(conv_id: str) -> str:
+    if not _CONV_ID.fullmatch(conv_id):
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return conv_id
+
+
+@app.get("/conversations")
+async def list_conversations(limit: int = Query(50, ge=1, le=200)):
+    """Saved Ask conversations, newest first (summaries only)."""
+    return {"conversations": await asyncio.to_thread(CONVERSATIONS.list, limit)}
+
+
+@app.post("/conversations")
+async def create_conversation(body: ConversationBody):
+    try:
+        conv = await asyncio.to_thread(
+            CONVERSATIONS.create, body.messages, body.model, body.title
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse(conv, status_code=201)
+
+
+@app.get("/conversations/{conv_id}")
+async def get_conversation(conv_id: str):
+    conv = await asyncio.to_thread(CONVERSATIONS.get, _valid_conv_id(conv_id))
+    if conv is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return conv
+
+
+@app.put("/conversations/{conv_id}")
+async def update_conversation(conv_id: str, body: ConversationBody):
+    try:
+        conv = await asyncio.to_thread(
+            CONVERSATIONS.replace, _valid_conv_id(conv_id), body.messages, body.model, body.title
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if conv is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return conv
+
+
+@app.delete("/conversations/{conv_id}")
+async def delete_conversation(conv_id: str):
+    if not await asyncio.to_thread(CONVERSATIONS.delete, _valid_conv_id(conv_id)):
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return {"deleted": conv_id}
 
 
 @app.get("/admin/search-log")

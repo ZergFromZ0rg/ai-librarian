@@ -663,10 +663,43 @@ button.link {
 }
 
 .ask-answer .cite {
-  color: #6b7cff;
+  color: #4a5bd0;
   font-size: 0.82em;
   font-weight: 600;
   vertical-align: 0.15em;
+}
+
+button.cite {
+  border: none;
+  background: none;
+  padding: 0 0.05em;
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+
+button.cite:hover {
+  color: #2f3aa0;
+  text-decoration: underline;
+}
+
+.ask-src {
+  scroll-margin: 24px;
+}
+
+.ask-src.flash > .search-result {
+  animation: cite-flash 1.4s ease-out;
+}
+
+@keyframes cite-flash {
+  0%,
+  15% {
+    box-shadow: 0 0 0 3px rgba(107, 124, 255, 0.55);
+    border-color: #6b7cff;
+  }
+  100% {
+    box-shadow: 0 0 0 3px rgba(107, 124, 255, 0);
+  }
 }
 
 .ask-thinking {

@@ -5,10 +5,16 @@ import remarkGfm from "remark-gfm";
 import ResultCard from "./ResultCard.jsx";
 import { streamAsk } from "./askStream.js";
 
-const CONVO_KEY = "ai-librarian.ask.conversation";
+const ACTIVE_KEY = "ai-librarian.ask.active";
 const MODEL_KEY = "ai-librarian.ask.model";
 const THOROUGH_KEY = "ai-librarian.ask.thorough";
 const KEYS_KEY = "ai-librarian.ask.keys";
+
+// A turn is worth persisting once its assistant reply has finished streaming.
+function isComplete(conv) {
+  const last = conv[conv.length - 1];
+  return last && last.role === "assistant" && last.content && !last.pending;
+}
 
 const PROVIDER_LABELS = {
   ollama: "Local (Ollama)",
@@ -43,9 +49,10 @@ function saveStored(key, value) {
   }
 }
 
-// Wrap bracketed citation numbers ("[1]", "[2][3]") in a styled <span>.
+// Turn each bracketed citation number ("[1]", "[2][3]" -> two) into its own
+// <sup class="cite" data-n="N"> so it can be made clickable in `components`.
 function citationRehype() {
-  const pattern = /\[\d+\](?:\[\d+\])*/g;
+  const pattern = /\[(\d+)\]/g;
   const split = (value) => {
     pattern.lastIndex = 0;
     if (!pattern.test(value)) return null;
@@ -57,8 +64,8 @@ function citationRehype() {
       if (match.index > last) pieces.push({ type: "text", value: value.slice(last, match.index) });
       pieces.push({
         type: "element",
-        tagName: "span",
-        properties: { className: ["cite"] },
+        tagName: "sup",
+        properties: { className: ["cite"], dataN: match[1] },
         children: [{ type: "text", value: match[0] }],
       });
       last = match.index + match[0].length;
@@ -85,8 +92,20 @@ function citationRehype() {
   return (tree) => walk(tree);
 }
 
+// Scroll the nth source card of a given turn into view and flash it.
+function focusSource(turnIndex, n) {
+  const el = document.getElementById(`ask-src-${turnIndex}-${n}`);
+  if (!el) return;
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.classList.remove("flash");
+  void el.offsetWidth; // restart the animation if it is still running
+  el.classList.add("flash");
+}
+
 export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
-  const [conversation, setConversation] = useState(() => loadStored(CONVO_KEY, [], true));
+  const [conversation, setConversation] = useState([]);
+  const [conversations, setConversations] = useState([]);
+  const [activeId, setActiveId] = useState(() => loadStored(ACTIVE_KEY, "") || null);
   const [serverModels, setServerModels] = useState([]);
   const [serverDefault, setServerDefault] = useState("");
   const [apiKeys, setApiKeys] = useState(() => loadStored(KEYS_KEY, {}, true) || {});
@@ -97,6 +116,54 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const scrollRef = useRef(null);
+  const savedRef = useRef("[]"); // JSON of what the server last has, so autosave is a no-op after a load
+
+  const refreshList = useCallback(async () => {
+    try {
+      const response = await fetch(`${apiBase}/conversations`);
+      if (!response.ok) return;
+      const data = await response.json();
+      setConversations(data.conversations || []);
+    } catch (_error) {
+      // list is a convenience; failing to load it is not fatal
+    }
+  }, [apiBase]);
+
+  const loadConversation = useCallback(
+    async (id) => {
+      if (!id) {
+        setConversation([]);
+        setActiveId(null);
+        savedRef.current = "[]";
+        saveStored(ACTIVE_KEY, "");
+        return;
+      }
+      try {
+        const response = await fetch(`${apiBase}/conversations/${id}`);
+        if (!response.ok) throw new Error("not found");
+        const data = await response.json();
+        const messages = data.messages || [];
+        setConversation(messages);
+        setActiveId(id);
+        savedRef.current = JSON.stringify(messages);
+        saveStored(ACTIVE_KEY, id);
+        if (data.model) setSelectedModel(data.model);
+      } catch (_error) {
+        loadConversation(null);
+      }
+    },
+    [apiBase],
+  );
+
+  useEffect(() => {
+    refreshList();
+  }, [refreshList]);
+
+  useEffect(() => {
+    const stored = loadStored(ACTIVE_KEY, "");
+    if (stored) loadConversation(stored);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -149,9 +216,42 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
     saveStored(THOROUGH_KEY, thorough ? "1" : "0");
   }, [thorough]);
 
+  // Persist a finished turn to the server: create the conversation on the first
+  // one, replace it after each subsequent turn. `savedRef` keeps a load from
+  // immediately writing back what it just read.
   useEffect(() => {
-    saveStored(CONVO_KEY, conversation);
-  }, [conversation]);
+    if (busy || conversation.length === 0 || !isComplete(conversation)) return;
+    const snapshot = JSON.stringify(conversation);
+    if (snapshot === savedRef.current) return;
+    savedRef.current = snapshot;
+    const body = { messages: conversation, model: selectedModel || undefined };
+    (async () => {
+      try {
+        if (activeId) {
+          await fetch(`${apiBase}/conversations/${activeId}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+        } else {
+          const created = await (
+            await fetch(`${apiBase}/conversations`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body),
+            })
+          ).json();
+          if (created.id) {
+            setActiveId(created.id);
+            saveStored(ACTIVE_KEY, created.id);
+          }
+        }
+        refreshList();
+      } catch (_error) {
+        savedRef.current = "[]"; // let the next turn retry the save
+      }
+    })();
+  }, [busy, conversation, activeId, apiBase, selectedModel, refreshList]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -253,14 +353,20 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
     [apiBase, apiKeys, busy, conversation, patchLast, question, selectedModel, thorough],
   );
 
-  function reset() {
-    setConversation([]);
+  function startNew() {
     setError("");
+    loadConversation(null);
+  }
+
+  async function deleteActive() {
+    if (!activeId) return;
     try {
-      window.localStorage.removeItem(CONVO_KEY);
+      await fetch(`${apiBase}/conversations/${activeId}`, { method: "DELETE" });
     } catch (_error) {
       // best effort
     }
+    startNew();
+    refreshList();
   }
 
   const modelLabel = (id) => models.find((m) => m.id === id)?.label || id;
@@ -313,9 +419,31 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
           >
             API keys
           </button>
-          {conversation.length > 0 && (
-            <button type="button" className="secondary" onClick={reset} disabled={busy}>
-              New conversation
+          <label className="ask-model-select">
+            <span>Chat</span>
+            <select
+              value={activeId || ""}
+              disabled={busy}
+              onChange={(event) =>
+                event.target.value ? loadConversation(event.target.value) : startNew()
+              }
+            >
+              <option value="">＋ New conversation</option>
+              {conversations.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.title || "Untitled"}
+                </option>
+              ))}
+            </select>
+          </label>
+          {activeId && (
+            <button type="button" className="link" onClick={deleteActive} disabled={busy}>
+              Delete
+            </button>
+          )}
+          {!activeId && conversation.length > 0 && (
+            <button type="button" className="secondary" onClick={startNew} disabled={busy}>
+              New
             </button>
           )}
         </div>
@@ -352,7 +480,27 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
             <div className="ask-turn assistant" key={index}>
               {turn.content && (
                 <div className="ask-answer">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[citationRehype]} skipHtml>
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    rehypePlugins={[citationRehype]}
+                    skipHtml
+                    components={{
+                      sup: ({ node, children }) => {
+                        const n = Number(node?.properties?.dataN);
+                        if (!n) return <sup>{children}</sup>;
+                        return (
+                          <button
+                            type="button"
+                            className="cite"
+                            title={`Jump to source ${n}`}
+                            onClick={() => focusSource(index, n)}
+                          >
+                            {children}
+                          </button>
+                        );
+                      },
+                    }}
+                  >
                     {turn.content}
                   </ReactMarkdown>
                 </div>
@@ -379,12 +527,13 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
                       .join(" · ")}
                   </div>
                   {turn.sources.map((source, position) => (
-                    <ResultCard
+                    <div
+                      className="ask-src"
+                      id={`ask-src-${index}-${position + 1}`}
                       key={`${source.document_id}-${source.chunk_id}-${position}`}
-                      result={source}
-                      index={position + 1}
-                      onViewSource={onViewSource}
-                    />
+                    >
+                      <ResultCard result={source} index={position + 1} onViewSource={onViewSource} />
+                    </div>
                   ))}
                 </div>
               )}
