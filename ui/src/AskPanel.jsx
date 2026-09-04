@@ -165,6 +165,13 @@ function AssistantTurn({ turn, index, onViewSource, onToggleCitation, modelLabel
       )}
       {openSource && (
         <div className="ask-src" ref={sourceRef}>
+          <button
+            type="button"
+            className="ask-src-close"
+            onClick={() => onToggleCitation(index, turn.openCitation)}
+          >
+            × Hide source
+          </button>
           <ResultCard result={openSource} index={turn.openCitation} onViewSource={onViewSource} />
         </div>
       )}
