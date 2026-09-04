@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import AskPanel from "./AskPanel.jsx";
@@ -7,6 +7,47 @@ import ResultCard from "./ResultCard.jsx";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 const TERMINAL_JOB_STATES = new Set(["done", "partial", "error", "interrupted"]);
+const THEME_KEY = "ai-librarian.theme";
+const SIDEBAR_KEY = "ai-librarian.sidebar-collapsed";
+
+// Reads whatever the inline head script already applied to <html>, so the
+// toggle's first render matches the page instead of flashing to the default.
+function currentTheme() {
+  const stored = document.documentElement.dataset.theme;
+  return stored === "light" || stored === "dark" ? stored : null;
+}
+
+function systemPrefersDark() {
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
+}
+
+// A two-state toggle (not a tri-state incl. "system"): once someone picks a
+// theme explicitly we remember that choice, but the very first press just
+// flips away from whatever the OS preference currently resolves to.
+function ThemeToggle() {
+  const [theme, setTheme] = useState(() => currentTheme() || (systemPrefersDark() ? "dark" : "light"));
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      window.localStorage.setItem(THEME_KEY, theme);
+    } catch (_error) {
+      // best effort
+    }
+  }, [theme]);
+
+  return (
+    <button
+      type="button"
+      className="theme-toggle"
+      onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
+      aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+      title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+    >
+      {theme === "dark" ? "☀" : "☾"}
+    </button>
+  );
+}
 
 async function parseResponse(response) {
   const contentType = response.headers.get("content-type") || "";
@@ -66,13 +107,11 @@ function SourceViewer({ source, onClose }) {
     setStatus("loading");
   }, [imageSrc]);
 
-  // Rendered through a portal straight onto <body>: any ancestor panel with
-  // its own backdrop-filter/filter/transform (the .panel cards use
-  // backdrop-filter for their glass effect) turns `position: fixed` into
-  // "fixed to that ancestor" instead of the viewport — which silently
-  // shrank/mispositioned this overlay whenever the panel it was nested in
-  // had scrollable content taller than the screen (most visibly in Ask mode,
-  // where the sources list grows long). A portal sidesteps that entirely.
+  // Rendered through a portal straight onto <body>: any ancestor with its own
+  // filter/transform/backdrop-filter turns `position: fixed` into "fixed to
+  // that ancestor" instead of the viewport, which would silently
+  // shrink/misposition this overlay if it were ever nested inside such a
+  // panel. A portal sidesteps that regardless of what the panels do.
   return createPortal(
     <div className="source-overlay" onClick={onClose}>
       <div className="source-panel" onClick={(event) => event.stopPropagation()}>
@@ -144,6 +183,36 @@ export default function App() {
   const [source, setSource] = useState(null);
   const [askEnabled, setAskEnabled] = useState(false);
   const [view, setView] = useState("search");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      return window.localStorage.getItem(SIDEBAR_KEY) === "1";
+    } catch (_error) {
+      return false;
+    }
+  });
+  const [dragActive, setDragActive] = useState(false);
+  const dragCounter = useRef(0);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed ? "1" : "0");
+    } catch (_error) {
+      // best effort
+    }
+  }, [sidebarCollapsed]);
+
+  // The browser's default reaction to a dropped file is to navigate to it —
+  // block that everywhere so a drop that misses the dropzone doesn't blow
+  // away the app instead of just being ignored.
+  useEffect(() => {
+    const preventDefault = (event) => event.preventDefault();
+    window.addEventListener("dragover", preventDefault);
+    window.addEventListener("drop", preventDefault);
+    return () => {
+      window.removeEventListener("dragover", preventDefault);
+      window.removeEventListener("drop", preventDefault);
+    };
+  }, []);
 
   const api = useCallback(
     async (path, options = {}) => {
@@ -244,6 +313,41 @@ export default function App() {
     }
   }
 
+  // Counted rather than toggled on enter/leave: dragging over a child
+  // element fires leave-then-enter on the parent, which would otherwise flip
+  // drag-active off and back on and make the dropzone flicker.
+  function handleDragEnter(event) {
+    event.preventDefault();
+    dragCounter.current += 1;
+    setDragActive(true);
+  }
+
+  function handleDragOver(event) {
+    event.preventDefault();
+  }
+
+  function handleDragLeave(event) {
+    event.preventDefault();
+    dragCounter.current = Math.max(0, dragCounter.current - 1);
+    if (dragCounter.current === 0) setDragActive(false);
+  }
+
+  function handleDrop(event) {
+    event.preventDefault();
+    dragCounter.current = 0;
+    setDragActive(false);
+    if (uploading) return;
+    // Unlike the file picker's `accept`, a drop isn't filtered by the
+    // browser — anything from the desktop can land here.
+    const dropped = Array.from(event.dataTransfer.files || []);
+    const pdfs = dropped.filter((file) => file.type === "application/pdf" || /\.pdf$/i.test(file.name));
+    if (pdfs.length < dropped.length) {
+      setNotice(dropped.length === 1 ? "Only PDF files can be added." : `Skipped ${dropped.length - pdfs.length} non-PDF file(s).`);
+      setNoticeError(pdfs.length === 0);
+    }
+    if (pdfs.length) uploadFiles(pdfs);
+  }
+
   async function attachLibraryFolder() {
     setAttaching(true);
     setNotice("Queueing the library folder for import…");
@@ -330,53 +434,75 @@ export default function App() {
           <h1>AI Librarian</h1>
           <p>Your private, searchable reading room.</p>
         </div>
-        <div className="health" title={`Qdrant: ${health?.qdrant ? "ready" : "offline"}`}>
-          <span className={`health-dot ${healthReady ? "ready" : ""}`} />
-          {healthReady ? "Library ready" : health?.status || "Connecting"}
+        <div className="topbar-status">
+          <div className="health" title={`Qdrant: ${health?.qdrant ? "ready" : "offline"}`}>
+            <span className={`health-dot ${healthReady ? "ready" : ""}`} />
+            {healthReady ? "Library ready" : health?.status || "Connecting"}
+          </div>
+          <ThemeToggle />
         </div>
       </header>
 
-      <div className="layout">
-        <section className="panel library-panel">
-          <div className="panel-title">
-            <h2>Library</h2>
-            <span className="muted">{indexedCount} ready · {documents.length} total</span>
-          </div>
+      <div className={`layout${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+        <section className={`panel library-panel${sidebarCollapsed ? " collapsed" : ""}`}>
+          <button
+            type="button"
+            className="sidebar-toggle"
+            onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+            aria-label={sidebarCollapsed ? "Expand library panel" : "Collapse library panel"}
+            title={sidebarCollapsed ? "Expand library panel" : "Collapse library panel"}
+          >
+            {sidebarCollapsed ? "»" : "«"}
+          </button>
 
-          <div className="panel-tabs library-tabs" role="tablist">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={libraryTab === "browse"}
-              className={libraryTab === "browse" ? "active" : ""}
-              onClick={() => setLibraryTab("browse")}
-            >
-              Browse
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={libraryTab === "indexed"}
-              className={libraryTab === "indexed" ? "active" : ""}
-              onClick={() => setLibraryTab("indexed")}
-            >
-              Indexed{documents.length ? ` (${documents.length})` : ""}
-            </button>
-          </div>
+          <div className="library-panel-body">
+            <div className="panel-title">
+              <h2>Library</h2>
+              <span className="muted">{indexedCount} ready · {documents.length} total</span>
+            </div>
 
-          {libraryTab === "browse" ? (
-            <>
-              <div className="library-attach">
-                <button
-                  type="button"
-                  className="primary"
-                  disabled={attaching}
-                  onClick={attachLibraryFolder}
+            <div className="panel-tabs library-tabs" role="tablist">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={libraryTab === "browse"}
+                className={libraryTab === "browse" ? "active" : ""}
+                onClick={() => setLibraryTab("browse")}
+              >
+                Browse
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={libraryTab === "indexed"}
+                className={libraryTab === "indexed" ? "active" : ""}
+                onClick={() => setLibraryTab("indexed")}
+              >
+                Indexed{documents.length ? ` (${documents.length})` : ""}
+              </button>
+            </div>
+
+            {libraryTab === "browse" ? (
+              <>
+                <div className="library-attach">
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={attaching}
+                    onClick={attachLibraryFolder}
+                  >
+                    {attaching ? "Attaching…" : "Attach main library folder"}
+                  </button>
+                  <p className="muted">Recursively imports every PDF under the mounted library folder, in place — nothing is copied.</p>
+                </div>
+
+                <label
+                  className={`dropzone${dragActive ? " drag-active" : ""}${uploading ? " busy" : ""}`}
+                  onDragEnter={handleDragEnter}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
                 >
-                  {attaching ? "Attaching…" : "Attach main library folder"}
-                </button>
-                <p className="muted">Recursively imports every PDF under the mounted library folder, in place — nothing is copied.</p>
-                <label className="upload-link">
                   <input
                     type="file"
                     multiple
@@ -387,46 +513,51 @@ export default function App() {
                       event.target.value = "";
                     }}
                   />
-                  <span>{uploading ? "Uploading…" : "or upload a PDF file"}</span>
-                </label>
-              </div>
-
-              <LibraryBrowser apiBase={API_BASE} onImported={refreshDocuments} onJob={setJob} />
-            </>
-          ) : (
-            <div className="document-list">
-              {documents.length === 0 && <p className="muted">Nothing indexed yet. Import a PDF from the Browse tab.</p>}
-              {documents.map((document) => (
-                <article className="document-card" key={document.document_id}>
-                  <div className="document-name" title={document.filename}>{document.filename}</div>
-                  <div className="document-meta">
-                    <span className={`badge ${document.indexing_status}`}>{document.indexing_status}</span>
-                    <span>{document.pages} pages</span>
-                    <span>{document.chunks} chunks</span>
-                  </div>
-                  {document.source_path && (
-                    <div className="document-meta"><span title={document.source_path}>↪ {document.source_path}</span></div>
-                  )}
-                  {document.indexing_error && <div className="status-message error">{document.indexing_error}</div>}
-                  {document.extraction_notes && <div className="status-message">{document.extraction_notes}</div>}
-                  <div className="document-actions">
-                    {document.indexing_status === "error" && (
-                      <button className="secondary" type="button" onClick={() => retryDocument(document.document_id)}>Retry</button>
+                  <span className="dropzone-icon" aria-hidden="true">⇪</span>
+                  <span>
+                    {uploading ? "Uploading…" : dragActive ? "Drop to upload" : (
+                      <>Drop PDFs here, or <strong>browse</strong></>
                     )}
-                    <button className="danger" type="button" onClick={() => removeDocument(document)}>Remove</button>
-                  </div>
-                </article>
-              ))}
-            </div>
-          )}
+                  </span>
+                </label>
 
-          {notice && <div className={`status-message ${noticeError ? "error" : ""}`}>{notice}</div>}
+                <LibraryBrowser apiBase={API_BASE} onImported={refreshDocuments} onJob={setJob} />
+              </>
+            ) : (
+              <div className="document-list">
+                {documents.length === 0 && <p className="muted">Nothing indexed yet. Import a PDF from the Browse tab.</p>}
+                {documents.map((document) => (
+                  <article className="document-card" key={document.document_id}>
+                    <div className="document-name" title={document.filename}>{document.filename}</div>
+                    <div className="document-meta">
+                      <span className={`badge ${document.indexing_status}`}>{document.indexing_status}</span>
+                      <span>{document.pages} pages</span>
+                      <span>{document.chunks} chunks</span>
+                    </div>
+                    {document.source_path && (
+                      <div className="document-meta"><span title={document.source_path}>↪ {document.source_path}</span></div>
+                    )}
+                    {document.indexing_error && <div className="status-message error">{document.indexing_error}</div>}
+                    {document.extraction_notes && <div className="status-message">{document.extraction_notes}</div>}
+                    <div className="document-actions">
+                      {document.indexing_status === "error" && (
+                        <button className="secondary" type="button" onClick={() => retryDocument(document.document_id)}>Retry</button>
+                      )}
+                      <button className="danger" type="button" onClick={() => removeDocument(document)}>Remove</button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
 
-          {job?.files?.length > 0 && !TERMINAL_JOB_STATES.has(job.state) && (
-            <div className="status-message">
-              {job.files.filter((file) => ["indexed", "duplicate"].includes(file.status)).length}/{job.files.length} files ready
-            </div>
-          )}
+            {notice && <div className={`status-message ${noticeError ? "error" : ""}`}>{notice}</div>}
+
+            {job?.files?.length > 0 && !TERMINAL_JOB_STATES.has(job.state) && (
+              <div className="status-message">
+                {job.files.filter((file) => ["indexed", "duplicate"].includes(file.status)).length}/{job.files.length} files ready
+              </div>
+            )}
+          </div>
         </section>
 
         <section className="panel chat-panel">
