@@ -236,7 +236,7 @@ textarea {
 
 button {
   border: 0;
-  border-radius: 10px;
+  border-radius: 0;
   cursor: pointer;
   font-weight: 700;
 }
@@ -250,7 +250,13 @@ button:disabled {
   display: flex;
   flex-direction: column;
   width: min(1440px, 100%);
-  min-height: 100vh;
+  /* A ceiling, not just a floor: min-height lets tall content grow the
+     shell past the viewport, which left .layout's flex:1 nothing fixed to
+     divide and defeated the panels' internal scrolling. height:100vh pins
+     the shell to the viewport so panels genuinely scroll their own content
+     instead of pushing the whole page down. Desktop only — the mobile
+     breakpoint below reverts to natural, content-sized stacking. */
+  height: 100vh;
   margin: 0 auto;
   padding: 28px;
 }
@@ -288,7 +294,7 @@ button:disabled {
   align-items: center;
   gap: 8px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 0;
   background: var(--panel-bg);
   padding: 8px 12px;
   color: var(--muted-strong);
@@ -298,7 +304,7 @@ button:disabled {
 .health-dot {
   width: 9px;
   height: 9px;
-  border-radius: 50%;
+  border-radius: 0;
   background: var(--warning);
 }
 
@@ -314,7 +320,7 @@ button:disabled {
   width: 38px;
   height: 38px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 0;
   background: var(--panel-bg);
   color: var(--muted-strong);
   font-size: 1rem;
@@ -328,6 +334,11 @@ button:disabled {
 .layout {
   display: grid;
   grid-template-columns: minmax(300px, 390px) minmax(0, 1fr);
+  /* Without this, an implicit "auto" row sizes itself to fit whatever tall
+     content is inside it (e.g. a long Ask thread) instead of being capped to
+     the space flex gave .layout — which defeated the panels' internal
+     scrolling and made the whole page grow instead. */
+  grid-template-rows: 1fr;
   gap: 22px;
   align-items: stretch;
   flex: 1;
@@ -341,13 +352,14 @@ button:disabled {
 
 .panel {
   border: 1px solid var(--border);
-  border-radius: 18px;
+  border-radius: 0;
   background: var(--panel-bg);
   box-shadow: var(--shadow-panel);
 }
 
 .library-panel {
   position: relative;
+  min-height: 0;
   padding: 20px;
   overflow-y: auto;
 }
@@ -367,7 +379,7 @@ button:disabled {
   align-items: center;
   justify-content: center;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 0;
   background: var(--surface-tint-soft);
   color: var(--muted-strong);
   font-size: 0.9rem;
@@ -415,7 +427,7 @@ button:disabled {
 
 .library-attach {
   border: 1px solid var(--border-strong);
-  border-radius: 14px;
+  border-radius: 0;
   background: var(--accent-tint-bg);
   padding: 16px;
   text-align: center;
@@ -433,7 +445,7 @@ button:disabled {
   display: block;
   margin-top: 12px;
   border: 1.5px dashed var(--border-strong);
-  border-radius: 14px;
+  border-radius: 0;
   background: var(--surface-tint-soft);
   padding: 16px;
   color: var(--muted);
@@ -489,7 +501,7 @@ button:disabled {
   min-width: 0;
   flex: 1;
   border: 1px solid var(--border-strong);
-  border-radius: 10px;
+  border-radius: 0;
   outline: none;
   background: var(--surface);
   padding: 10px 12px;
@@ -522,7 +534,7 @@ button:disabled {
 
 .status-message {
   margin: 12px 0 0;
-  border-radius: 10px;
+  border-radius: 0;
   background: var(--tint-bg);
   padding: 9px 11px;
   color: var(--tint-text);
@@ -544,7 +556,7 @@ button:disabled {
 
 .document-card {
   border: 1px solid var(--border-strong);
-  border-radius: 12px;
+  border-radius: 0;
   background: var(--surface);
   padding: 12px;
 }
@@ -572,7 +584,7 @@ button:disabled {
 }
 
 .badge {
-  border-radius: 999px;
+  border-radius: 0;
   background: var(--tint-bg-strong);
   padding: 3px 7px;
   color: var(--badge-ink);
@@ -654,7 +666,7 @@ button:disabled {
   padding: 12px 16px;
   margin-bottom: 16px;
   border: 1px solid var(--warning-border);
-  border-radius: 8px;
+  border-radius: 0;
   background: var(--warning-bg);
   color: var(--warning-text-soft);
   text-align: left;
@@ -669,7 +681,7 @@ button:disabled {
 
 .message {
   max-width: 86%;
-  border-radius: 15px;
+  border-radius: 0;
   padding: 13px 15px;
   line-height: 1.55;
   white-space: pre-wrap;
@@ -684,7 +696,7 @@ button:disabled {
 
 .search-result {
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 0;
   background: var(--surface);
   padding: 16px;
 }
@@ -720,7 +732,7 @@ button:disabled {
 
 .search-result-text .passage-match {
   background: var(--highlight-bg);
-  border-radius: 3px;
+  border-radius: 0;
   padding: 0.05em 0.12em;
   color: inherit;
 }
@@ -766,7 +778,7 @@ button:disabled {
 }
 
 .search-result-text code {
-  border-radius: 5px;
+  border-radius: 0;
   background: var(--code-bg);
   padding: 0.1em 0.3em;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
@@ -774,7 +786,7 @@ button:disabled {
 
 .search-result-text pre {
   overflow-x: auto;
-  border-radius: 9px;
+  border-radius: 0;
   background: var(--code-bg);
   padding: 10px;
 }
@@ -853,7 +865,7 @@ button:disabled {
 
 .library-path-form {
   border: 1px solid var(--border-strong);
-  border-radius: 12px;
+  border-radius: 0;
   background: var(--panel-bg);
   padding: 12px 14px;
   margin-bottom: 12px;
@@ -882,7 +894,7 @@ button:disabled {
 
 .library-path-form p.muted code {
   background: var(--code-bg);
-  border-radius: 4px;
+  border-radius: 0;
   padding: 1px 4px;
   font-size: 0.85em;
 }
@@ -944,7 +956,7 @@ button.link {
   align-items: center;
   gap: 10px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 0;
   background: var(--surface);
   padding: 8px 10px;
 }
@@ -1028,7 +1040,7 @@ button.link {
 
 .ask-model-select select {
   border: 1px solid var(--border-strong);
-  border-radius: 8px;
+  border-radius: 0;
   background: var(--surface);
   padding: 6px 8px;
   color: var(--heading);
@@ -1084,7 +1096,7 @@ button.link {
   flex: 1;
   min-width: 0;
   border: 1px solid var(--border-strong);
-  border-radius: 8px;
+  border-radius: 0;
   background: var(--surface);
   padding: 6px 9px;
   color: var(--ink);
@@ -1116,8 +1128,12 @@ button.link {
 .ask-turn.user {
   align-self: flex-end;
   max-width: 80%;
-  border-radius: 14px 14px 4px 14px;
-  background: var(--heading);
+  border-radius: 0;
+  /* --accent-strong (not --heading): this always needs to stay dark enough
+     for --on-accent's light text, in both themes. --heading flips to a light
+     color in dark mode (it's meant for text on the page background), which
+     made this bubble unreadable there. */
+  background: var(--accent-strong);
   color: var(--on-accent);
   padding: 10px 14px;
   white-space: pre-wrap;
@@ -1287,7 +1303,7 @@ button.cite:hover {
   flex-direction: column;
   width: min(920px, 100%);
   max-height: 100%;
-  border-radius: 14px;
+  border-radius: 0;
   overflow: hidden;
   background: var(--surface);
   box-shadow: var(--shadow-modal);
@@ -1324,7 +1340,7 @@ button.cite:hover {
   width: 26px;
   height: 26px;
   border: 1px solid var(--border-strong);
-  border-radius: 7px;
+  border-radius: 0;
   background: var(--surface);
   color: var(--heading-soft);
   font-size: 1rem;
@@ -1352,7 +1368,7 @@ button.cite:hover {
   width: 28px;
   height: 28px;
   border: 0;
-  border-radius: 7px;
+  border-radius: 0;
   background: none;
   color: var(--muted-strong);
   font-size: 1.3rem;
