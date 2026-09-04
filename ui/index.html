@@ -4,6 +4,27 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AI Librarian UI</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      // Applied before first paint so a stored preference never flashes the
+      // other theme; the app's <html> then just carries whichever value the
+      // user last chose (or nothing, meaning "follow the OS").
+      (function () {
+        try {
+          var stored = window.localStorage.getItem("ai-librarian.theme");
+          if (stored === "light" || stored === "dark") {
+            document.documentElement.dataset.theme = stored;
+          }
+        } catch (_error) {
+          // localStorage unavailable (private mode, etc.) — fall back to OS theme
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
