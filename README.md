@@ -7,7 +7,7 @@ No hosted AI API is required for extraction or search: once the container images
 ## What it does
 
 - Upload one or more PDFs from the browser.
-- Point at a folder of PDFs already on disk (any nesting, any size) and have it auto-indexed in place — no copying, no manual step. Pick exactly which folder from the website itself (Browse → **Set as library folder**), even if the underlying mount is broader.
+- Point at a folder of PDFs already on disk (any nesting, any size) and have it auto-indexed in place — no copying, no manual step. Type or paste the exact folder path into the website itself (Browse → **Library path**) to pick it, even when the underlying mount is broader.
 - Track each document through `queued`, `indexing`, `indexed`, or `error` states.
 - Retry failed indexing jobs and recover queued work after a restart.
 - Avoid duplicate documents using a SHA-256 content hash.
@@ -57,7 +57,7 @@ Then edit `.env` and set `LIBRARY_PATH` — this only decides which host path th
 docker compose up -d --build
 ```
 
-If `LIBRARY_PATH` already points at your PDFs, they're indexed automatically within a few seconds — no upload, no manual click. If you mounted something broader, open the Library panel's **Browse** tab, navigate to your real collection, and click **Set as library folder** — from then on that's what gets scanned (`AUTO_INGEST_INTERVAL_SECONDS`, default every 60s) and where Browse opens by default, with no further `.env` editing or restart.
+If `LIBRARY_PATH` already points at your PDFs, they're indexed automatically within a few seconds — no upload, no manual click. If you mounted something broader, open the Library panel's **Browse** tab and type or paste your real collection's path into the **Library path** box (or navigate to it and click **Set as library folder**) — from then on that's what gets scanned (`AUTO_INGEST_INTERVAL_SECONDS`, default every 60s) and where Browse opens by default, with no further `.env` editing or restart.
 
 The first indexing request takes longer because the document service downloads its embedding model. The reranker is downloaded on the first reranked search. Model files are persisted under `data/models/`.
 
@@ -135,7 +135,7 @@ The bundled UI keeps working — nginx forwards the token to the API. This prote
 There are two layers, and only the first one ever needs `.env` or a restart:
 
 1. **The mount** (`LIBRARY_PATH` in `.env`) — an absolute host path bind-mounted read-only at `/library`. This is a Docker-level fact: the container can only ever see host paths it was handed at start, so *some* path has to be declared here once. It's fine — encouraged, even — to make this broad (your whole home directory, an external drive's mount point) rather than guessing the exact folder up front.
-2. **The library folder** — which subfolder of that mount is actually "the library": what the background scan walks and where the Browse tab opens by default. This is set **entirely from the website**, no `.env` editing or restart involved: open **Browse**, navigate to your real collection (however deep it's nested), and click **Set as library folder**. That's now the designated folder; **Reset to whole mount** undoes it. Whichever way this is set, PDFs are always **referenced in place** — nothing is ever copied, moved, or renamed on disk.
+2. **The library folder** — which subfolder of that mount is actually "the library": what the background scan walks and where the Browse tab opens by default. This is set **entirely from the website**, no `.env` editing or restart involved: at the top of **Browse**, type or paste the folder's path into the **Library path** box and hit **Set** — paste the exact absolute path as your file manager shows it (the box's placeholder shows the expected form) or a path relative to the mount, either works. Prefer clicking instead of typing? Navigate there in Browse and click **Set as library folder** on it — same result. **Reset to whole mount** (next to the box) undoes it. Whichever way this is set, PDFs are always **referenced in place** — nothing is ever copied, moved, or renamed on disk.
 
 **This is automatic.** A background scan (`AUTO_INGEST_INTERVAL_SECONDS`, default every 60s) walks the designated library folder recursively and references any PDF it hasn't seen before — once immediately at startup (so a library already in place before the first `docker compose up` needs no UI interaction at all), then again on every interval (so a file dropped in later is picked up on its own). Set `AUTO_INGEST_INTERVAL_SECONDS=0` to disable this and rely only on manual import.
 

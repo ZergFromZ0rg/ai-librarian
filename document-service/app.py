@@ -98,6 +98,11 @@ CHUNKS_DIR = DATA_DIR / "chunks"
 JOBS_DIR = DATA_DIR / "jobs"
 LOGS_DIR = DATA_DIR / "logs"
 INGEST_ROOT = Path(os.environ.get("INGEST_ROOT", str(DATA_DIR / "inbox"))).resolve()
+# The mount's path on the HOST, for display only -- never used for filesystem
+# access (the container can only ever read INGEST_ROOT). Lets the UI accept a
+# pasted absolute host path by recognizing this prefix. Trailing slashes
+# stripped so prefix-matching a child path works either way.
+LIBRARY_HOST_PATH = os.environ.get("LIBRARY_HOST_PATH", "").strip().rstrip("/")
 
 SEARCH_LOG_ENABLED = os.environ.get("SEARCH_LOG", "on").strip().lower() not in {
     "off", "0", "false", "no", ""
@@ -877,8 +882,15 @@ def import_library_file(rel_path: str) -> tuple[dict, bool]:
 
 def resolve_library_path(requested: Optional[str]) -> Path:
     """Resolve a path relative to INGEST_ROOT, refusing anything that escapes it.
-    The path must exist (file or directory)."""
-    candidate = INGEST_ROOT if not requested else Path(requested)
+    The path must exist (file or directory). ``requested`` can also be the
+    mount's absolute HOST path (LIBRARY_HOST_PATH, e.g. pasted straight out of
+    a file manager) -- that prefix is swapped for INGEST_ROOT first."""
+    text = (requested or "").strip()
+    if LIBRARY_HOST_PATH.startswith("/") and text.startswith("/") and (
+        text == LIBRARY_HOST_PATH or text.startswith(LIBRARY_HOST_PATH + "/")
+    ):
+        text = text[len(LIBRARY_HOST_PATH):].lstrip("/")
+    candidate = INGEST_ROOT if not text else Path(text)
     if not candidate.is_absolute():
         candidate = INGEST_ROOT / candidate
     try:
@@ -2134,7 +2146,14 @@ async def get_library_root():
         requested = (_load_settings().get("library_root") or "").strip()
         effective = library_root_path()
         effective_rel = "" if effective == INGEST_ROOT else str(effective.relative_to(INGEST_ROOT))
-        return {"path": effective_rel, "valid": effective_rel == requested}
+        return {
+            "path": effective_rel,
+            "valid": effective_rel == requested,
+            # For display, and so the UI's "Library path" box can accept a
+            # pasted absolute host path (e.g. "/home/zerg/Books"): "" if the
+            # server never declared one (LIBRARY_HOST_PATH unset).
+            "host_path": LIBRARY_HOST_PATH,
+        }
 
     return await asyncio.to_thread(build)
 
