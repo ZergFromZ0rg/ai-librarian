@@ -161,13 +161,29 @@ function SourceViewer({ source, onClose }) {
 // The sidebar's "Chats" tab: a full conversation list (switch/create/delete),
 // replacing what used to be a cramped <select> inside the Ask panel itself.
 function ChatList({ chats, activeId, onSelect, onNew, onDelete }) {
+  const [filter, setFilter] = useState("");
+  const query = filter.trim().toLowerCase();
+  const visible = query ? chats.filter((chat) => (chat.title || "Untitled").toLowerCase().includes(query)) : chats;
+
   return (
     <div className="chat-list">
       <button type="button" className="primary chat-list-new" onClick={onNew}>
         + New chat
       </button>
-      {chats.length === 0 && <p className="muted">No conversations yet — ask a question to start one.</p>}
-      {chats.map((chat) => (
+      {chats.length > 0 && (
+        <div className="chat-list-search">
+          <input
+            type="search"
+            value={filter}
+            onChange={(event) => setFilter(event.target.value)}
+            placeholder="Search chats…"
+            aria-label="Search chats"
+          />
+        </div>
+      )}
+      {chats.length === 0 && <p className="chat-list-empty">No conversations yet — ask a question to start one.</p>}
+      {chats.length > 0 && visible.length === 0 && <p className="chat-list-empty">No chats match “{filter}”.</p>}
+      {visible.map((chat) => (
         <div className={`chat-list-item${chat.id === activeId ? " active" : ""}`} key={chat.id}>
           <button type="button" className="chat-list-title" onClick={() => onSelect(chat.id)}>
             {chat.title || "Untitled"}

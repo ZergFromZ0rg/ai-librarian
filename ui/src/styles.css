@@ -495,6 +495,11 @@ button:disabled {
 
 .sidebar.collapsed .sidebar-toggle {
   position: static;
+  /* margin: auto only centers a block-level box — inline-flex (the base
+     rule, needed for the absolutely-positioned corner case above) ignores
+     it and was left flush to whichever edge the inline layout happened to
+     put it at. */
+  display: flex;
   margin: 0 auto;
 }
 
@@ -976,28 +981,44 @@ button.rescan-link:disabled {
 .chat-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 1px;
 }
 
 .chat-list-new {
-  margin-bottom: 8px;
+  margin-bottom: 12px;
 }
 
+.chat-list-search {
+  margin-bottom: 10px;
+}
+
+.chat-list-search input {
+  width: 100%;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  padding: 7px 10px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.82rem;
+}
+
+.chat-list-empty {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+/* Deliberately borderless/boxless — a plain, quiet list (like a native
+   sidebar's), not another set of bordered cards competing with the rest of
+   the app's panels for attention. */
 .chat-list-item {
   display: flex;
   align-items: center;
-  gap: 4px;
-  border: 1px solid transparent;
+  gap: 2px;
 }
 
-.chat-list-item:hover {
-  border-color: var(--border-strong);
-  background: var(--surface-tint-soft);
-}
-
+.chat-list-item:hover,
 .chat-list-item.active {
-  border-color: var(--accent);
-  background: var(--accent-tint);
+  background: var(--surface-tint-soft);
 }
 
 .chat-list-title {
@@ -1006,8 +1027,8 @@ button.rescan-link:disabled {
   overflow: hidden;
   border: 0;
   background: none;
-  padding: 9px 10px;
-  color: var(--heading-soft);
+  padding: 8px 6px;
+  color: var(--ink-soft);
   font: inherit;
   font-size: 0.85rem;
   text-align: left;
@@ -1017,20 +1038,29 @@ button.rescan-link:disabled {
 }
 
 .chat-list-item.active .chat-list-title {
-  color: var(--accent-strong);
+  color: var(--heading);
   font-weight: 600;
 }
 
 .chat-list-delete {
   flex: none;
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   border: 0;
   background: none;
   color: var(--muted);
-  font-size: 1.05rem;
+  font-size: 1rem;
   line-height: 1;
   cursor: pointer;
+  /* Hidden until the row is hovered/focused — a page full of visible × marks
+     is exactly the visual noise the reference design didn't have. */
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+
+.chat-list-item:hover .chat-list-delete,
+.chat-list-item:focus-within .chat-list-delete {
+  opacity: 1;
 }
 
 .chat-list-delete:hover {
@@ -1356,6 +1386,21 @@ button.cite.open {
 
 .ask-src {
   scroll-margin: 24px;
+}
+
+.ask-src-close {
+  display: block;
+  margin: 0 0 6px auto;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.ask-src-close:hover {
+  color: var(--danger);
 }
 
 .ask-src.flash > .search-result {
