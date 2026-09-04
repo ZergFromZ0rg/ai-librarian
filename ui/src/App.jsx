@@ -4,14 +4,15 @@ import { createPortal } from "react-dom";
 import AskPanel from "./AskPanel.jsx";
 import LibraryBrowser from "./LibraryBrowser.jsx";
 import ResultCard from "./ResultCard.jsx";
+import Settings from "./Settings.jsx";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 const TERMINAL_JOB_STATES = new Set(["done", "partial", "error", "interrupted"]);
 const THEME_KEY = "ai-librarian.theme";
 const SIDEBAR_KEY = "ai-librarian.sidebar-collapsed";
+const ACTIVE_CHAT_KEY = "ai-librarian.ask.active";
+const KEYS_KEY = "ai-librarian.ask.keys";
 
-// Reads whatever the inline head script already applied to <html>, so the
-// toggle's first render matches the page instead of flashing to the default.
 function currentTheme() {
   const stored = document.documentElement.dataset.theme;
   return stored === "light" || stored === "dark" ? stored : null;
@@ -21,32 +22,22 @@ function systemPrefersDark() {
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
 }
 
-// A two-state toggle (not a tri-state incl. "system"): once someone picks a
-// theme explicitly we remember that choice, but the very first press just
-// flips away from whatever the OS preference currently resolves to.
-function ThemeToggle() {
-  const [theme, setTheme] = useState(() => currentTheme() || (systemPrefersDark() ? "dark" : "light"));
+function loadStored(key, fallback, parse = false) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw != null) return parse ? JSON.parse(raw) : raw;
+  } catch (_error) {
+    // corrupt or unavailable storage
+  }
+  return fallback;
+}
 
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    try {
-      window.localStorage.setItem(THEME_KEY, theme);
-    } catch (_error) {
-      // best effort
-    }
-  }, [theme]);
-
-  return (
-    <button
-      type="button"
-      className="theme-toggle"
-      onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
-      aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
-      title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
-    >
-      {theme === "dark" ? "☀" : "☾"}
-    </button>
-  );
+function saveStored(key, value) {
+  try {
+    window.localStorage.setItem(key, typeof value === "string" ? value : JSON.stringify(value));
+  } catch (_error) {
+    // best effort
+  }
 }
 
 async function parseResponse(response) {
@@ -166,10 +157,40 @@ function SourceViewer({ source, onClose }) {
   );
 }
 
+// The sidebar's "Chats" tab: a full conversation list (switch/create/delete),
+// replacing what used to be a cramped <select> inside the Ask panel itself.
+function ChatList({ chats, activeId, onSelect, onNew, onDelete }) {
+  return (
+    <div className="chat-list">
+      <button type="button" className="primary chat-list-new" onClick={onNew}>
+        + New chat
+      </button>
+      {chats.length === 0 && <p className="muted">No conversations yet — ask a question to start one.</p>}
+      {chats.map((chat) => (
+        <div className={`chat-list-item${chat.id === activeId ? " active" : ""}`} key={chat.id}>
+          <button type="button" className="chat-list-title" onClick={() => onSelect(chat.id)}>
+            {chat.title || "Untitled"}
+          </button>
+          <button
+            type="button"
+            className="chat-list-delete"
+            aria-label="Delete conversation"
+            title="Delete conversation"
+            onClick={() => onDelete(chat.id)}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function App() {
   const [health, setHealth] = useState(null);
   const [documents, setDocuments] = useState([]);
   const [libraryTab, setLibraryTab] = useState("browse");
+  const [sidebarSection, setSidebarSection] = useState("library");
   const [job, setJob] = useState(null);
   const [notice, setNotice] = useState("");
   const [noticeError, setNoticeError] = useState(false);
@@ -183,23 +204,88 @@ export default function App() {
   const [source, setSource] = useState(null);
   const [askEnabled, setAskEnabled] = useState(false);
   const [view, setView] = useState("search");
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
-    try {
-      return window.localStorage.getItem(SIDEBAR_KEY) === "1";
-    } catch (_error) {
-      return false;
-    }
-  });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => loadStored(SIDEBAR_KEY, "") === "1");
   const [dragActive, setDragActive] = useState(false);
   const dragCounter = useRef(0);
+  const [theme, setTheme] = useState(() => currentTheme() || (systemPrefersDark() ? "dark" : "light"));
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // Library root (which folder auto-ingest scans) — set from Settings, but
+  // also readable/settable from the Browse tree's "Set as library" shortcut.
+  const [libraryRoot, setLibraryRoot] = useState(null); // null = not yet resolved
+  const [hostPath, setHostPath] = useState("");
+  const [settingRoot, setSettingRoot] = useState(false);
+  const [rootNotice, setRootNotice] = useState("");
+  const [rootError, setRootError] = useState("");
+
+  // Cloud API keys — edited from Settings, consumed by AskPanel.
+  const [apiKeys, setApiKeys] = useState(() => loadStored(KEYS_KEY, {}, true) || {});
+
+  // Chat history — the list lives in the sidebar; AskPanel just renders
+  // whichever conversation `activeChatId` points at.
+  const [chats, setChats] = useState([]);
+  const [activeChatId, setActiveChatIdState] = useState(() => loadStored(ACTIVE_CHAT_KEY, "") || null);
+
+  const api = useCallback(
+    async (path, options = {}) => {
+      const response = await fetch(`${API_BASE}${path}`, options);
+      return parseResponse(response);
+    },
+    [],
+  );
 
   useEffect(() => {
-    try {
-      window.localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed ? "1" : "0");
-    } catch (_error) {
-      // best effort
-    }
+    document.documentElement.dataset.theme = theme;
+    saveStored(THEME_KEY, theme);
+  }, [theme]);
+
+  useEffect(() => {
+    saveStored(SIDEBAR_KEY, sidebarCollapsed ? "1" : "0");
   }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    saveStored(KEYS_KEY, apiKeys);
+  }, [apiKeys]);
+
+  const setActiveChatId = useCallback((id) => {
+    setActiveChatIdState(id);
+    saveStored(ACTIVE_CHAT_KEY, id || "");
+  }, []);
+
+  const refreshChatList = useCallback(async () => {
+    try {
+      const data = await api("/conversations");
+      setChats(data.conversations || []);
+    } catch (_error) {
+      // the list is a convenience; failing to load it is not fatal
+    }
+  }, [api]);
+
+  useEffect(() => {
+    refreshChatList();
+  }, [refreshChatList]);
+
+  function selectChat(id) {
+    setActiveChatId(id);
+    setView("ask");
+  }
+
+  function newChat() {
+    setActiveChatId(null);
+    setView("ask");
+  }
+
+  async function deleteChat(id) {
+    if (!window.confirm("Delete this conversation?")) return;
+    try {
+      await api(`/conversations/${id}`, { method: "DELETE" });
+      if (id === activeChatId) setActiveChatId(null);
+      refreshChatList();
+    } catch (error) {
+      setNotice(error.message);
+      setNoticeError(true);
+    }
+  }
 
   // The browser's default reaction to a dropped file is to navigate to it —
   // block that everywhere so a drop that misses the dropzone doesn't blow
@@ -213,14 +299,6 @@ export default function App() {
       window.removeEventListener("drop", preventDefault);
     };
   }, []);
-
-  const api = useCallback(
-    async (path, options = {}) => {
-      const response = await fetch(`${API_BASE}${path}`, options);
-      return parseResponse(response);
-    },
-    [],
-  );
 
   const refreshDocuments = useCallback(async () => {
     try {
@@ -262,6 +340,23 @@ export default function App() {
   useEffect(() => {
     refreshDocuments();
   }, [refreshDocuments]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API_BASE}/library/root`)
+      .then((response) => response.json())
+      .then((data) => {
+        if (cancelled) return;
+        setLibraryRoot(data.path || "");
+        setHostPath(data.host_path || "");
+      })
+      .catch(() => {
+        if (!cancelled) setLibraryRoot("");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const hasPending = documents.some((document) => ["queued", "indexing"].includes(document.indexing_status));
@@ -353,14 +448,10 @@ export default function App() {
     setNotice("Queueing the library folder for import…");
     setNoticeError(false);
     try {
-      // Target whatever folder is currently designated as the library
-      // (narrowed from the /library mount via Browse's "Set as library
-      // folder", or the whole mount if it was never narrowed).
-      const root = await api("/library/root");
       const result = await api("/library/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: root.path || "." }),
+        body: JSON.stringify({ path: libraryRoot || "." }),
       });
       setJob(result);
       setNotice(`Import job ${result.job_id} is queued.`);
@@ -369,6 +460,53 @@ export default function App() {
       setNoticeError(true);
     } finally {
       setAttaching(false);
+    }
+  }
+
+  // Shared by Settings (typing a path) and the Browse tree's "Set as
+  // library" shortcut. Uses raw fetch (not the `api()` helper) so it can
+  // give a specific, actionable message for the two failure modes that
+  // actually happen here — outside the mount, or simply not found.
+  async function setLibraryFolder(targetPath) {
+    setSettingRoot(true);
+    setRootNotice("");
+    setRootError("");
+    try {
+      const response = await fetch(`${API_BASE}/library/root`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: targetPath }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        if (response.status === 403) {
+          throw new Error(
+            `That path is outside what this server can see. It can only reach folders inside ${
+              hostPath ? `${hostPath} (its LIBRARY_PATH mount)` : "its /library mount"
+            } — widen that mount in .env and restart to reach elsewhere.`,
+          );
+        }
+        if (response.status === 404) {
+          throw new Error(
+            `That path doesn't exist${hostPath ? ` under ${hostPath}` : ""}. Check the spelling, or that it's really inside what's mounted at /library.`,
+          );
+        }
+        throw new Error(data.detail || `Request failed (${response.status})`);
+      }
+      setLibraryRoot(data.path || "");
+      setRootNotice(data.path ? `Library folder set to “${data.path}”.` : "Library folder reset to the whole mount.");
+      const importResult = await api("/library/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: data.path || "." }),
+      });
+      setJob(importResult);
+      return { ok: true, path: data.path || "" };
+    } catch (error) {
+      setRootError(error.message);
+      return { ok: false };
+    } finally {
+      setSettingRoot(false);
     }
   }
 
@@ -426,6 +564,7 @@ export default function App() {
 
   const indexedCount = documents.filter((document) => document.indexing_status === "indexed").length;
   const healthReady = health?.status === "ready";
+  const showSearchIntro = results.length === 0 && !searching && !searched;
 
   return (
     <main className="app-shell">
@@ -439,7 +578,33 @@ export default function App() {
             <span className={`health-dot ${healthReady ? "ready" : ""}`} />
             {healthReady ? "Library ready" : health?.status || "Connecting"}
           </div>
-          <ThemeToggle />
+          <div className="settings-anchor">
+            <button
+              type="button"
+              className="settings-trigger"
+              onClick={() => setSettingsOpen((open) => !open)}
+              aria-label="Settings"
+              aria-expanded={settingsOpen}
+              title="Settings"
+            >
+              ⚙
+            </button>
+            {settingsOpen && (
+              <Settings
+                theme={theme}
+                onThemeChange={setTheme}
+                apiKeys={apiKeys}
+                setApiKeys={setApiKeys}
+                libraryRoot={libraryRoot}
+                hostPath={hostPath}
+                settingRoot={settingRoot}
+                rootNotice={rootNotice}
+                rootError={rootError}
+                onSetLibraryFolder={setLibraryFolder}
+                onClose={() => setSettingsOpen(false)}
+              />
+            )}
+          </div>
         </div>
       </header>
 
@@ -456,106 +621,148 @@ export default function App() {
           </button>
 
           <div className="library-panel-body">
-            <div className="panel-title">
-              <h2>Library</h2>
-              <span className="muted">{indexedCount} ready · {documents.length} total</span>
-            </div>
-
-            <div className="panel-tabs library-tabs" role="tablist">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={libraryTab === "browse"}
-                className={libraryTab === "browse" ? "active" : ""}
-                onClick={() => setLibraryTab("browse")}
-              >
-                Browse
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={libraryTab === "indexed"}
-                className={libraryTab === "indexed" ? "active" : ""}
-                onClick={() => setLibraryTab("indexed")}
-              >
-                Indexed{documents.length ? ` (${documents.length})` : ""}
-              </button>
-            </div>
-
-            {libraryTab === "browse" ? (
-              <>
-                <div className="library-attach">
-                  <button
-                    type="button"
-                    className="primary"
-                    disabled={attaching}
-                    onClick={attachLibraryFolder}
-                  >
-                    {attaching ? "Attaching…" : "Attach main library folder"}
-                  </button>
-                  <p className="muted">Recursively imports every PDF under the mounted library folder, in place — nothing is copied.</p>
-                </div>
-
-                <label
-                  className={`dropzone${dragActive ? " drag-active" : ""}${uploading ? " busy" : ""}`}
-                  onDragEnter={handleDragEnter}
-                  onDragOver={handleDragOver}
-                  onDragLeave={handleDragLeave}
-                  onDrop={handleDrop}
+            {askEnabled && (
+              <div className="panel-tabs sidebar-section-tabs" role="tablist">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={sidebarSection === "library"}
+                  className={sidebarSection === "library" ? "active" : ""}
+                  onClick={() => setSidebarSection("library")}
                 >
-                  <input
-                    type="file"
-                    multiple
-                    accept="application/pdf,.pdf"
-                    disabled={uploading}
-                    onChange={(event) => {
-                      uploadFiles(event.target.files);
-                      event.target.value = "";
-                    }}
-                  />
-                  <span className="dropzone-icon" aria-hidden="true">⇪</span>
-                  <span>
-                    {uploading ? "Uploading…" : dragActive ? "Drop to upload" : (
-                      <>Drop PDFs here, or <strong>browse</strong></>
-                    )}
-                  </span>
-                </label>
-
-                <LibraryBrowser apiBase={API_BASE} onImported={refreshDocuments} onJob={setJob} />
-              </>
-            ) : (
-              <div className="document-list">
-                {documents.length === 0 && <p className="muted">Nothing indexed yet. Import a PDF from the Browse tab.</p>}
-                {documents.map((document) => (
-                  <article className="document-card" key={document.document_id}>
-                    <div className="document-name" title={document.filename}>{document.filename}</div>
-                    <div className="document-meta">
-                      <span className={`badge ${document.indexing_status}`}>{document.indexing_status}</span>
-                      <span>{document.pages} pages</span>
-                      <span>{document.chunks} chunks</span>
-                    </div>
-                    {document.source_path && (
-                      <div className="document-meta"><span title={document.source_path}>↪ {document.source_path}</span></div>
-                    )}
-                    {document.indexing_error && <div className="status-message error">{document.indexing_error}</div>}
-                    {document.extraction_notes && <div className="status-message">{document.extraction_notes}</div>}
-                    <div className="document-actions">
-                      {document.indexing_status === "error" && (
-                        <button className="secondary" type="button" onClick={() => retryDocument(document.document_id)}>Retry</button>
-                      )}
-                      <button className="danger" type="button" onClick={() => removeDocument(document)}>Remove</button>
-                    </div>
-                  </article>
-                ))}
+                  Library
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={sidebarSection === "chats"}
+                  className={sidebarSection === "chats" ? "active" : ""}
+                  onClick={() => setSidebarSection("chats")}
+                >
+                  Chats{chats.length ? ` (${chats.length})` : ""}
+                </button>
               </div>
             )}
 
-            {notice && <div className={`status-message ${noticeError ? "error" : ""}`}>{notice}</div>}
+            {sidebarSection === "chats" && askEnabled ? (
+              <ChatList
+                chats={chats}
+                activeId={activeChatId}
+                onSelect={selectChat}
+                onNew={newChat}
+                onDelete={deleteChat}
+              />
+            ) : (
+              <>
+                <div className="panel-title">
+                  <h2>Library</h2>
+                  <span className="muted">{indexedCount} ready · {documents.length} total</span>
+                </div>
 
-            {job?.files?.length > 0 && !TERMINAL_JOB_STATES.has(job.state) && (
-              <div className="status-message">
-                {job.files.filter((file) => ["indexed", "duplicate"].includes(file.status)).length}/{job.files.length} files ready
-              </div>
+                <div className="panel-tabs library-tabs" role="tablist">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={libraryTab === "browse"}
+                    className={libraryTab === "browse" ? "active" : ""}
+                    onClick={() => setLibraryTab("browse")}
+                  >
+                    Browse
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={libraryTab === "indexed"}
+                    className={libraryTab === "indexed" ? "active" : ""}
+                    onClick={() => setLibraryTab("indexed")}
+                  >
+                    Indexed{documents.length ? ` (${documents.length})` : ""}
+                  </button>
+                </div>
+
+                {libraryTab === "browse" ? (
+                  <>
+                    <div className="library-attach">
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={attaching}
+                        onClick={attachLibraryFolder}
+                      >
+                        {attaching ? "Attaching…" : "Attach main library folder"}
+                      </button>
+                      <p className="muted">Recursively imports every PDF under the mounted library folder, in place — nothing is copied.</p>
+                    </div>
+
+                    <label
+                      className={`dropzone${dragActive ? " drag-active" : ""}${uploading ? " busy" : ""}`}
+                      onDragEnter={handleDragEnter}
+                      onDragOver={handleDragOver}
+                      onDragLeave={handleDragLeave}
+                      onDrop={handleDrop}
+                    >
+                      <input
+                        type="file"
+                        multiple
+                        accept="application/pdf,.pdf"
+                        disabled={uploading}
+                        onChange={(event) => {
+                          uploadFiles(event.target.files);
+                          event.target.value = "";
+                        }}
+                      />
+                      <span className="dropzone-icon" aria-hidden="true">⇪</span>
+                      <span>
+                        {uploading ? "Uploading…" : dragActive ? "Drop to upload" : (
+                          <>Drop PDFs here, or <strong>browse</strong></>
+                        )}
+                      </span>
+                    </label>
+
+                    <LibraryBrowser
+                      apiBase={API_BASE}
+                      onImported={refreshDocuments}
+                      onJob={setJob}
+                      libraryRoot={libraryRoot}
+                      settingRoot={settingRoot}
+                      onSetLibraryFolder={setLibraryFolder}
+                    />
+                  </>
+                ) : (
+                  <div className="document-list">
+                    {documents.length === 0 && <p className="muted">Nothing indexed yet. Import a PDF from the Browse tab.</p>}
+                    {documents.map((document) => (
+                      <article className="document-card" key={document.document_id}>
+                        <div className="document-name" title={document.filename}>{document.filename}</div>
+                        <div className="document-meta">
+                          <span className={`badge ${document.indexing_status}`}>{document.indexing_status}</span>
+                          <span>{document.pages} pages</span>
+                          <span>{document.chunks} chunks</span>
+                        </div>
+                        {document.source_path && (
+                          <div className="document-meta"><span title={document.source_path}>↪ {document.source_path}</span></div>
+                        )}
+                        {document.indexing_error && <div className="status-message error">{document.indexing_error}</div>}
+                        {document.extraction_notes && <div className="status-message">{document.extraction_notes}</div>}
+                        <div className="document-actions">
+                          {document.indexing_status === "error" && (
+                            <button className="secondary" type="button" onClick={() => retryDocument(document.document_id)}>Retry</button>
+                          )}
+                          <button className="danger" type="button" onClick={() => removeDocument(document)}>Remove</button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+
+                {notice && <div className={`status-message ${noticeError ? "error" : ""}`}>{notice}</div>}
+
+                {job?.files?.length > 0 && !TERMINAL_JOB_STATES.has(job.state) && (
+                  <div className="status-message">
+                    {job.files.filter((file) => ["indexed", "duplicate"].includes(file.status)).length}/{job.files.length} files ready
+                  </div>
+                )}
+              </>
             )}
           </div>
         </section>
@@ -585,15 +792,25 @@ export default function App() {
           )}
 
           {view === "ask" && askEnabled ? (
-            <AskPanel apiBase={API_BASE} onViewSource={setSource} indexedCount={indexedCount} />
+            <AskPanel
+              apiBase={API_BASE}
+              onViewSource={setSource}
+              indexedCount={indexedCount}
+              activeId={activeChatId}
+              onActiveIdChange={setActiveChatId}
+              onConversationsChanged={refreshChatList}
+              apiKeys={apiKeys}
+            />
           ) : (
             <>
-              <div className="chat-header">
-                <h2>Search your library</h2>
-                <p>Semantic search finds and reranks the most relevant source passages.</p>
-              </div>
+              {showSearchIntro && (
+                <div className="chat-header">
+                  <h2>Search your library</h2>
+                  <p>Semantic search finds and reranks the most relevant source passages.</p>
+                </div>
+              )}
               <div className="messages" aria-live="polite">
-                {results.length === 0 && !searching && !searched && (
+                {showSearchIntro && (
                   <div className="empty-state">
                     <div>
                       <strong>What are you looking for?</strong>
