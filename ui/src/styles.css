@@ -538,6 +538,35 @@ button:disabled {
   margin-top: 14px;
 }
 
+.library-path-form {
+  border: 1px solid #dde2df;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.6);
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+
+.library-path-form label {
+  display: block;
+  margin-bottom: 6px;
+  color: #2f4941;
+  font-weight: 600;
+  font-size: 0.82rem;
+}
+
+.library-path-form .field-row {
+  margin-top: 0;
+}
+
+.library-path-form p.muted {
+  margin: 8px 0 0;
+  line-height: 1.5;
+}
+
+.library-path-form p.muted strong {
+  color: #2f4941;
+}
+
 .library-root-bar {
   display: flex;
   flex-wrap: wrap;

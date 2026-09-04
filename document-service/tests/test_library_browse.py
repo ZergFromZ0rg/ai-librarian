@@ -181,11 +181,12 @@ def test_library_root_can_be_narrowed_from_a_broad_mount(service, tmp_path):
     (root / "Books").mkdir()
     (root / "Books" / "sisyphus.pdf").write_bytes(make_pdf("One must imagine Sisyphus happy."))
 
-    assert client.get("/library/root").json() == {"path": "", "valid": True}
+    assert client.get("/library/root").json() == {"path": "", "valid": True, "host_path": ""}
 
     resp = client.post("/library/root", json={"path": "Books"})
     assert resp.status_code == 200 and resp.json() == {"path": "Books"}
-    assert client.get("/library/root").json() == {"path": "Books", "valid": True}
+    root_info = client.get("/library/root").json()
+    assert root_info["path"] == "Books" and root_info["valid"] is True
 
     # Auto-ingest now only sees what's under the narrowed root.
     imported = module._auto_ingest_scan()
@@ -206,8 +207,28 @@ def test_library_root_falls_back_when_the_chosen_folder_disappears(service, tmp_
 
     (root / "Temp").rmdir()
     result = client.get("/library/root").json()
-    assert result == {"path": "", "valid": False}
+    assert result["path"] == "" and result["valid"] is False
     assert module.library_root_path() == module.INGEST_ROOT
+
+
+def test_library_root_accepts_a_pasted_absolute_host_path(service, monkeypatch, tmp_path):
+    """LIBRARY_HOST_PATH (informational only) lets the website's "Library
+    path" box accept the exact absolute path a user's file manager shows,
+    instead of requiring one relative to the container's /library mount."""
+    module, client, _indexed = service
+    root = _library(tmp_path)
+    (root / "Books").mkdir()
+    monkeypatch.setattr(module, "LIBRARY_HOST_PATH", "/mnt/nas/books")
+
+    resp = client.post("/library/root", json={"path": "/mnt/nas/books/Books"})
+    assert resp.status_code == 200 and resp.json() == {"path": "Books"}
+    assert client.get("/library/root").json()["host_path"] == "/mnt/nas/books"
+
+    # A path that only coincidentally shares the prefix textually, but isn't
+    # actually under it, is still rejected -- prefix matching requires the
+    # separator, not just startswith.
+    resp = client.post("/library/root", json={"path": "/mnt/nas/books-elsewhere"})
+    assert resp.status_code in (403, 404)
 
 
 def test_library_root_rejects_paths_outside_the_mount(service, tmp_path):

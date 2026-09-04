@@ -31,6 +31,9 @@ function breadcrumbs(path) {
 export default function LibraryBrowser({ apiBase, onImported, onJob }) {
   const [path, setPath] = useState(null); // null = not yet resolved to the starting folder
   const [libraryRoot, setLibraryRootState] = useState("");
+  const [hostPath, setHostPath] = useState("");
+  const [pathInput, setPathInput] = useState("");
+  const [settingRoot, setSettingRoot] = useState(false);
   const [tree, setTree] = useState(null);
   const [status, setStatus] = useState("loading");
   const [error, setError] = useState("");
@@ -65,6 +68,8 @@ export default function LibraryBrowser({ apiBase, onImported, onJob }) {
       .then((data) => {
         if (cancelled) return;
         setLibraryRootState(data.path || "");
+        setHostPath(data.host_path || "");
+        setPathInput(data.path ? (data.host_path ? `${data.host_path}/${data.path}` : data.path) : "");
         loadTree(data.path || "");
       })
       .catch(() => loadTree(""));
@@ -107,6 +112,7 @@ export default function LibraryBrowser({ apiBase, onImported, onJob }) {
     async (targetPath) => {
       setNotice("");
       setError("");
+      setSettingRoot(true);
       try {
         const response = await fetch(`${apiBase}/library/root`, {
           method: "POST",
@@ -116,14 +122,17 @@ export default function LibraryBrowser({ apiBase, onImported, onJob }) {
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
         setLibraryRootState(data.path || "");
+        setPathInput(data.path ? (hostPath ? `${hostPath}/${data.path}` : data.path) : "");
         setNotice(data.path ? `Library folder set to “${data.path}”.` : "Library folder reset to the whole mount.");
         await importEntry(data.path || ".");
-        loadTree(path);
+        loadTree(data.path || "");
       } catch (rootError) {
         setError(rootError.message);
+      } finally {
+        setSettingRoot(false);
       }
     },
-    [apiBase, importEntry, loadTree, path],
+    [apiBase, hostPath, importEntry, loadTree],
   );
 
   const entries = tree?.entries || [];
@@ -133,21 +142,49 @@ export default function LibraryBrowser({ apiBase, onImported, onJob }) {
 
   return (
     <div className="library-browser">
-      <div className="library-root-bar">
-        <span className="muted">
-          Library folder: <strong>{libraryRoot ? `/${libraryRoot}` : "the whole mounted folder"}</strong>
-        </span>
-        {path !== null && !atLibraryRoot && (
+      <form
+        className="library-path-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!settingRoot) setLibraryFolder(pathInput.trim());
+        }}
+      >
+        <label htmlFor="library-path-input">Library path</label>
+        <div className="field-row">
+          <input
+            id="library-path-input"
+            value={pathInput}
+            onChange={(event) => setPathInput(event.target.value)}
+            placeholder={hostPath ? `${hostPath}/Books` : "Books/PDFs"}
+            disabled={settingRoot}
+          />
+          <button className="primary" type="submit" disabled={settingRoot}>
+            {settingRoot ? "Setting…" : "Set"}
+          </button>
+        </div>
+        <p className="muted">
+          {hostPath
+            ? `Paste the folder's exact path as shown on this server (e.g. ${hostPath}/Books), or a path relative to it.`
+            : "A path relative to the mounted library folder."}{" "}
+          Currently: <strong>{libraryRoot ? `/${libraryRoot}` : "the whole mounted folder"}</strong>
+          {libraryRoot && (
+            <>
+              {" · "}
+              <button type="button" className="link" onClick={() => setLibraryFolder("")}>
+                reset to whole mount
+              </button>
+            </>
+          )}
+        </p>
+      </form>
+
+      {path !== null && !atLibraryRoot && (
+        <div className="library-root-bar">
           <button type="button" className="link" onClick={() => setLibraryFolder(path)}>
             Set current folder as library
           </button>
-        )}
-        {libraryRoot && (
-          <button type="button" className="link" onClick={() => setLibraryFolder("")}>
-            Reset to whole mount
-          </button>
-        )}
-      </div>
+        </div>
+      )}
 
       <nav className="breadcrumb" aria-label="Folder path">
         {breadcrumbs(path || "").map((crumb, index, all) => (
