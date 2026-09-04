@@ -1,4 +1,5 @@
 from layout import (
+    _fuzzy_present,
     _looks_like_math,
     _looks_like_prose,
     _rows_in_order,
@@ -137,3 +138,44 @@ def test_recover_is_a_no_op_when_nothing_was_dropped():
     ])
     markdown = "first sentence of the paragraph second sentence of the paragraph"
     assert recover_dropped_text(page, markdown) == markdown
+
+
+def test_fuzzy_present_matches_a_single_corrupted_character():
+    markdown_signature = _signature("the master of all mathematical trades")
+    # "All" misread as "A I" — one word split into two by a stray glyph.
+    corrupted_signature = _signature("the master of a i mathematical trades")
+    assert _fuzzy_present(corrupted_signature, markdown_signature)
+
+
+def test_fuzzy_present_rejects_genuinely_different_text():
+    markdown_signature = _signature("the master of all mathematical trades")
+    assert not _fuzzy_present(_signature("a completely unrelated sentence here"), markdown_signature)
+
+
+def test_recover_does_not_duplicate_a_short_subtitle_corrupted_by_a_stray_glyph():
+    # Reproduces the reported bug: a decorative rule near a title page
+    # bleeds a stray character into the raw text PyMuPDF reads for the
+    # subtitle just below it, so it no longer matches the correctly
+    # extracted markdown by exact substring — but it IS already there.
+    page = FakePage([
+        line("The Extraordinary Sums of Leonhard Euler (1734)", 60, 40, 500, 60),
+        line("The Master of A I Mathematical Trades", 60, 90, 400, 104),
+    ])
+    markdown = "The Extraordinary Sums of Leonhard Euler (1734)\n\nThe Master of All Mathematical Trades"
+    recovered = recover_dropped_text(page, markdown)
+    assert recovered == markdown
+    assert recovered.count("Mathematical Trades") == 1
+
+
+def test_recover_still_catches_a_genuinely_dropped_short_prose_line():
+    # The fuzzy check must stay scoped to near-misses — a short line with no
+    # resemblance to anything already in the markdown is really missing, and
+    # should still be spliced back in as before.
+    page = FakePage([
+        line("It happened in Basel.", 55, 40, 300, 52),
+        line("The war delayed the printing entirely.", 55, 62, 400, 74),
+        line("Publication followed in due course.", 55, 84, 380, 96),
+    ])
+    markdown = "It happened in Basel.\n\nPublication followed in due course."
+    recovered = recover_dropped_text(page, markdown)
+    assert "The war delayed the printing entirely." in recovered
