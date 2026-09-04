@@ -322,6 +322,73 @@ def test_folder_ingestion_indexes_each_file_and_reports_progress(service, tmp_pa
     assert len(job["files"]) == 2
     assert {entry["status"] for entry in job["files"]} == {"indexed"}
 
+    # Folder ingest references each PDF in place — nothing is copied into
+    # DOCUMENTS_DIR, and every record carries its path relative to the root.
+    assert not any(module.DOCUMENTS_DIR.glob("*.pdf"))
+    docs = client.get("/documents").json()["documents"]
+    assert {doc["source_path"] for doc in docs} == {"one.pdf", "two.pdf"}
+
+
+def test_folder_ingestion_recurses_into_subfolders(service, tmp_path):
+    module, client, _indexed = service
+    library = tmp_path / "library"
+    library.mkdir(exist_ok=True)
+    (library / "Papers" / "1988").mkdir(parents=True)
+    (library / "Papers" / "1988" / "morris-thorne.pdf").write_bytes(
+        make_pdf("Wormholes in spacetime and their use for interstellar travel.")
+    )
+    (library / "loose.pdf").write_bytes(make_pdf("A loose absurd note."))
+
+    response = client.post("/admin/ingest-folder", json={"folder": "."})
+    job_id = response.json()["job_id"]
+    deadline = time.time() + 5
+    job = None
+    while time.time() < deadline:
+        job = client.get(f"/admin/ingest-status/{job_id}").json()
+        if job["state"] in {"done", "partial", "error"}:
+            break
+        time.sleep(0.05)
+
+    assert job["state"] == "done"
+    assert {entry["file"] for entry in job["files"]} == {
+        "Papers/1988/morris-thorne.pdf",
+        "loose.pdf",
+    }
+
+
+def test_deleting_a_referenced_document_leaves_the_source_on_disk(service, tmp_path):
+    module, client, _indexed = service
+    library = tmp_path / "library"
+    library.mkdir(exist_ok=True)
+    source = library / "keep-me.pdf"
+    source.write_bytes(make_pdf("One must imagine Sisyphus happy."))
+
+    created = client.post("/library/import", json={"path": "keep-me.pdf"}).json()
+    doc_id = created["document_id"]
+    wait_for_status(client, doc_id, "indexed")
+
+    assert client.delete(f"/documents/{doc_id}").status_code == 200
+    assert client.get(f"/documents/{doc_id}").status_code == 404
+    assert source.exists()  # the original PDF was never ours to delete
+
+
+def test_rebuild_reads_a_referenced_document_from_its_source(service, tmp_path):
+    module, client, _indexed = service
+    library = tmp_path / "library"
+    library.mkdir(exist_ok=True)
+    (library / "rebuildable.pdf").write_bytes(
+        make_pdf("Non-Euclidean geometry drops the parallel postulate.")
+    )
+
+    created = client.post("/library/import", json={"path": "rebuildable.pdf"}).json()
+    doc_id = created["document_id"]
+    wait_for_status(client, doc_id, "indexed")
+
+    stale = module.update_metadata(doc_id, pipeline_version=1, index_schema_version=1)
+    rebuilt = module.rebuild_document_artifacts(stale)
+    assert rebuilt["pipeline_version"] == module.PIPELINE_VERSION
+    assert not any(module.DOCUMENTS_DIR.glob("*.pdf"))
+
 
 def test_offline_mode_enables_the_huggingface_offline_flags(service, monkeypatch):
     module, _client, _indexed = service
