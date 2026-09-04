@@ -538,6 +538,19 @@ button:disabled {
   margin-top: 14px;
 }
 
+.library-root-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  margin-bottom: 10px;
+  font-size: 0.8rem;
+}
+
+.library-root-bar strong {
+  color: #2f4941;
+}
+
 .breadcrumb {
   display: flex;
   flex-wrap: wrap;
@@ -629,6 +642,11 @@ button.link {
 
 .file-row .secondary {
   flex: none;
+}
+
+.file-row .link {
+  flex: none;
+  font-size: 0.76rem;
 }
 
 /* Ask mode -------------------------------------------------------------- */

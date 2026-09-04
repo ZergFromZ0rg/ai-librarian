@@ -438,6 +438,56 @@ def read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+# Small persisted app settings -- currently just which folder under INGEST_ROOT
+# (the /library mount) counts as "the" library. Lets a broadly-mounted host
+# path (a whole home directory, an external drive) be narrowed to the actual
+# collection entirely from the website, with no docker-compose/.env edit or
+# restart: click a folder in Browse, "Set as library folder", done.
+SETTINGS_PATH = DATA_DIR / "settings.json"
+SETTINGS_LOCK = threading.RLock()
+_SETTINGS_CACHE: Optional[dict] = None
+
+
+def _load_settings() -> dict:
+    global _SETTINGS_CACHE
+    with SETTINGS_LOCK:
+        if _SETTINGS_CACHE is None:
+            try:
+                _SETTINGS_CACHE = read_json(SETTINGS_PATH)
+            except (OSError, json.JSONDecodeError):
+                _SETTINGS_CACHE = {}
+        return dict(_SETTINGS_CACHE)
+
+
+def _save_settings(changes: dict) -> dict:
+    global _SETTINGS_CACHE
+    with SETTINGS_LOCK:
+        current = _load_settings()
+        current.update(changes)
+        atomic_write_json(SETTINGS_PATH, current)
+        _SETTINGS_CACHE = current
+        return dict(current)
+
+
+def library_root_path() -> Path:
+    """The effective library root: the persisted ``library_root`` setting if
+    it still resolves to a real folder under INGEST_ROOT, else INGEST_ROOT
+    itself (today's behaviour, and the fallback if the chosen folder was
+    since renamed or removed)."""
+    rel = (_load_settings().get("library_root") or "").strip()
+    if not rel:
+        return INGEST_ROOT
+    try:
+        resolved = (INGEST_ROOT / rel).resolve(strict=True)
+    except OSError:
+        return INGEST_ROOT
+    if resolved != INGEST_ROOT and INGEST_ROOT not in resolved.parents:
+        return INGEST_ROOT
+    if not resolved.is_dir():
+        return INGEST_ROOT
+    return resolved
+
+
 def validate_doc_id(doc_id: str) -> str:
     if not DOC_ID_PATTERN.fullmatch(doc_id):
         raise HTTPException(status_code=404, detail="document not found")
@@ -913,7 +963,9 @@ def ingest_worker() -> None:
 
 
 def _auto_ingest_scan() -> int:
-    """Reference-import every PDF under INGEST_ROOT that isn't indexed yet.
+    """Reference-import every PDF under the effective library root (the
+    persisted ``library_root`` setting, or all of INGEST_ROOT if unset) that
+    isn't indexed yet.
 
     Cheap on a re-run: only files whose relative path isn't already a
     ``source_path`` in the metadata store are hashed at all, so a large,
@@ -922,7 +974,7 @@ def _auto_ingest_scan() -> int:
     """
     known = {doc["source_path"] for doc in list_metadata() if doc.get("source_path")}
     imported = 0
-    for pdf in _library_pdfs(INGEST_ROOT):
+    for pdf in _library_pdfs(library_root_path()):
         rel = str(pdf.relative_to(INGEST_ROOT))
         if rel in known:
             continue
@@ -2064,6 +2116,43 @@ async def library_import(request: LibraryImportRequest):
         return JSONResponse({**metadata, "deduplicated": True}, status_code=200)
     enqueue_index(IndexTask(metadata["document_id"]))
     return JSONResponse(metadata, status_code=201)
+
+
+class LibraryRootRequest(BaseModel):
+    # Unlike LibraryImportRequest, "" is valid here -- it means "the whole
+    # /library mount", used to reset a previously-narrowed root.
+    path: str = Field("", max_length=1024)
+
+
+@app.get("/library/root")
+async def get_library_root():
+    """The folder auto-ingest scans and Browse opens to by default: the
+    persisted library_root setting, narrowed from the full /library mount by
+    a "Set as library folder" click, or "" if never set."""
+
+    def build() -> dict:
+        requested = (_load_settings().get("library_root") or "").strip()
+        effective = library_root_path()
+        effective_rel = "" if effective == INGEST_ROOT else str(effective.relative_to(INGEST_ROOT))
+        return {"path": effective_rel, "valid": effective_rel == requested}
+
+    return await asyncio.to_thread(build)
+
+
+@app.post("/library/root")
+async def set_library_root(request: LibraryRootRequest):
+    """Narrow (or, with path="", reset) which folder under /library counts as
+    the library -- what auto-ingest scans and where Browse opens by default.
+    Does not itself import anything; the next auto-ingest scan (or a manual
+    Attach/Import in Browse) picks up whatever is there."""
+
+    def build() -> dict:
+        folder = resolve_ingest_folder(request.path)
+        rel = "" if folder == INGEST_ROOT else str(folder.relative_to(INGEST_ROOT))
+        _save_settings({"library_root": rel})
+        return {"path": rel}
+
+    return await asyncio.to_thread(build)
 
 
 @app.get("/health/live")
