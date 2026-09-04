@@ -392,7 +392,12 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
       <div className="chat-header ask-header">
         <div>
           <h2>Ask your library</h2>
-          <p>Answers are written from your documents and cite the passages they draw on.</p>
+          <p>
+            Answers are written from your documents and cite the passages they draw on.
+            {conversation.length > 0 && (
+              <> Each question adds a new answer below — it doesn't replace the ones above.</>
+            )}
+          </p>
         </div>
         <div className="ask-header-controls">
           {!noModels && (
