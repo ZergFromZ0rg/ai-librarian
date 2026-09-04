@@ -96,7 +96,9 @@ function citationRehype() {
 function focusSource(turnIndex, n) {
   const el = document.getElementById(`ask-src-${turnIndex}-${n}`);
   if (!el) return;
-  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  // Instant, not smooth: smooth scrollIntoView silently no-ops in some
+  // embedded/automated browser contexts. The flash is the "you moved" cue.
+  el.scrollIntoView({ block: "center" });
   el.classList.remove("flash");
   void el.offsetWidth; // restart the animation if it is still running
   el.classList.add("flash");
