@@ -122,3 +122,4 @@ def service(tmp_path, monkeypatch):
         yield module, client, indexed
 
     module.STORE.close()
+    module.CONVERSATIONS.close()

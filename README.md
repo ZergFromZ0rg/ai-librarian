@@ -167,9 +167,11 @@ If `MAX_UPLOAD_MB` is raised above 100, also update `client_max_body_size` in `u
 
 Ask mode turns the retrieved passages into a written answer with `[n]` citations back to the
 source pages. Retrieval is unchanged — the same hybrid search and reranker feed the model —
-so the answer is only as good as what search finds, and the "view source" links let you
-check every claim against the original page. The reader picks the model from a dropdown in
-the Ask tab; the choice is remembered in the browser.
+so the answer is only as good as what search finds. Each `[n]` in the answer is clickable
+and jumps to the passage card it cites; every card has a "view source" link to the original
+page. The reader picks the model from a dropdown in the Ask tab; the choice is remembered
+in the browser. Conversations are **saved on the server** — the **Chat** picker in the Ask
+tab lists them, and re-opening one restores the full thread with its sources.
 
 Ask mode appears **when at least one model is available**. Models come from two places:
 
@@ -316,6 +318,7 @@ Everything the library needs lives under `data/`:
 | --- | --- | --- |
 | `data/app/library.db` | document metadata and indexing state | no |
 | `data/app/documents/` | the uploaded PDFs (the only copy) | no |
+| `data/app/conversations.db` | saved Ask-mode conversations | no (but not essential) |
 | `data/app/extracted/`, `data/app/chunks/` | extracted text and passages | yes, from the PDFs |
 | `data/app/jobs/`, `data/app/logs/` | folder-import state, search log | not needed |
 | `data/qdrant/` | the vector index | yes, by re-indexing |
@@ -345,6 +348,7 @@ Important endpoints:
 - `POST /search` — semantic retrieval (set `rerank: true` to reorder and relevance-gate; `rerank_min_score`, `fusion`, and `dense_weight` override the server defaults per request)
 - `POST /ask` — retrieve, then stream a grounded answer as Server-Sent Events (`token` chunks, `progress` in thorough mode, then one `sources` event); body: `{"question", "history": [{"role", "content"}], "model": "provider:model", "mode": "quick"|"thorough"}`. Returns 503 when no model is available. See [Ask mode](#ask-mode)
 - `GET /ask/models` — models the reader may pick, plus the current default
+- `GET|POST /conversations`, `GET|PUT|DELETE /conversations/{id}` — saved Ask conversations (server-side; the UI's **Chat** picker)
 - `POST /admin/ingest-folder` — import the mounted library folder
 - `GET /admin/search-log` — recent queries with their returned pages and scores
 - `GET /health/live` — process liveness
@@ -385,6 +389,16 @@ npm run build
 - Front and back matter — tables of contents, back-of-book indexes, bibliographies — is detected by shape and dropped before indexing, so those keyword-dense pages don't outrank real passages. Detection is conservative and skips nothing when it would flag more than 40% of a document.
 - Layout extraction can preserve mathematical symbols only when the PDF exposes usable text or glyph information. Equations stored solely as images are not recovered.
 - Chunk sizes are measured with the embedding model's own tokenizer (loaded on its own, without the model). If that tokenizer cannot be loaded — no `transformers`, or offline before it is cached — the chunker falls back to a conservative regex estimate and logs a warning.
-- [Ask mode](#ask-mode) answers are only as good as what retrieval surfaces and what the chosen model can do with it — a small local model will be weaker than a frontier cloud model. Answers are grounded in the retrieved passages and cite them, but always spot-check the cited pages. The model choice and conversation history are kept in the browser, not on the server.
+- [Ask mode](#ask-mode) answers are only as good as what retrieval surfaces and what the chosen model can do with it — a small local model will be weaker than a frontier cloud model. Answers are grounded in the retrieved passages and cite them, but always spot-check the cited pages.
 - The document service intentionally runs as one process. The indexing backlog is durable (the worker pulls `queued` documents straight from SQLite, so a restart or a full-library re-index never loses or fails work), but the folder-import queue is still in-process. Moving to Redis or another external worker system would be the next step for horizontal scaling.
-- Search returns relevant source passages; it does not generate or summarize answers.
+
+## Roadmap
+
+- **Tier 3 — agentic retrieval.** Give the answering model a `search` tool and let it run
+  its own follow-up queries when it notices a gap in what it was handed, instead of
+  answering from a single retrieval pass. This is the biggest remaining lever on answer
+  quality for hard, multi-part questions. Deferred pending whether [Thorough mode](#ask-mode)
+  proves insufficient in practice — it is a real feature (tool loop, step limit, streamed
+  intermediate searches), not a tweak.
+- Answer-quality regression coverage beyond the seed set in
+  [`eval/answers.jsonl`](document-service/eval/README.md#answer-quality-harness).
