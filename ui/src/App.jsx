@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 
 import AskPanel from "./AskPanel.jsx";
+import LibraryBrowser from "./LibraryBrowser.jsx";
 import ResultCard from "./ResultCard.jsx";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
@@ -120,7 +121,7 @@ function SourceViewer({ source, onClose }) {
 export default function App() {
   const [health, setHealth] = useState(null);
   const [documents, setDocuments] = useState([]);
-  const [folder, setFolder] = useState(".");
+  const [libraryTab, setLibraryTab] = useState("browse");
   const [job, setJob] = useState(null);
   const [notice, setNotice] = useState("");
   const [noticeError, setNoticeError] = useState(false);
@@ -233,23 +234,6 @@ export default function App() {
     }
   }
 
-  async function ingestFolder() {
-    setNotice("Queueing folder ingestion…");
-    setNoticeError(false);
-    try {
-      const result = await api("/admin/ingest-folder", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folder: folder.trim() || "." }),
-      });
-      setJob(result);
-      setNotice(`Folder job ${result.job_id} is queued.`);
-    } catch (error) {
-      setNotice(error.message);
-      setNoticeError(true);
-    }
-  }
-
   async function retryDocument(documentId) {
     try {
       await api(`/documents/${documentId}/retry`, { method: "POST" });
@@ -325,30 +309,72 @@ export default function App() {
             <span className="muted">{indexedCount} ready · {documents.length} total</span>
           </div>
 
-          <label className="drop-zone">
-            <input
-              type="file"
-              multiple
-              accept="application/pdf,.pdf"
-              disabled={uploading}
-              onChange={(event) => {
-                uploadFiles(event.target.files);
-                event.target.value = "";
-              }}
-            />
-            <strong>{uploading ? "Uploading…" : "Choose PDF files"}</strong>
-            <span>Files are indexed locally on your server.</span>
-          </label>
-
-          <div className="field-row">
-            <input
-              aria-label="Folder inside the mounted library"
-              value={folder}
-              onChange={(event) => setFolder(event.target.value)}
-              placeholder="Folder inside /library"
-            />
-            <button className="secondary" type="button" onClick={ingestFolder}>Import</button>
+          <div className="panel-tabs library-tabs" role="tablist">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={libraryTab === "browse"}
+              className={libraryTab === "browse" ? "active" : ""}
+              onClick={() => setLibraryTab("browse")}
+            >
+              Browse
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={libraryTab === "indexed"}
+              className={libraryTab === "indexed" ? "active" : ""}
+              onClick={() => setLibraryTab("indexed")}
+            >
+              Indexed{documents.length ? ` (${documents.length})` : ""}
+            </button>
           </div>
+
+          {libraryTab === "browse" ? (
+            <>
+              <label className="drop-zone">
+                <input
+                  type="file"
+                  multiple
+                  accept="application/pdf,.pdf"
+                  disabled={uploading}
+                  onChange={(event) => {
+                    uploadFiles(event.target.files);
+                    event.target.value = "";
+                  }}
+                />
+                <strong>{uploading ? "Uploading…" : "Upload PDF files"}</strong>
+                <span>Copied onto the server. Or import files already on disk below.</span>
+              </label>
+
+              <LibraryBrowser apiBase={API_BASE} onImported={refreshDocuments} onJob={setJob} />
+            </>
+          ) : (
+            <div className="document-list">
+              {documents.length === 0 && <p className="muted">Nothing indexed yet. Import a PDF from the Browse tab.</p>}
+              {documents.map((document) => (
+                <article className="document-card" key={document.document_id}>
+                  <div className="document-name" title={document.filename}>{document.filename}</div>
+                  <div className="document-meta">
+                    <span className={`badge ${document.indexing_status}`}>{document.indexing_status}</span>
+                    <span>{document.pages} pages</span>
+                    <span>{document.chunks} chunks</span>
+                  </div>
+                  {document.source_path && (
+                    <div className="document-meta"><span title={document.source_path}>↪ {document.source_path}</span></div>
+                  )}
+                  {document.indexing_error && <div className="status-message error">{document.indexing_error}</div>}
+                  {document.extraction_notes && <div className="status-message">{document.extraction_notes}</div>}
+                  <div className="document-actions">
+                    {document.indexing_status === "error" && (
+                      <button className="secondary" type="button" onClick={() => retryDocument(document.document_id)}>Retry</button>
+                    )}
+                    <button className="danger" type="button" onClick={() => removeDocument(document)}>Remove</button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
 
           {notice && <div className={`status-message ${noticeError ? "error" : ""}`}>{notice}</div>}
 
@@ -357,28 +383,6 @@ export default function App() {
               {job.files.filter((file) => ["indexed", "duplicate"].includes(file.status)).length}/{job.files.length} files ready
             </div>
           )}
-
-          <div className="document-list">
-            {documents.length === 0 && <p className="muted">No documents yet. Add a PDF to begin.</p>}
-            {documents.map((document) => (
-              <article className="document-card" key={document.document_id}>
-                <div className="document-name" title={document.filename}>{document.filename}</div>
-                <div className="document-meta">
-                  <span className={`badge ${document.indexing_status}`}>{document.indexing_status}</span>
-                  <span>{document.pages} pages</span>
-                  <span>{document.chunks} chunks</span>
-                </div>
-                {document.indexing_error && <div className="status-message error">{document.indexing_error}</div>}
-                {document.extraction_notes && <div className="status-message">{document.extraction_notes}</div>}
-                <div className="document-actions">
-                  {document.indexing_status === "error" && (
-                    <button className="secondary" type="button" onClick={() => retryDocument(document.document_id)}>Retry</button>
-                  )}
-                  <button className="danger" type="button" onClick={() => removeDocument(document)}>Remove</button>
-                </div>
-              </article>
-            ))}
-          </div>
         </section>
 
         <section className="panel chat-panel">

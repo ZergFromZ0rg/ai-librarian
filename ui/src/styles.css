@@ -524,6 +524,111 @@ button:disabled {
   font-weight: 600;
 }
 
+/* Library browser ----------------------------------------------------- */
+
+.library-tabs {
+  margin: -4px 0 14px;
+  padding: 0 0 0;
+  background: none;
+}
+
+.library-browser {
+  margin-top: 14px;
+}
+
+.breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 10px;
+  font-size: 0.82rem;
+}
+
+.breadcrumb .breadcrumb-sep {
+  color: #a7afab;
+}
+
+.breadcrumb .breadcrumb-current {
+  color: #2f4941;
+  font-weight: 600;
+}
+
+button.link {
+  border: none;
+  background: none;
+  padding: 0;
+  color: #2b6654;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.file-list {
+  display: grid;
+  gap: 4px;
+  max-height: 42vh;
+  overflow-y: auto;
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #e3e7e4;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.8);
+  padding: 8px 10px;
+}
+
+.file-row .file-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+  border: none;
+  background: none;
+  padding: 0;
+  color: #2f4941;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.file-row .file-name.static {
+  cursor: default;
+}
+
+.file-row .file-name:not(.static):hover .file-label {
+  text-decoration: underline;
+}
+
+.file-row .file-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-row .file-icon {
+  flex: none;
+}
+
+.file-row .file-detail {
+  flex: none;
+  color: #8a918d;
+  font-size: 0.76rem;
+}
+
+.file-row .badge {
+  flex: none;
+  font-size: 0.72rem;
+}
+
+.file-row .secondary {
+  flex: none;
+}
+
 /* Ask mode -------------------------------------------------------------- */
 
 .ask-header {

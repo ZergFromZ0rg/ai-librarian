@@ -10,7 +10,6 @@ import os
 import queue
 import re
 import secrets
-import shutil
 import threading
 import time
 import uuid
@@ -628,6 +627,18 @@ def hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def pdf_path(metadata: dict) -> Path:
+    """Where this document's PDF actually lives.
+
+    Browser folder imports reference the original file in place under
+    ``INGEST_ROOT``; uploads are copied into ``DOCUMENTS_DIR``.
+    """
+    source = (metadata.get("source_path") or "").strip()
+    if source:
+        return INGEST_ROOT / source
+    return DOCUMENTS_DIR / metadata["stored_filename"]
+
+
 def build_document_artifacts(
     stored_path: Path, filename: str, doc_id: str
 ) -> tuple[int, List[dict], int, Optional[str]]:
@@ -716,9 +727,9 @@ def build_document_artifacts(
 
 def rebuild_document_artifacts(metadata: dict) -> dict:
     doc_id = metadata["document_id"]
-    stored_path = DOCUMENTS_DIR / metadata["stored_filename"]
+    stored_path = pdf_path(metadata)
     if not stored_path.exists():
-        raise FileNotFoundError("stored PDF is missing; upload the document again")
+        raise FileNotFoundError("the source PDF is missing (moved, or its disk is unmounted)")
     page_count, chunks, group_count, extraction_notes = build_document_artifacts(
         stored_path, metadata["filename"], doc_id
     )
@@ -735,8 +746,17 @@ def rebuild_document_artifacts(metadata: dict) -> dict:
     )
 
 
-def create_document(stored_path: Path, filename: str, content_sha256: str) -> dict:
-    doc_id = stored_path.stem
+def create_document(
+    stored_path: Path,
+    filename: str,
+    content_sha256: str,
+    *,
+    doc_id: Optional[str] = None,
+    source_path: Optional[str] = None,
+) -> dict:
+    """Extract + record one document. ``source_path`` (relative to
+    ``INGEST_ROOT``) means the PDF is referenced in place, not owned by us."""
+    doc_id = doc_id or generate_id()
     try:
         page_count, chunks, group_count, extraction_notes = build_document_artifacts(
             stored_path, filename, doc_id
@@ -750,6 +770,7 @@ def create_document(stored_path: Path, filename: str, content_sha256: str) -> di
             "title": title_from_filename(filename),
             "stored_filename": stored_path.name,
             "content_sha256": content_sha256,
+            "source_path": source_path,
             "uploaded_at": now,
             "updated_at": now,
             "pages": page_count,
@@ -768,39 +789,61 @@ def create_document(stored_path: Path, filename: str, content_sha256: str) -> di
         }
         return STORE.create(metadata)
     except Exception:
-        stored_path.unlink(missing_ok=True)
+        if source_path is None:  # only ever delete a PDF we own
+            stored_path.unlink(missing_ok=True)
         (EXTRACTED_DIR / f"{doc_id}.json").unlink(missing_ok=True)
         (CHUNKS_DIR / f"{doc_id}.json").unlink(missing_ok=True)
         STORE.delete(doc_id)
         raise
 
 
-def copy_folder_document(source: Path) -> tuple[dict, bool]:
+def import_library_file(rel_path: str) -> tuple[dict, bool]:
+    """Reference a PDF sitting under INGEST_ROOT (no copy). Returns
+    ``(metadata, deduplicated)``."""
+    source = resolve_library_path(rel_path)
+    if not source.is_file() or source.suffix.lower() != ".pdf":
+        raise HTTPException(status_code=400, detail="not a PDF file inside the library")
     content_sha256 = hash_file(source)
     duplicate = find_duplicate(content_sha256)
     if duplicate:
         return duplicate, True
-
-    doc_id = generate_id()
-    stored_path = DOCUMENTS_DIR / f"{doc_id}.pdf"
-    with source.open("rb") as source_handle, stored_path.open("wb") as destination_handle:
-        shutil.copyfileobj(source_handle, destination_handle, length=1024 * 1024)
-    return create_document(stored_path, source.name, content_sha256), False
+    rel = str(source.relative_to(INGEST_ROOT))
+    return create_document(source, source.name, content_sha256, source_path=rel), False
 
 
-def resolve_ingest_folder(requested: Optional[str]) -> Path:
+def resolve_library_path(requested: Optional[str]) -> Path:
+    """Resolve a path relative to INGEST_ROOT, refusing anything that escapes it.
+    The path must exist (file or directory)."""
     candidate = INGEST_ROOT if not requested else Path(requested)
     if not candidate.is_absolute():
         candidate = INGEST_ROOT / candidate
     try:
         resolved = candidate.resolve(strict=True)
     except OSError as exc:
-        raise HTTPException(status_code=400, detail="ingest folder does not exist") from exc
+        raise HTTPException(status_code=404, detail="path does not exist") from exc
     if resolved != INGEST_ROOT and INGEST_ROOT not in resolved.parents:
-        raise HTTPException(status_code=403, detail="folder must be inside the configured ingest root")
+        raise HTTPException(status_code=403, detail="path must be inside the library root")
+    return resolved
+
+
+def resolve_ingest_folder(requested: Optional[str]) -> Path:
+    resolved = resolve_library_path(requested)
     if not resolved.is_dir():
         raise HTTPException(status_code=400, detail="ingest path is not a folder")
     return resolved
+
+
+def _library_pdfs(folder: Path) -> List[Path]:
+    """Every ``.pdf`` under ``folder``, recursively, skipping dot-files and
+    anything inside a dot-directory. Sorted for stable job ordering."""
+    out = []
+    for path in folder.rglob("*.pdf"):
+        rel_parts = path.relative_to(folder).parts
+        if any(part.startswith(".") for part in rel_parts):
+            continue
+        if path.is_file():
+            out.append(path)
+    return sorted(out)
 
 
 def ingest_worker() -> None:
@@ -815,15 +858,16 @@ def ingest_worker() -> None:
                 job["state"] = "processing"
                 save_job(job)
 
-            files = sorted(path for path in Path(folder).iterdir() if path.is_file() and path.suffix.lower() == ".pdf")
+            files = _library_pdfs(Path(folder))
             for pdf in files:
+                rel = str(pdf.relative_to(INGEST_ROOT))
                 with JOB_STATUS_LOCK:
                     job = JOB_STATUS[job_id]
                     file_index = len(job["files"])
-                    job["files"].append({"file": pdf.name, "status": "processing"})
+                    job["files"].append({"file": rel, "status": "processing"})
                     save_job(job)
                 try:
-                    metadata, duplicate = copy_folder_document(pdf)
+                    metadata, duplicate = import_library_file(rel)
                     with JOB_STATUS_LOCK:
                         entry = JOB_STATUS[job_id]["files"][file_index]
                         entry["document_id"] = metadata["document_id"]
@@ -886,7 +930,7 @@ def recover_interrupted_work() -> None:
             if not needs_index:
                 continue
             source_ready = (
-                (DOCUMENTS_DIR / metadata["stored_filename"]).exists()
+                pdf_path(metadata).exists()
                 if stale_pipeline
                 else (CHUNKS_DIR / f"{doc_id}.json").exists()
             )
@@ -1350,7 +1394,9 @@ async def upload_document(file: UploadFile = File(...)):
         return JSONResponse({**duplicate, "deduplicated": True}, status_code=200)
 
     try:
-        metadata = await asyncio.to_thread(create_document, stored_path, Path(file.filename).name, digest.hexdigest())
+        metadata = await asyncio.to_thread(
+            create_document, stored_path, Path(file.filename).name, digest.hexdigest(), doc_id=doc_id
+        )
     except ValueError as exc:
         # A deliberate, user-facing rejection from build_document_artifacts
         # (no extractable text, corrupt OCR layer, no searchable chunks).
@@ -1382,9 +1428,9 @@ async def get_chunks(doc_id: str):
 
 def _stored_pdf_path(doc_id: str) -> Path:
     metadata = read_metadata(doc_id)
-    stored = DOCUMENTS_DIR / metadata["stored_filename"]
+    stored = pdf_path(metadata)
     if not stored.exists():
-        raise HTTPException(status_code=404, detail="the stored PDF is missing")
+        raise HTTPException(status_code=404, detail="the source PDF is missing")
     return stored
 
 
@@ -1503,11 +1549,12 @@ async def delete_document(doc_id: str):
     def delete_all() -> None:
         with get_document_lock(doc_id):
             delete_document_vectors(doc_id)
-            for path in (
-                DOCUMENTS_DIR / metadata["stored_filename"],
-                EXTRACTED_DIR / f"{doc_id}.json",
-                CHUNKS_DIR / f"{doc_id}.json",
-            ):
+            artifacts = [EXTRACTED_DIR / f"{doc_id}.json", CHUNKS_DIR / f"{doc_id}.json"]
+            # Only remove the PDF itself when we own it (an upload). A
+            # referenced library file is left exactly where the reader put it.
+            if not (metadata.get("source_path") or "").strip():
+                artifacts.append(DOCUMENTS_DIR / metadata["stored_filename"])
+            for path in artifacts:
                 path.unlink(missing_ok=True)
             STORE.delete(doc_id)
 
@@ -1848,9 +1895,8 @@ async def ingest_status(job_id: str):
     return status
 
 
-@app.post("/admin/ingest-folder")
-async def ingest_folder(request: IngestFolderRequest):
-    folder = resolve_ingest_folder(request.folder)
+def _start_folder_ingest(folder: Path) -> dict:
+    """Register and enqueue a recursive ingest job for `folder`."""
     job_id = generate_id()
     now = utc_now()
     job = {
@@ -1872,7 +1918,93 @@ async def ingest_folder(request: IngestFolderRequest):
             job["error"] = "ingest queue is full; try again later"
             save_job(job)
         raise HTTPException(status_code=503, detail=job["error"]) from exc
-    return JSONResponse({"job_id": job_id, "state": "queued"}, status_code=202)
+    return job
+
+
+@app.post("/admin/ingest-folder")
+async def ingest_folder(request: IngestFolderRequest):
+    folder = resolve_ingest_folder(request.folder)
+    return JSONResponse({**_start_folder_ingest(folder), "state": "queued"}, status_code=202)
+
+
+@app.get("/library/tree")
+async def library_tree(path: str = Query("", max_length=1024)):
+    """One level of the mounted library: sub-folders (with a direct PDF count)
+    and PDF files (marked when already indexed). Everything is relative to
+    INGEST_ROOT; `path=""` is the root."""
+
+    def build() -> dict:
+        folder = resolve_ingest_folder(path)
+        by_source = {
+            (doc.get("source_path") or ""): doc
+            for doc in list_metadata()
+            if doc.get("source_path")
+        }
+        dirs, files = [], []
+        with os.scandir(folder) as scan:
+            for entry in scan:
+                if entry.name.startswith("."):
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    try:
+                        pdf_count = sum(
+                            1
+                            for child in os.scandir(entry.path)
+                            if not child.name.startswith(".")
+                            and child.is_file()
+                            and child.name.lower().endswith(".pdf")
+                        )
+                    except OSError:
+                        pdf_count = None
+                    dirs.append({"name": entry.name, "type": "dir", "pdf_count": pdf_count})
+                elif entry.is_file() and entry.name.lower().endswith(".pdf"):
+                    rel = str(Path(entry.path).resolve().relative_to(INGEST_ROOT))
+                    doc = by_source.get(rel)
+                    files.append({
+                        "name": entry.name,
+                        "type": "file",
+                        "size": entry.stat().st_size,
+                        "indexed": doc is not None,
+                        "document_id": doc["document_id"] if doc else None,
+                    })
+        rel_here = "" if folder == INGEST_ROOT else str(folder.relative_to(INGEST_ROOT))
+        parent = None if not rel_here else str(Path(rel_here).parent).replace(".", "")
+        return {
+            "path": rel_here,
+            "parent": parent,
+            "entries": sorted(dirs, key=lambda d: d["name"].lower())
+            + sorted(files, key=lambda f: f["name"].lower()),
+        }
+
+    return await asyncio.to_thread(build)
+
+
+class LibraryImportRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=1024)
+
+
+@app.post("/library/import")
+async def library_import(request: LibraryImportRequest):
+    """Import one PDF (referenced in place) or every PDF under a folder."""
+    target = resolve_library_path(request.path)
+    if target.is_dir():
+        return JSONResponse(
+            {**_start_folder_ingest(target), "state": "queued"}, status_code=202
+        )
+    try:
+        metadata, deduplicated = await asyncio.to_thread(
+            import_library_file, str(target.relative_to(INGEST_ROOT))
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise _sanitized_http_error(422, "import failed", exc, log_context=request.path) from exc
+    if deduplicated:
+        return JSONResponse({**metadata, "deduplicated": True}, status_code=200)
+    enqueue_index(IndexTask(metadata["document_id"]))
+    return JSONResponse(metadata, status_code=201)
 
 
 @app.get("/health/live")

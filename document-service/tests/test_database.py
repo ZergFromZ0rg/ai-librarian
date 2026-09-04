@@ -105,18 +105,22 @@ def test_extraction_notes_round_trips(store):
     assert updated["extraction_notes"] is None
 
 
-def test_migration_adds_extraction_notes_to_an_older_database(tmp_path):
+def test_migration_adds_later_columns_to_an_older_database(tmp_path):
     import sqlite3
 
     db_path = tmp_path / "older.db"
     legacy = sqlite3.connect(db_path)
-    # The schema as it stood before the extraction_notes column was added.
-    legacy.executescript(
-        SCHEMA.replace("    extraction_notes      TEXT\n", "").replace(
+    # The schema as it stood before extraction_notes / source_path were added:
+    # drop both trailing columns and the now-dangling comma.
+    old_schema = (
+        SCHEMA.replace("    extraction_notes      TEXT,\n", "")
+        .replace("    source_path           TEXT\n", "")
+        .replace(
             "    index_schema_version  INTEGER NOT NULL DEFAULT 0,\n",
             "    index_schema_version  INTEGER NOT NULL DEFAULT 0\n",
         )
     )
+    legacy.executescript(old_schema)
     legacy.execute(
         "INSERT INTO documents "
         "(document_id, filename, stored_filename, content_sha256, uploaded_at, updated_at) "
@@ -128,8 +132,9 @@ def test_migration_adds_extraction_notes_to_an_older_database(tmp_path):
     store = MetadataStore(db_path)
     try:
         columns = {row[1] for row in store._conn.execute("PRAGMA table_info(documents)")}
-        assert "extraction_notes" in columns
-        assert store.get("aaaaaaaaaaaa")["extraction_notes"] is None
+        assert {"extraction_notes", "source_path"} <= columns
+        row = store.get("aaaaaaaaaaaa")
+        assert row["extraction_notes"] is None and row["source_path"] is None
     finally:
         store.close()
 
