@@ -258,15 +258,18 @@ button:disabled {
      breakpoint below reverts to natural, content-sized stacking. */
   height: 100vh;
   margin: 0 auto;
-  padding: 28px;
+  padding: 16px 28px 28px;
 }
 
 .topbar {
   display: flex;
-  align-items: center;
+  /* flex-start, not center: pins the health/settings controls to the actual
+     top-right corner instead of the vertical middle of the (much taller)
+     title beside them. */
+  align-items: flex-start;
   justify-content: space-between;
   gap: 20px;
-  margin-bottom: 24px;
+  margin-bottom: 14px;
 }
 
 .topbar-status {
@@ -313,7 +316,11 @@ button:disabled {
   box-shadow: 0 0 0 4px var(--success-ring);
 }
 
-.theme-toggle {
+.settings-anchor {
+  position: relative;
+}
+
+.settings-trigger {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -323,12 +330,90 @@ button:disabled {
   border-radius: 0;
   background: var(--panel-bg);
   color: var(--muted-strong);
-  font-size: 1rem;
+  font-size: 1.05rem;
   line-height: 1;
 }
 
-.theme-toggle:hover {
+.settings-trigger:hover {
   color: var(--heading);
+}
+
+.settings-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 40;
+  width: min(360px, 90vw);
+  max-height: min(70vh, 640px);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-modal);
+  padding: 16px;
+}
+
+.settings-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  color: var(--heading);
+}
+
+.settings-section {
+  padding: 14px 0;
+  border-top: 1px solid var(--border);
+}
+
+.settings-section:first-of-type {
+  padding-top: 0;
+  border-top: none;
+}
+
+.settings-section h3 {
+  margin: 0 0 8px;
+  color: var(--heading-soft);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.settings-note {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.settings-note strong {
+  color: var(--heading-soft);
+}
+
+.settings-note code {
+  background: var(--code-bg);
+  border-radius: 0;
+  padding: 1px 4px;
+  font-size: 0.85em;
+}
+
+.settings-theme-row {
+  display: flex;
+  gap: 8px;
+}
+
+.settings-theme-option {
+  flex: 1;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-tint-soft);
+  padding: 9px;
+  color: var(--muted-strong);
+  font-size: 0.85rem;
+}
+
+.settings-theme-option.active {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  color: var(--accent-strong);
 }
 
 .layout {
@@ -859,6 +944,79 @@ button:disabled {
   background: none;
 }
 
+.sidebar-section-tabs {
+  margin: -4px 0 16px;
+  padding: 0 0 8px;
+  background: none;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Sidebar: chat history -------------------------------------------------- */
+
+.chat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-list-new {
+  margin-bottom: 8px;
+}
+
+.chat-list-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid transparent;
+}
+
+.chat-list-item:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-tint-soft);
+}
+
+.chat-list-item.active {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+}
+
+.chat-list-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  border: 0;
+  background: none;
+  padding: 9px 10px;
+  color: var(--heading-soft);
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.chat-list-item.active .chat-list-title {
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.chat-list-delete {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 1.05rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chat-list-delete:hover {
+  color: var(--danger);
+}
+
 .library-browser {
   margin-top: 14px;
 }
@@ -1023,11 +1181,22 @@ button.link {
   gap: 12px;
 }
 
+/* Once a conversation has turns, the title/description block is gone (see
+   AskPanel) so this bar is controls-only — shrink its padding to give the
+   thread more room, matching .chat-header when it's likewise gone in Search. */
+.ask-header.compact {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+
 .ask-header-controls {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
+  /* Stays pinned to the right whether or not the title/description sibling
+     is rendered (flex's own space-between only works with two children). */
+  margin-left: auto;
 }
 
 .ask-model-select {
@@ -1059,26 +1228,6 @@ button.link {
   user-select: none;
 }
 
-.ask-keys {
-  border-bottom: 1px solid var(--border);
-  background: var(--surface-tint-solid);
-  padding: 14px 22px 16px;
-}
-
-.ask-keys-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  color: var(--heading);
-}
-
-.ask-keys-note {
-  margin: 4px 0 12px;
-  color: var(--muted);
-  font-size: 0.78rem;
-  max-width: 60ch;
-}
-
 .ask-keys-row {
   display: flex;
   align-items: center;
@@ -1087,7 +1236,7 @@ button.link {
 }
 
 .ask-keys-label {
-  flex: 0 0 150px;
+  flex: 0 0 110px;
   color: var(--ink-soft);
   font-size: 0.85rem;
 }
@@ -1266,6 +1415,15 @@ button.cite:hover {
   .source-close {
     width: 40px;
     height: 40px;
+  }
+
+  .settings-popover {
+    position: fixed;
+    top: 64px;
+    right: 12px;
+    left: 12px;
+    width: auto;
+    max-height: calc(100vh - 88px);
   }
 }
 

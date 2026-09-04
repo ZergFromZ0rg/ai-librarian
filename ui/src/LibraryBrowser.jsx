@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 
 function formatSize(bytes) {
   if (!bytes && bytes !== 0) return "";
@@ -24,21 +24,16 @@ function breadcrumbs(path) {
 
 // A Finder-style walk of the mounted /library volume. Folders and PDFs only;
 // importing references the file in place (no copy) and, for a folder, kicks
-// off a recursive ingest job. The mount itself can be broad (a whole home
-// directory) — "Set as library folder" narrows which subfolder auto-ingest
-// scans and where this browser opens by default, entirely from here, with no
-// docker-compose/.env edit.
-export default function LibraryBrowser({ apiBase, onImported, onJob }) {
+// off a recursive ingest job. Which folder this opens to by default, and the
+// "Set as library" shortcut below, both defer to `libraryRoot` — the actual
+// root-designation form lives in Settings now, this just consumes it.
+export default function LibraryBrowser({ apiBase, onImported, onJob, libraryRoot, settingRoot, onSetLibraryFolder }) {
   const [path, setPath] = useState(null); // null = not yet resolved to the starting folder
-  const [libraryRoot, setLibraryRootState] = useState("");
-  const [hostPath, setHostPath] = useState("");
-  const [pathInput, setPathInput] = useState("");
-  const [settingRoot, setSettingRoot] = useState(false);
   const [tree, setTree] = useState(null);
   const [status, setStatus] = useState("loading");
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState({});
+  const openedRef = useRef(false);
 
   const loadTree = useCallback(
     async (target) => {
@@ -59,25 +54,15 @@ export default function LibraryBrowser({ apiBase, onImported, onJob }) {
     [apiBase],
   );
 
-  // On first mount, open straight to the designated library folder (if one
-  // has been set) instead of the top of a possibly much broader mount.
+  // Open straight to the designated library folder once its value has
+  // resolved (if one has been set), instead of the top of a possibly much
+  // broader mount. Only ever fires once, on that first resolution — a later
+  // root change (from Settings) shouldn't yank the user back while browsing.
   useEffect(() => {
-    let cancelled = false;
-    fetch(`${apiBase}/library/root`)
-      .then((response) => response.json())
-      .then((data) => {
-        if (cancelled) return;
-        setLibraryRootState(data.path || "");
-        setHostPath(data.host_path || "");
-        setPathInput(data.path ? (data.host_path ? `${data.host_path}/${data.path}` : data.path) : "");
-        loadTree(data.path || "");
-      })
-      .catch(() => loadTree(""));
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiBase]);
+    if (openedRef.current || libraryRoot === null) return;
+    openedRef.current = true;
+    loadTree(libraryRoot || "");
+  }, [libraryRoot, loadTree]);
 
   const importEntry = useCallback(
     async (entryPath) => {
@@ -108,46 +93,10 @@ export default function LibraryBrowser({ apiBase, onImported, onJob }) {
     [apiBase, onImported, onJob],
   );
 
-  const setLibraryFolder = useCallback(
-    async (targetPath) => {
-      setNotice("");
-      setError("");
-      setSettingRoot(true);
-      try {
-        const response = await fetch(`${apiBase}/library/root`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: targetPath }),
-        });
-        const data = await response.json();
-        if (!response.ok) {
-          if (response.status === 403) {
-            throw new Error(
-              `That path is outside what this server can see. It can only reach folders inside ${
-                hostPath ? `${hostPath} (its LIBRARY_PATH mount)` : "its /library mount"
-              } — widen that mount in .env and restart to reach elsewhere.`,
-            );
-          }
-          if (response.status === 404) {
-            throw new Error(
-              `That path doesn't exist${hostPath ? ` under ${hostPath}` : ""}. Check the spelling, or that it's really inside what's mounted at /library.`,
-            );
-          }
-          throw new Error(data.detail || `Request failed (${response.status})`);
-        }
-        setLibraryRootState(data.path || "");
-        setPathInput(data.path ? (hostPath ? `${hostPath}/${data.path}` : data.path) : "");
-        setNotice(data.path ? `Library folder set to “${data.path}”.` : "Library folder reset to the whole mount.");
-        await importEntry(data.path || ".");
-        loadTree(data.path || "");
-      } catch (rootError) {
-        setError(rootError.message);
-      } finally {
-        setSettingRoot(false);
-      }
-    },
-    [apiBase, hostPath, importEntry, loadTree],
-  );
+  async function setAsLibrary(entryPath) {
+    const result = await onSetLibraryFolder(entryPath);
+    if (result?.ok) loadTree(entryPath);
+  }
 
   const entries = tree?.entries || [];
   const dirs = entries.filter((entry) => entry.type === "dir");
@@ -156,52 +105,9 @@ export default function LibraryBrowser({ apiBase, onImported, onJob }) {
 
   return (
     <div className="library-browser">
-      <form
-        className="library-path-form"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!settingRoot) setLibraryFolder(pathInput.trim());
-        }}
-      >
-        <label htmlFor="library-path-input">Library path</label>
-        <div className="field-row">
-          <input
-            id="library-path-input"
-            value={pathInput}
-            onChange={(event) => setPathInput(event.target.value)}
-            placeholder={hostPath ? `${hostPath}/Books` : "Books/PDFs"}
-            disabled={settingRoot}
-          />
-          <button className="primary" type="submit" disabled={settingRoot}>
-            {settingRoot ? "Setting…" : "Set"}
-          </button>
-        </div>
-        <p className="muted">
-          {hostPath
-            ? `Paste the folder's exact path as shown on this server (e.g. ${hostPath}/Books), or a path relative to it.`
-            : "A path relative to the mounted library folder."}
-        </p>
-        <p className="muted library-path-constraint">
-          Must be inside {hostPath ? <strong>{hostPath}</strong> : "the folder mounted at /library"} — that's the
-          only part of this server's disk the app is allowed to see. A different folder needs its mount widened in{" "}
-          <code>.env</code> (<code>LIBRARY_PATH</code>) and a restart first.
-        </p>
-        <p className="muted">
-          Currently: <strong>{libraryRoot ? `/${libraryRoot}` : "the whole mounted folder"}</strong>
-          {libraryRoot && (
-            <>
-              {" · "}
-              <button type="button" className="link" onClick={() => setLibraryFolder("")}>
-                reset to whole mount
-              </button>
-            </>
-          )}
-        </p>
-      </form>
-
       {path !== null && !atLibraryRoot && (
         <div className="library-root-bar">
-          <button type="button" className="link" onClick={() => setLibraryFolder(path)}>
+          <button type="button" className="link" disabled={settingRoot} onClick={() => setAsLibrary(path)}>
             Set current folder as library
           </button>
         </div>
@@ -223,7 +129,6 @@ export default function LibraryBrowser({ apiBase, onImported, onJob }) {
       </nav>
 
       {error && <div className="status-message error">{error}</div>}
-      {notice && !error && <div className="status-message">{notice}</div>}
 
       {status === "loading" && <p className="muted">Loading…</p>}
 
@@ -246,8 +151,8 @@ export default function LibraryBrowser({ apiBase, onImported, onJob }) {
               <button
                 type="button"
                 className="link"
-                disabled={Boolean(busy[entryPath])}
-                onClick={() => setLibraryFolder(entryPath)}
+                disabled={Boolean(busy[entryPath]) || settingRoot}
+                onClick={() => setAsLibrary(entryPath)}
                 title="Make this the library folder auto-ingest scans"
               >
                 Set as library

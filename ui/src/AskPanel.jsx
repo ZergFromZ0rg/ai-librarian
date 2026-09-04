@@ -5,10 +5,8 @@ import remarkGfm from "remark-gfm";
 import ResultCard from "./ResultCard.jsx";
 import { streamAsk } from "./askStream.js";
 
-const ACTIVE_KEY = "ai-librarian.ask.active";
 const MODEL_KEY = "ai-librarian.ask.model";
 const THOROUGH_KEY = "ai-librarian.ask.thorough";
-const KEYS_KEY = "ai-librarian.ask.keys";
 
 // A turn is worth persisting once its assistant reply has finished streaming.
 function isComplete(conv) {
@@ -24,8 +22,9 @@ const PROVIDER_LABELS = {
 };
 
 // Cloud providers the reader can add a key for, and the models each offers
-// (kept in step with the server's generation._CLOUD defaults).
-const CLOUD_PROVIDERS = [
+// (kept in step with the server's generation._CLOUD defaults). Exported for
+// Settings, which owns the actual key-entry form now.
+export const CLOUD_PROVIDERS = [
   { id: "anthropic", label: "Anthropic (Claude)", placeholder: "sk-ant-…", models: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"] },
   { id: "openai", label: "OpenAI (GPT)", placeholder: "sk-…", models: ["gpt-5.1", "gpt-5.1-mini"] },
   { id: "google", label: "Google (Gemini)", placeholder: "AIza…", models: ["gemini-2.5-pro", "gemini-2.5-flash"] },
@@ -104,14 +103,14 @@ function focusSource(turnIndex, n) {
   el.classList.add("flash");
 }
 
-export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
+// `activeId`/`onActiveIdChange` are controlled from above (the sidebar chat
+// list owns switching/creating/deleting conversations); this component just
+// loads whichever conversation that id points at and streams new turns into
+// it. `apiKeys` is likewise owned by Settings now.
+export default function AskPanel({ apiBase, onViewSource, indexedCount, activeId, onActiveIdChange, onConversationsChanged, apiKeys }) {
   const [conversation, setConversation] = useState([]);
-  const [conversations, setConversations] = useState([]);
-  const [activeId, setActiveId] = useState(() => loadStored(ACTIVE_KEY, "") || null);
   const [serverModels, setServerModels] = useState([]);
   const [serverDefault, setServerDefault] = useState("");
-  const [apiKeys, setApiKeys] = useState(() => loadStored(KEYS_KEY, {}, true) || {});
-  const [showKeys, setShowKeys] = useState(false);
   const [selectedModel, setSelectedModel] = useState(() => loadStored(MODEL_KEY, ""));
   const [thorough, setThorough] = useState(() => loadStored(THOROUGH_KEY, "") === "1");
   const [question, setQuestion] = useState("");
@@ -119,53 +118,41 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
   const [error, setError] = useState("");
   const scrollRef = useRef(null);
   const savedRef = useRef("[]"); // JSON of what the server last has, so autosave is a no-op after a load
+  const skipNextLoadRef = useRef(false); // set right before we already know the new id's content locally
 
-  const refreshList = useCallback(async () => {
-    try {
-      const response = await fetch(`${apiBase}/conversations`);
-      if (!response.ok) return;
-      const data = await response.json();
-      setConversations(data.conversations || []);
-    } catch (_error) {
-      // list is a convenience; failing to load it is not fatal
+  // Load whichever conversation `activeId` now points at. Skipped once, right
+  // after *we* mint a brand-new id from autosave below — we already hold the
+  // richer in-progress turn (sources, citations, streaming state) that a
+  // server round-trip would flatten back down to bare role/content.
+  useEffect(() => {
+    if (skipNextLoadRef.current) {
+      skipNextLoadRef.current = false;
+      return;
     }
-  }, [apiBase]);
-
-  const loadConversation = useCallback(
-    async (id) => {
-      if (!id) {
-        setConversation([]);
-        setActiveId(null);
-        savedRef.current = "[]";
-        saveStored(ACTIVE_KEY, "");
-        return;
-      }
+    let cancelled = false;
+    if (!activeId) {
+      setConversation([]);
+      savedRef.current = "[]";
+      return undefined;
+    }
+    (async () => {
       try {
-        const response = await fetch(`${apiBase}/conversations/${id}`);
+        const response = await fetch(`${apiBase}/conversations/${activeId}`);
         if (!response.ok) throw new Error("not found");
         const data = await response.json();
+        if (cancelled) return;
         const messages = data.messages || [];
         setConversation(messages);
-        setActiveId(id);
         savedRef.current = JSON.stringify(messages);
-        saveStored(ACTIVE_KEY, id);
         if (data.model) setSelectedModel(data.model);
       } catch (_error) {
-        loadConversation(null);
+        if (!cancelled) onActiveIdChange(null);
       }
-    },
-    [apiBase],
-  );
-
-  useEffect(() => {
-    refreshList();
-  }, [refreshList]);
-
-  useEffect(() => {
-    const stored = loadStored(ACTIVE_KEY, "");
-    if (stored) loadConversation(stored);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeId, apiBase, onActiveIdChange]);
 
   useEffect(() => {
     let cancelled = false;
@@ -224,10 +211,6 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
   }, [selectedModel]);
 
   useEffect(() => {
-    saveStored(KEYS_KEY, apiKeys);
-  }, [apiKeys]);
-
-  useEffect(() => {
     saveStored(THOROUGH_KEY, thorough ? "1" : "0");
   }, [thorough]);
 
@@ -257,16 +240,16 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
             })
           ).json();
           if (created.id) {
-            setActiveId(created.id);
-            saveStored(ACTIVE_KEY, created.id);
+            skipNextLoadRef.current = true;
+            onActiveIdChange(created.id);
           }
         }
-        refreshList();
+        onConversationsChanged?.();
       } catch (_error) {
         savedRef.current = "[]"; // let the next turn retry the save
       }
     })();
-  }, [busy, conversation, activeId, apiBase, selectedModel, refreshList]);
+  }, [busy, conversation, activeId, apiBase, selectedModel, onActiveIdChange, onConversationsChanged]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -368,37 +351,18 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
     [apiBase, apiKeys, busy, conversation, patchLast, question, selectedModel, thorough],
   );
 
-  function startNew() {
-    setError("");
-    loadConversation(null);
-  }
-
-  async function deleteActive() {
-    if (!activeId) return;
-    try {
-      await fetch(`${apiBase}/conversations/${activeId}`, { method: "DELETE" });
-    } catch (_error) {
-      // best effort
-    }
-    startNew();
-    refreshList();
-  }
-
   const modelLabel = (id) => models.find((m) => m.id === id)?.label || id;
   const noModels = usableModels.length === 0;
 
   return (
     <>
-      <div className="chat-header ask-header">
-        <div>
-          <h2>Ask your library</h2>
-          <p>
-            Answers are written from your documents and cite the passages they draw on.
-            {conversation.length > 0 && (
-              <> Each question adds a new answer below — it doesn't replace the ones above.</>
-            )}
-          </p>
-        </div>
+      <div className={`chat-header ask-header${conversation.length > 0 ? " compact" : ""}`}>
+        {conversation.length === 0 && (
+          <div>
+            <h2>Ask your library</h2>
+            <p>Answers are written from your documents and cite the passages they draw on.</p>
+          </div>
+        )}
         <div className="ask-header-controls">
           {!noModels && (
             <label className="ask-model-select">
@@ -415,7 +379,7 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
                         key={model.id}
                         value={model.id}
                         disabled={!model.usable}
-                        title={model.usable ? undefined : "Add this provider's API key to use it"}
+                        title={model.usable ? undefined : "Add this provider's API key in Settings to use it"}
                       >
                         {model.label}
                         {model.usable ? "" : " — needs API key"}
@@ -437,54 +401,15 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
               <span>Thorough</span>
             </label>
           )}
-          <button
-            type="button"
-            className="secondary"
-            onClick={() => setShowKeys((v) => !v)}
-            aria-expanded={showKeys}
-          >
-            API keys
-          </button>
-          <label className="ask-model-select">
-            <span>Chat</span>
-            <select
-              value={activeId || ""}
-              disabled={busy}
-              onChange={(event) =>
-                event.target.value ? loadConversation(event.target.value) : startNew()
-              }
-            >
-              <option value="">＋ New conversation</option>
-              {conversations.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.title || "Untitled"}
-                </option>
-              ))}
-            </select>
-          </label>
-          {activeId && (
-            <button type="button" className="link" onClick={deleteActive} disabled={busy}>
-              Delete
-            </button>
-          )}
-          {!activeId && conversation.length > 0 && (
-            <button type="button" className="secondary" onClick={startNew} disabled={busy}>
-              New
-            </button>
-          )}
         </div>
       </div>
-
-      {showKeys && (
-        <ApiKeyPanel apiKeys={apiKeys} setApiKeys={setApiKeys} onClose={() => setShowKeys(false)} />
-      )}
 
       <div className="messages ask-thread" ref={scrollRef} aria-live="polite">
         {noModels && (
           <div className="empty-state">
             <div>
               <strong>No models available.</strong>
-              Pull a model with Ollama on the server, or add a cloud API key above.
+              Pull a model with Ollama on the server, or add a cloud API key in Settings.
             </div>
           </div>
         )}
@@ -592,63 +517,5 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
         </button>
       </form>
     </>
-  );
-}
-
-function ApiKeyPanel({ apiKeys, setApiKeys, onClose }) {
-  const [draft, setDraft] = useState({});
-
-  function save(providerId) {
-    const value = (draft[providerId] || "").trim();
-    if (!value) return;
-    setApiKeys({ ...apiKeys, [providerId]: value });
-    setDraft((d) => ({ ...d, [providerId]: "" }));
-  }
-
-  function remove(providerId) {
-    const next = { ...apiKeys };
-    delete next[providerId];
-    setApiKeys(next);
-  }
-
-  return (
-    <div className="ask-keys">
-      <div className="ask-keys-head">
-        <strong>Cloud API keys</strong>
-        <button type="button" className="link" onClick={onClose}>
-          Done
-        </button>
-      </div>
-      <p className="ask-keys-note">
-        Keys stay in this browser (localStorage) and are sent with each question. They are
-        never stored on the server.
-      </p>
-      {CLOUD_PROVIDERS.map((provider) => (
-        <div className="ask-keys-row" key={provider.id}>
-          <span className="ask-keys-label">{provider.label}</span>
-          <input
-            type="password"
-            autoComplete="off"
-            placeholder={apiKeys[provider.id] ? "•••••• saved" : provider.placeholder}
-            value={draft[provider.id] || ""}
-            onChange={(event) => setDraft((d) => ({ ...d, [provider.id]: event.target.value }))}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                save(provider.id);
-              }
-            }}
-          />
-          <button type="button" className="secondary" onClick={() => save(provider.id)}>
-            Save
-          </button>
-          {apiKeys[provider.id] && (
-            <button type="button" className="link" onClick={() => remove(provider.id)}>
-              Remove
-            </button>
-          )}
-        </div>
-      ))}
-    </div>
   );
 }
