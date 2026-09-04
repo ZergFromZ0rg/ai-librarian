@@ -113,7 +113,12 @@ def _default_model_env() -> str:
 
 def _cloud_key(provider: str) -> str:
     var = _CLOUD.get(provider, (None, None))[1]
-    return (os.environ.get(var) or "").strip() if var else ""
+    key = (os.environ.get(var) or "").strip() if var else ""
+    # A real key from any of the three providers is comfortably longer than 30
+    # chars; this filters empty values and obvious placeholders
+    # ("sk-ant-PUT_YOURS_HERE") so a provider isn't advertised as configured
+    # only to 401 on the first call.
+    return key if len(key) >= 30 else ""
 
 
 def _cloud_models(provider: str) -> List[str]:
