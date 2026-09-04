@@ -120,7 +120,21 @@ export default function LibraryBrowser({ apiBase, onImported, onJob }) {
           body: JSON.stringify({ path: targetPath }),
         });
         const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
+        if (!response.ok) {
+          if (response.status === 403) {
+            throw new Error(
+              `That path is outside what this server can see. It can only reach folders inside ${
+                hostPath ? `${hostPath} (its LIBRARY_PATH mount)` : "its /library mount"
+              } — widen that mount in .env and restart to reach elsewhere.`,
+            );
+          }
+          if (response.status === 404) {
+            throw new Error(
+              `That path doesn't exist${hostPath ? ` under ${hostPath}` : ""}. Check the spelling, or that it's really inside what's mounted at /library.`,
+            );
+          }
+          throw new Error(data.detail || `Request failed (${response.status})`);
+        }
         setLibraryRootState(data.path || "");
         setPathInput(data.path ? (hostPath ? `${hostPath}/${data.path}` : data.path) : "");
         setNotice(data.path ? `Library folder set to “${data.path}”.` : "Library folder reset to the whole mount.");
@@ -165,7 +179,14 @@ export default function LibraryBrowser({ apiBase, onImported, onJob }) {
         <p className="muted">
           {hostPath
             ? `Paste the folder's exact path as shown on this server (e.g. ${hostPath}/Books), or a path relative to it.`
-            : "A path relative to the mounted library folder."}{" "}
+            : "A path relative to the mounted library folder."}
+        </p>
+        <p className="muted library-path-constraint">
+          Must be inside {hostPath ? <strong>{hostPath}</strong> : "the folder mounted at /library"} — that's the
+          only part of this server's disk the app is allowed to see. A different folder needs its mount widened in{" "}
+          <code>.env</code> (<code>LIBRARY_PATH</code>) and a restart first.
+        </p>
+        <p className="muted">
           Currently: <strong>{libraryRoot ? `/${libraryRoot}` : "the whole mounted folder"}</strong>
           {libraryRoot && (
             <>
