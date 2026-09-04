@@ -182,29 +182,42 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
     };
   }, [apiBase]);
 
-  // Server-listed models + a row for each cloud model whose key the browser holds.
+  // Every model, each tagged `usable`. Ollama models come from the server and
+  // are always usable; each cloud provider's catalogue is always shown but only
+  // usable when a key exists — server-side (its provider is in the server list)
+  // or pasted into the browser.
   const models = useMemo(() => {
-    const merged = [...serverModels];
-    const seen = new Set(merged.map((m) => m.id));
+    const out = [];
+    const seen = new Set();
+    const keyedProviders = new Set();
+    const add = (m) => {
+      if (!seen.has(m.id)) {
+        seen.add(m.id);
+        out.push(m);
+      }
+    };
+    for (const m of serverModels) {
+      add({ ...m, usable: true });
+      if (m.provider !== "ollama") keyedProviders.add(m.provider);
+    }
     for (const provider of CLOUD_PROVIDERS) {
-      if (!apiKeys[provider.id]) continue;
+      const usable = keyedProviders.has(provider.id) || !!apiKeys[provider.id];
       for (const name of provider.models) {
-        const id = `${provider.id}:${name}`;
-        if (!seen.has(id)) {
-          seen.add(id);
-          merged.push({ id, label: name, provider: provider.id });
-        }
+        add({ id: `${provider.id}:${name}`, label: name, provider: provider.id, usable });
       }
     }
-    return merged;
+    return out;
   }, [serverModels, apiKeys]);
+
+  const usableModels = useMemo(() => models.filter((m) => m.usable), [models]);
 
   useEffect(() => {
     setSelectedModel((current) => {
-      if (current && models.some((m) => m.id === current)) return current;
-      return serverDefault || models[0]?.id || "";
+      if (current && usableModels.some((m) => m.id === current)) return current;
+      if (serverDefault && usableModels.some((m) => m.id === serverDefault)) return serverDefault;
+      return usableModels[0]?.id || "";
     });
-  }, [models, serverDefault]);
+  }, [usableModels, serverDefault]);
 
   useEffect(() => {
     if (selectedModel) saveStored(MODEL_KEY, selectedModel);
@@ -372,7 +385,7 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
   }
 
   const modelLabel = (id) => models.find((m) => m.id === id)?.label || id;
-  const noModels = models.length === 0;
+  const noModels = usableModels.length === 0;
 
   return (
     <>
@@ -393,8 +406,14 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount }) {
                 {grouped.map(([provider, list]) => (
                   <optgroup key={provider} label={PROVIDER_LABELS[provider] || provider}>
                     {list.map((model) => (
-                      <option key={model.id} value={model.id}>
+                      <option
+                        key={model.id}
+                        value={model.id}
+                        disabled={!model.usable}
+                        title={model.usable ? undefined : "Add this provider's API key to use it"}
+                      >
                         {model.label}
+                        {model.usable ? "" : " — needs API key"}
                       </option>
                     ))}
                   </optgroup>

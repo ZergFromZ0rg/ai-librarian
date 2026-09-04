@@ -218,11 +218,14 @@ Two ways to add Claude / OpenAI / Gemini:
 - **On the server** — set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` in
   `.env`; those models are then available to everyone with no per-browser step.
 
-Either way the picker offers a small default model set per provider — override with
-`ANTHROPIC_MODELS` / `OPENAI_MODELS` / `GOOGLE_MODELS` (comma-separated, server-side). Claude
-uses the `anthropic` SDK (bundled, imported only when picked); OpenAI and Gemini use their
-OpenAI-compatible REST endpoints over `httpx`, no SDK. `GENERATION_MODEL` optionally sets
-the default model (`provider:model`, e.g. `ollama:llama3.2:latest`).
+Every provider's models are always listed in the picker; the ones without a key are greyed
+out and labelled "needs API key" until you add one. The picker offers a small default model
+set per provider — override with `ANTHROPIC_MODELS` / `OPENAI_MODELS` / `GOOGLE_MODELS`
+(comma-separated, server-side). Claude uses the `anthropic` SDK (bundled, imported only when
+picked); OpenAI and Gemini use their OpenAI-compatible REST endpoints over `httpx`, no SDK.
+`GENERATION_MODEL` optionally sets the default model (`provider:model`, e.g.
+`ollama:llama3.2:latest`). A key shorter than 30 characters is treated as unset, so the
+`.env.example` placeholder never counts as configured.
 
 ### Coverage across many documents
 
