@@ -237,13 +237,17 @@ export default function App() {
 
   async function attachLibraryFolder() {
     setAttaching(true);
-    setNotice("Queueing the whole library folder for import…");
+    setNotice("Queueing the library folder for import…");
     setNoticeError(false);
     try {
+      // Target whatever folder is currently designated as the library
+      // (narrowed from the /library mount via Browse's "Set as library
+      // folder", or the whole mount if it was never narrowed).
+      const root = await api("/library/root");
       const result = await api("/library/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: "." }),
+        body: JSON.stringify({ path: root.path || "." }),
       });
       setJob(result);
       setNotice(`Import job ${result.job_id} is queued.`);

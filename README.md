@@ -7,7 +7,7 @@ No hosted AI API is required for extraction or search: once the container images
 ## What it does
 
 - Upload one or more PDFs from the browser.
-- Point at a folder of PDFs already on disk (`LIBRARY_PATH`, any nesting, any size) and have it auto-indexed in place — no copying, no manual step. Browse it like a file manager to look around or import ahead of the next scan.
+- Point at a folder of PDFs already on disk (any nesting, any size) and have it auto-indexed in place — no copying, no manual step. Pick exactly which folder from the website itself (Browse → **Set as library folder**), even if the underlying mount is broader.
 - Track each document through `queued`, `indexing`, `indexed`, or `error` states.
 - Retry failed indexing jobs and recover queued work after a restart.
 - Avoid duplicate documents using a SHA-256 content hash.
@@ -51,13 +51,13 @@ cp .env.example .env
 mkdir -p data/app data/qdrant data/models library
 ```
 
-Then edit `.env` and set `LIBRARY_PATH` to the folder that already holds your PDFs (any nesting, any size) — this is the app's single source of truth for documents. Point it straight at your real collection; don't copy or move files into `./library` first. Leaving it as `./library` (the default) is fine too — just put PDFs in that folder before or after starting.
+Then edit `.env` and set `LIBRARY_PATH` — this only decides which host path the container is *allowed* to see; it's fine to point it at your real PDF folder directly, or somewhere broader (your whole home directory, an external drive) if you'd rather pick the exact folder afterward from the website. Either way, don't copy or move files into `./library` first — point at where they already are.
 
 ```bash
 docker compose up -d --build
 ```
 
-Everything already sitting in `LIBRARY_PATH` is indexed automatically within a few seconds of startup, and anything added while it's running is picked up on the next scan (`AUTO_INGEST_INTERVAL_SECONDS`, default 60s) — no upload, no manual import click required. The Library panel's **Browse** tab is there for a first look around, or to import immediately instead of waiting for the next scan.
+If `LIBRARY_PATH` already points at your PDFs, they're indexed automatically within a few seconds — no upload, no manual click. If you mounted something broader, open the Library panel's **Browse** tab, navigate to your real collection, and click **Set as library folder** — from then on that's what gets scanned (`AUTO_INGEST_INTERVAL_SECONDS`, default every 60s) and where Browse opens by default, with no further `.env` editing or restart.
 
 The first indexing request takes longer because the document service downloads its embedding model. The reranker is downloaded on the first reranked search. Model files are persisted under `data/models/`.
 
@@ -132,16 +132,19 @@ The bundled UI keeps working — nginx forwards the token to the API. This prote
 
 ## Browsing and importing from a server folder
 
-`LIBRARY_PATH` (in `.env`) is your single source of truth for documents — an absolute host path to the folder that already holds your PDFs, any nesting, any size. It's mounted read-only at `/library` inside the container; nothing is ever copied out of it or moved within it. Point it at your real collection directly, rather than moving files into the repo's `./library` folder.
+There are two layers, and only the first one ever needs `.env` or a restart:
 
-**This is automatic.** A background scan (`AUTO_INGEST_INTERVAL_SECONDS`, default every 60s) walks `LIBRARY_PATH` recursively and references any PDF it hasn't seen before — once immediately at startup (so a library populated before the first `docker compose up` needs no UI interaction), then again on every interval (so a file dropped in while the app is running gets picked up on its own). Set `AUTO_INGEST_INTERVAL_SECONDS=0` to disable this and rely only on manual import.
+1. **The mount** (`LIBRARY_PATH` in `.env`) — an absolute host path bind-mounted read-only at `/library`. This is a Docker-level fact: the container can only ever see host paths it was handed at start, so *some* path has to be declared here once. It's fine — encouraged, even — to make this broad (your whole home directory, an external drive's mount point) rather than guessing the exact folder up front.
+2. **The library folder** — which subfolder of that mount is actually "the library": what the background scan walks and where the Browse tab opens by default. This is set **entirely from the website**, no `.env` editing or restart involved: open **Browse**, navigate to your real collection (however deep it's nested), and click **Set as library folder**. That's now the designated folder; **Reset to whole mount** undoes it. Whichever way this is set, PDFs are always **referenced in place** — nothing is ever copied, moved, or renamed on disk.
+
+**This is automatic.** A background scan (`AUTO_INGEST_INTERVAL_SECONDS`, default every 60s) walks the designated library folder recursively and references any PDF it hasn't seen before — once immediately at startup (so a library already in place before the first `docker compose up` needs no UI interaction at all), then again on every interval (so a file dropped in later is picked up on its own). Set `AUTO_INGEST_INTERVAL_SECONDS=0` to disable this and rely only on manual import.
 
 The Library panel has two tabs:
 
-- **Browse** walks the mounted volume like Finder or Explorer — sub-folders (with a PDF count) and PDF files, with a breadcrumb to navigate back. **Attach main library folder** at the top imports every PDF under the mount in one click, recursively — useful to skip ahead of the next scheduled scan. Further down, **Import** on a single file or **Import all** on a folder does the same for just that file/folder. Imported PDFs are **referenced in place** — nothing is copied — so a large collection does not double in size on disk. Removing a document from **Indexed** un-indexes it but leaves the original file untouched.
+- **Browse** walks the mount like Finder or Explorer — sub-folders (with a PDF count) and PDF files, with a breadcrumb to navigate back up, even past the designated library folder if `LIBRARY_PATH` was mounted broad. **Attach main library folder** at the top imports everything under the currently designated folder in one click — useful to skip ahead of the next scheduled scan. Per-folder, **Set as library folder** narrows the designation to right there (and imports it immediately); **Import all** imports a folder without changing the designation; a single file gets its own **Import**. Removing a document from **Indexed** un-indexes it but leaves the original file untouched.
 - **Indexed** is the list of documents currently in the index, with their status, page/chunk counts, retry, and remove.
 
-The small **or upload a PDF file** link (in the Browse tab) still copies a file onto the server, into `data/app/documents/` — use it for the odd PDF that isn't already under `LIBRARY_PATH`.
+The small **or upload a PDF file** link (in the Browse tab) still copies a file onto the server, into `data/app/documents/` — use it for the odd PDF that isn't under the mount at all.
 
 Absolute paths and paths outside `/library` are rejected. The folder structure you already have is preserved as-is — nested sub-folders are walked recursively, but the app does not reorganize or rename anything on disk.
 
@@ -152,7 +155,7 @@ Absolute paths and paths outside `/library` are rejected. The folder structure y
 | `BIND_ADDRESS` | `127.0.0.1` | Host interface used by published UI/API ports |
 | `UI_PORT` | `3100` | Browser UI port |
 | `API_PORT` | `8000` | Direct API and interactive docs port |
-| `LIBRARY_PATH` | `./library` | Host folder holding your PDFs (any nesting); mounted read-only at `/library` — the single source of truth for [Browsing and importing](#browsing-and-importing-from-a-server-folder) |
+| `LIBRARY_PATH` | `./library` | Host folder mounted read-only at `/library`; can be your exact PDF folder or something broader — see [Browsing and importing](#browsing-and-importing-from-a-server-folder) |
 | `AUTO_INGEST_INTERVAL_SECONDS` | `60` | How often to rescan `LIBRARY_PATH` for new PDFs to auto-import; `0` disables the scan (manual import only) |
 | `MAX_UPLOAD_MB` | `100` | Per-file backend upload limit |
 | `EMBEDDING_BATCH_SIZE` | `32` | Chunks embedded in each indexing batch |
@@ -337,6 +340,7 @@ Everything the library needs lives under `data/`:
 | `data/app/library.db` | document metadata and indexing state | no |
 | `data/app/documents/` | PDFs added via **Upload** (the only copy); files imported from `/library` stay on the source disk | no |
 | `data/app/conversations.db` | saved Ask-mode conversations | no (but not essential) |
+| `data/app/settings.json` | the designated library folder ([Browsing and importing](#browsing-and-importing-from-a-server-folder)) | no (but not essential — resets to the whole mount) |
 | `data/app/extracted/`, `data/app/chunks/` | extracted text and passages | yes, from the PDFs |
 | `data/app/jobs/`, `data/app/logs/` | folder-import state, search log | not needed |
 | `data/qdrant/` | the vector index | yes, by re-indexing |
@@ -369,6 +373,8 @@ Important endpoints:
 - `GET|POST /conversations`, `GET|PUT|DELETE /conversations/{id}` — saved Ask conversations (server-side; the UI's **Chat** picker)
 - `GET /library/tree?path=` — one level of the mounted `/library` volume (sub-folders + PDF files, marked when indexed)
 - `POST /library/import` — import one PDF (referenced in place) or every PDF under a folder (recursive); body `{"path"}`
+- `GET /library/root` — the designated library folder (persisted; `""` = the whole mount) and whether it still resolves
+- `POST /library/root` — narrow (or, with `path: ""`, reset) which folder under `/library` counts as the library; what auto-ingest scans and where Browse opens by default
 - `POST /admin/ingest-folder` — recursively import a folder under `/library` (the older form of `POST /library/import` on a directory)
 - `GET /admin/search-log` — recent queries with their returned pages and scores
 - `GET /health/live` — process liveness

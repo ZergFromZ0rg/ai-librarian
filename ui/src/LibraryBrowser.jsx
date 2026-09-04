@@ -24,12 +24,17 @@ function breadcrumbs(path) {
 
 // A Finder-style walk of the mounted /library volume. Folders and PDFs only;
 // importing references the file in place (no copy) and, for a folder, kicks
-// off a recursive ingest job.
+// off a recursive ingest job. The mount itself can be broad (a whole home
+// directory) — "Set as library folder" narrows which subfolder auto-ingest
+// scans and where this browser opens by default, entirely from here, with no
+// docker-compose/.env edit.
 export default function LibraryBrowser({ apiBase, onImported, onJob }) {
-  const [path, setPath] = useState("");
+  const [path, setPath] = useState(null); // null = not yet resolved to the starting folder
+  const [libraryRoot, setLibraryRootState] = useState("");
   const [tree, setTree] = useState(null);
   const [status, setStatus] = useState("loading");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState({});
 
   const loadTree = useCallback(
@@ -51,13 +56,26 @@ export default function LibraryBrowser({ apiBase, onImported, onJob }) {
     [apiBase],
   );
 
+  // On first mount, open straight to the designated library folder (if one
+  // has been set) instead of the top of a possibly much broader mount.
   useEffect(() => {
-    loadTree("");
-  }, [loadTree]);
+    let cancelled = false;
+    fetch(`${apiBase}/library/root`)
+      .then((response) => response.json())
+      .then((data) => {
+        if (cancelled) return;
+        setLibraryRootState(data.path || "");
+        loadTree(data.path || "");
+      })
+      .catch(() => loadTree(""));
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiBase]);
 
   const importEntry = useCallback(
-    async (entry) => {
-      const entryPath = path ? `${path}/${entry.name}` : entry.name;
+    async (entryPath) => {
       setBusy((current) => ({ ...current, [entryPath]: true }));
       setError("");
       try {
@@ -70,9 +88,10 @@ export default function LibraryBrowser({ apiBase, onImported, onJob }) {
         if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
         if (data.job_id) onJob?.(data);
         onImported?.();
-        loadTree(path);
+        return true;
       } catch (importError) {
         setError(importError.message);
+        return false;
       } finally {
         setBusy((current) => {
           const next = { ...current };
@@ -81,17 +100,57 @@ export default function LibraryBrowser({ apiBase, onImported, onJob }) {
         });
       }
     },
-    [apiBase, path, onImported, onJob, loadTree],
+    [apiBase, onImported, onJob],
+  );
+
+  const setLibraryFolder = useCallback(
+    async (targetPath) => {
+      setNotice("");
+      setError("");
+      try {
+        const response = await fetch(`${apiBase}/library/root`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: targetPath }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
+        setLibraryRootState(data.path || "");
+        setNotice(data.path ? `Library folder set to “${data.path}”.` : "Library folder reset to the whole mount.");
+        await importEntry(data.path || ".");
+        loadTree(path);
+      } catch (rootError) {
+        setError(rootError.message);
+      }
+    },
+    [apiBase, importEntry, loadTree, path],
   );
 
   const entries = tree?.entries || [];
   const dirs = entries.filter((entry) => entry.type === "dir");
   const files = entries.filter((entry) => entry.type === "file");
+  const atLibraryRoot = path === libraryRoot;
 
   return (
     <div className="library-browser">
+      <div className="library-root-bar">
+        <span className="muted">
+          Library folder: <strong>{libraryRoot ? `/${libraryRoot}` : "the whole mounted folder"}</strong>
+        </span>
+        {path !== null && !atLibraryRoot && (
+          <button type="button" className="link" onClick={() => setLibraryFolder(path)}>
+            Set current folder as library
+          </button>
+        )}
+        {libraryRoot && (
+          <button type="button" className="link" onClick={() => setLibraryFolder("")}>
+            Reset to whole mount
+          </button>
+        )}
+      </div>
+
       <nav className="breadcrumb" aria-label="Folder path">
-        {breadcrumbs(path).map((crumb, index, all) => (
+        {breadcrumbs(path || "").map((crumb, index, all) => (
           <React.Fragment key={crumb.path}>
             {index > 0 && <span className="breadcrumb-sep">/</span>}
             {index === all.length - 1 ? (
@@ -106,6 +165,7 @@ export default function LibraryBrowser({ apiBase, onImported, onJob }) {
       </nav>
 
       {error && <div className="status-message error">{error}</div>}
+      {notice && !error && <div className="status-message">{notice}</div>}
 
       {status === "loading" && <p className="muted">Loading…</p>}
 
@@ -127,9 +187,18 @@ export default function LibraryBrowser({ apiBase, onImported, onJob }) {
               </span>
               <button
                 type="button"
+                className="link"
+                disabled={Boolean(busy[entryPath])}
+                onClick={() => setLibraryFolder(entryPath)}
+                title="Make this the library folder auto-ingest scans"
+              >
+                Set as library
+              </button>
+              <button
+                type="button"
                 className="secondary"
                 disabled={Boolean(busy[entryPath])}
-                onClick={() => importEntry(entry)}
+                onClick={() => importEntry(entryPath)}
               >
                 {busy[entryPath] ? "Queueing…" : "Import all"}
               </button>
@@ -153,7 +222,7 @@ export default function LibraryBrowser({ apiBase, onImported, onJob }) {
                   type="button"
                   className="secondary"
                   disabled={Boolean(busy[entryPath])}
-                  onClick={() => importEntry(entry)}
+                  onClick={() => importEntry(entryPath)}
                 >
                   {busy[entryPath] ? "Importing…" : "Import"}
                 </button>
