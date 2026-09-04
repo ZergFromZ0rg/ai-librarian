@@ -131,6 +131,7 @@ export default function App() {
   const [searched, setSearched] = useState(false);
   const [searching, setSearching] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [attaching, setAttaching] = useState(false);
   const [source, setSource] = useState(null);
   const [askEnabled, setAskEnabled] = useState(false);
   const [view, setView] = useState("search");
@@ -234,6 +235,26 @@ export default function App() {
     }
   }
 
+  async function attachLibraryFolder() {
+    setAttaching(true);
+    setNotice("Queueing the whole library folder for import…");
+    setNoticeError(false);
+    try {
+      const result = await api("/library/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: "." }),
+      });
+      setJob(result);
+      setNotice(`Import job ${result.job_id} is queued.`);
+    } catch (error) {
+      setNotice(error.message);
+      setNoticeError(true);
+    } finally {
+      setAttaching(false);
+    }
+  }
+
   async function retryDocument(documentId) {
     try {
       await api(`/documents/${documentId}/retry`, { method: "POST" });
@@ -332,20 +353,30 @@ export default function App() {
 
           {libraryTab === "browse" ? (
             <>
-              <label className="drop-zone">
-                <input
-                  type="file"
-                  multiple
-                  accept="application/pdf,.pdf"
-                  disabled={uploading}
-                  onChange={(event) => {
-                    uploadFiles(event.target.files);
-                    event.target.value = "";
-                  }}
-                />
-                <strong>{uploading ? "Uploading…" : "Upload PDF files"}</strong>
-                <span>Copied onto the server. Or import files already on disk below.</span>
-              </label>
+              <div className="library-attach">
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={attaching}
+                  onClick={attachLibraryFolder}
+                >
+                  {attaching ? "Attaching…" : "Attach main library folder"}
+                </button>
+                <p className="muted">Recursively imports every PDF under the mounted library folder, in place — nothing is copied.</p>
+                <label className="upload-link">
+                  <input
+                    type="file"
+                    multiple
+                    accept="application/pdf,.pdf"
+                    disabled={uploading}
+                    onChange={(event) => {
+                      uploadFiles(event.target.files);
+                      event.target.value = "";
+                    }}
+                  />
+                  <span>{uploading ? "Uploading…" : "or upload a PDF file"}</span>
+                </label>
+              </div>
 
               <LibraryBrowser apiBase={API_BASE} onImported={refreshDocuments} onJob={setJob} />
             </>
