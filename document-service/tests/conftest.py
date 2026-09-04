@@ -49,6 +49,10 @@ def service(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("INGEST_ROOT", str(tmp_path / "library"))
     monkeypatch.setenv("RERANK_TIMEOUT", "1")
+    # The background auto-ingest scan is exercised directly (module._auto_ingest_scan())
+    # by tests that want it; disabled here so it can't race a test's own library
+    # writes/imports on a live timer thread.
+    monkeypatch.setenv("AUTO_INGEST_INTERVAL_SECONDS", "0")
     # Keep Ask mode hermetic: no Ollama probe, no cloud keys. Tests that exercise
     # generation monkeypatch generation.list_models / generate_stream directly.
     monkeypatch.setenv("OLLAMA_URL", "")

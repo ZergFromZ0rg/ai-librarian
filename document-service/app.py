@@ -119,6 +119,12 @@ INGEST_QUEUE_SIZE = int(os.environ.get("INGEST_QUEUE_SIZE", "10"))
 # draining an in-memory backlog. This is only a fallback re-check interval in
 # case a wake-up signal is ever missed.
 INDEX_POLL_SECONDS = float(os.environ.get("INDEX_POLL_SECONDS", "30"))
+# How often to rescan the mounted library for PDFs that aren't indexed yet, so
+# dropping files into it is enough on its own -- no manual Attach/Import click
+# required. Runs once immediately at startup too, so a library populated before
+# the container's first start is indexed without any UI interaction. 0 disables
+# the scan entirely (Browse/Attach import remain manual-only).
+AUTO_INGEST_INTERVAL_SECONDS = float(os.environ.get("AUTO_INGEST_INTERVAL_SECONDS", "60"))
 RERANK_MAX_WORKERS = int(os.environ.get("RERANK_MAX_WORKERS", "2"))
 RERANK_TIMEOUT = float(os.environ.get("RERANK_TIMEOUT", "15"))
 # How many fused candidates the cross-encoder actually scores. Dense+sparse
@@ -797,18 +803,26 @@ def create_document(
         raise
 
 
+# Guards the duplicate-check-then-create sequence in import_library_file so
+# two imports of the same file racing each other (a manual click landing at
+# the same moment as the auto-ingest scan, say) can't both pass the "not a
+# duplicate yet" check and create two document rows for one PDF.
+_IMPORT_LOCK = threading.Lock()
+
+
 def import_library_file(rel_path: str) -> tuple[dict, bool]:
     """Reference a PDF sitting under INGEST_ROOT (no copy). Returns
     ``(metadata, deduplicated)``."""
     source = resolve_library_path(rel_path)
     if not source.is_file() or source.suffix.lower() != ".pdf":
         raise HTTPException(status_code=400, detail="not a PDF file inside the library")
-    content_sha256 = hash_file(source)
-    duplicate = find_duplicate(content_sha256)
-    if duplicate:
-        return duplicate, True
-    rel = str(source.relative_to(INGEST_ROOT))
-    return create_document(source, source.name, content_sha256, source_path=rel), False
+    content_sha256 = hash_file(source)  # outside the lock: hashing is the slow part
+    with _IMPORT_LOCK:
+        duplicate = find_duplicate(content_sha256)
+        if duplicate:
+            return duplicate, True
+        rel = str(source.relative_to(INGEST_ROOT))
+        return create_document(source, source.name, content_sha256, source_path=rel), False
 
 
 def resolve_library_path(requested: Optional[str]) -> Path:
@@ -898,6 +912,47 @@ def ingest_worker() -> None:
             INGEST_QUEUE.task_done()
 
 
+def _auto_ingest_scan() -> int:
+    """Reference-import every PDF under INGEST_ROOT that isn't indexed yet.
+
+    Cheap on a re-run: only files whose relative path isn't already a
+    ``source_path`` in the metadata store are hashed at all, so a large,
+    mostly-unchanged library costs one directory walk plus one DB read per
+    scan, not a re-hash of everything in it.
+    """
+    known = {doc["source_path"] for doc in list_metadata() if doc.get("source_path")}
+    imported = 0
+    for pdf in _library_pdfs(INGEST_ROOT):
+        rel = str(pdf.relative_to(INGEST_ROOT))
+        if rel in known:
+            continue
+        try:
+            metadata, duplicate = import_library_file(rel)
+        except Exception:
+            logger.exception("Automatic library scan could not import %s", rel)
+            continue
+        if not duplicate:
+            enqueue_index(IndexTask(metadata["document_id"]))
+            imported += 1
+    if imported:
+        logger.info("Automatic library scan imported %d new PDF(s)", imported)
+    return imported
+
+
+def auto_ingest_worker() -> None:
+    """Rescans the mounted library on AUTO_INGEST_INTERVAL_SECONDS, starting
+    with an immediate scan so a library populated before the container's
+    first start doesn't need a manual Attach/Import click. Only started when
+    the interval is positive; see start_workers()."""
+    while not SHUTDOWN.is_set():
+        try:
+            _auto_ingest_scan()
+        except Exception:
+            logger.exception("Automatic library scan failed")
+        if SHUTDOWN.wait(AUTO_INGEST_INTERVAL_SECONDS):
+            return
+
+
 def recover_interrupted_work() -> None:
     for path in JOBS_DIR.glob("*.json"):
         try:
@@ -965,6 +1020,10 @@ def start_workers() -> None:
         threading.Thread(target=ingest_worker, daemon=True, name="ingest-worker"),
         threading.Thread(target=recover_interrupted_work, daemon=True, name="recovery-worker"),
     ]
+    if AUTO_INGEST_INTERVAL_SECONDS > 0:
+        WORKER_THREADS.append(
+            threading.Thread(target=auto_ingest_worker, daemon=True, name="auto-ingest-worker")
+        )
     for thread in WORKER_THREADS:
         thread.start()
 

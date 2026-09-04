@@ -125,6 +125,65 @@ def test_import_deduplicates_by_content(service, tmp_path):
     assert second.json()["document_id"] == first.json()["document_id"]
 
 
+def test_auto_ingest_scan_picks_up_files_dropped_into_the_library(service, tmp_path):
+    """Simulates a library populated before the app's first start, or a PDF
+    dropped in while it's running: module._auto_ingest_scan() (what the
+    background timer calls) finds and references it with no UI interaction."""
+    module, client, _indexed = service
+    root = _library(tmp_path)
+    (root / "Essays").mkdir()
+    (root / "Essays" / "sisyphus.pdf").write_bytes(make_pdf("One must imagine Sisyphus happy."))
+
+    imported = module._auto_ingest_scan()
+    assert imported == 1
+
+    docs = client.get("/documents").json()["documents"]
+    assert len(docs) == 1
+    assert docs[0]["source_path"] == "Essays/sisyphus.pdf"
+    wait_for_status(client, docs[0]["document_id"], "indexed")
+    assert not any(module.DOCUMENTS_DIR.glob("*.pdf"))
+
+    # A second scan with nothing new is a no-op: it doesn't re-import, and it
+    # doesn't re-hash the file it already knows about (the whole point of
+    # tracking already-known source_paths).
+    hashed = []
+    original_hash_file = module.hash_file
+    module.hash_file = lambda path: hashed.append(path) or original_hash_file(path)
+    try:
+        assert module._auto_ingest_scan() == 0
+    finally:
+        module.hash_file = original_hash_file
+    assert hashed == []
+    assert len(client.get("/documents").json()["documents"]) == 1
+
+
+def test_auto_ingest_scan_still_dedupes_by_content(service, tmp_path):
+    module, client, _indexed = service
+    root = _library(tmp_path)
+    pdf = make_pdf("absurd freedom, scanned twice")
+    (root / "original.pdf").write_bytes(pdf)
+    (root / "duplicate.pdf").write_bytes(pdf)
+
+    imported = module._auto_ingest_scan()
+    assert imported == 1
+    assert len(client.get("/documents").json()["documents"]) == 1
+
+
+def test_auto_ingest_thread_only_starts_when_interval_is_positive(service):
+    module, _client, _indexed = service
+    assert not any(t.name == "auto-ingest-worker" for t in module.WORKER_THREADS)  # conftest sets 0
+
+    module.stop_workers()
+    try:
+        module.AUTO_INGEST_INTERVAL_SECONDS = 0.05
+        module.start_workers()
+        assert any(t.name == "auto-ingest-worker" for t in module.WORKER_THREADS)
+    finally:
+        module.stop_workers()
+        module.AUTO_INGEST_INTERVAL_SECONDS = 0
+        module.start_workers()
+
+
 def test_tree_rejects_escaping_paths(service, tmp_path):
     _module, client, _indexed = service
     _library(tmp_path)
