@@ -299,7 +299,13 @@ def _merge_cross_page_paragraphs(blocks: Sequence[Block]) -> List[Block]:
             if previous.text.rstrip().endswith("-") and block.text.lstrip()[:1].islower():
                 text = previous.text.rstrip()[:-1] + block.text.lstrip()
             else:
-                text = f"{previous.text.rstrip()}\n\n{block.text.lstrip()}"
+                # A "\n\n" here renders as a paragraph break (blank line) in
+                # the UI, right in the middle of one continuing sentence —
+                # replace it with an inline marker naming the page it
+                # continues onto instead.
+                previous_text = previous.text.rstrip()
+                current_text = block.text.lstrip()
+                text = f"{previous_text} *[page {block.page_start}]* {current_text}"
             merged[-1] = replace(previous, text=text, page_end=block.page_end)
         else:
             merged.append(block)

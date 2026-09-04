@@ -112,7 +112,7 @@ def test_unfinished_paragraph_can_continue_across_pages():
     assert len(groups) == 1
     assert groups[0]["page"] == 1
     assert groups[0]["page_end"] == 2
-    assert "continues with\n\nthe substitution" in groups[0]["text"]
+    assert "continues with *[page 2]* the substitution" in groups[0]["text"]
 
 
 def test_lead_in_is_the_sentence_tail_of_the_previous_group():
