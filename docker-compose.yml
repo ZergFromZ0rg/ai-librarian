@@ -43,6 +43,11 @@ services:
       OFFLINE: ${OFFLINE:-0}
       DATA_DIR: /app/data
       INGEST_ROOT: /library
+      # Informational only (never used for filesystem access) -- lets the UI's
+      # "Library path" box accept a pasted absolute HOST path (e.g. the exact
+      # folder shown in your file manager) by recognizing this prefix, instead
+      # of requiring a path relative to the mount.
+      LIBRARY_HOST_PATH: ${LIBRARY_PATH:-./library}
       AUTO_INGEST_INTERVAL_SECONDS: ${AUTO_INGEST_INTERVAL_SECONDS:-60}
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: vault
