@@ -169,6 +169,56 @@ def test_auto_ingest_scan_still_dedupes_by_content(service, tmp_path):
     assert len(client.get("/documents").json()["documents"]) == 1
 
 
+def test_library_root_can_be_narrowed_from_a_broad_mount(service, tmp_path):
+    """The mount can stay broad (a whole home dir, say) while the actual
+    collection is picked from the website: /library/root narrows what
+    auto-ingest scans and what Browse opens to by default, with no
+    docker-compose/.env edit."""
+    module, client, _indexed = service
+    root = _library(tmp_path)
+    (root / "Unrelated").mkdir()
+    (root / "Unrelated" / "invoice.pdf").write_bytes(make_pdf("not part of the library"))
+    (root / "Books").mkdir()
+    (root / "Books" / "sisyphus.pdf").write_bytes(make_pdf("One must imagine Sisyphus happy."))
+
+    assert client.get("/library/root").json() == {"path": "", "valid": True}
+
+    resp = client.post("/library/root", json={"path": "Books"})
+    assert resp.status_code == 200 and resp.json() == {"path": "Books"}
+    assert client.get("/library/root").json() == {"path": "Books", "valid": True}
+
+    # Auto-ingest now only sees what's under the narrowed root.
+    imported = module._auto_ingest_scan()
+    assert imported == 1
+    docs = client.get("/documents").json()["documents"]
+    assert [doc["source_path"] for doc in docs] == ["Books/sisyphus.pdf"]
+
+    # Reset back to the whole mount.
+    assert client.post("/library/root", json={"path": ""}).json() == {"path": ""}
+    assert client.get("/library/root").json()["path"] == ""
+
+
+def test_library_root_falls_back_when_the_chosen_folder_disappears(service, tmp_path):
+    module, client, _indexed = service
+    root = _library(tmp_path)
+    (root / "Temp").mkdir()
+    client.post("/library/root", json={"path": "Temp"})
+
+    (root / "Temp").rmdir()
+    result = client.get("/library/root").json()
+    assert result == {"path": "", "valid": False}
+    assert module.library_root_path() == module.INGEST_ROOT
+
+
+def test_library_root_rejects_paths_outside_the_mount(service, tmp_path):
+    _module, client, _indexed = service
+    _library(tmp_path)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    assert client.post("/library/root", json={"path": str(outside)}).status_code == 403
+    assert client.post("/library/root", json={"path": "missing"}).status_code == 404
+
+
 def test_auto_ingest_thread_only_starts_when_interval_is_positive(service):
     module, _client, _indexed = service
     assert not any(t.name == "auto-ingest-worker" for t in module.WORKER_THREADS)  # conftest sets 0
