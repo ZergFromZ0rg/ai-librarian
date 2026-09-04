@@ -7,7 +7,7 @@ No hosted AI API is required for extraction or search: once the container images
 ## What it does
 
 - Upload one or more PDFs from the browser.
-- Import PDFs from a read-only server folder.
+- Browse a read-only server disk like a file manager and import PDFs in place (no copy), one file or a whole folder tree.
 - Track each document through `queued`, `indexing`, `indexed`, or `error` states.
 - Retry failed indexing jobs and recover queued work after a restart.
 - Avoid duplicate documents using a SHA-256 content hash.
@@ -126,11 +126,18 @@ APP_TOKEN=$(openssl rand -hex 24)
 
 The bundled UI keeps working — nginx forwards the token to the API. This protects **direct** API access (port 8000); a request that reaches the UI's nginx (port 3100) is still proxied through. Exposing the UI to an untrusted network therefore still needs Tailscale or an authenticated TLS reverse proxy in front. Unhandled errors now return a generic message plus an `X-Request-ID` that matches the full exception in the service logs.
 
-## Adding documents from a server folder
+## Browsing and importing from a server folder
 
-The host `library/` directory is mounted read-only at `/library`. Place PDFs anywhere under it, then enter `.` or a relative subfolder such as `books/philosophy` in the UI's folder-import field.
+The host `library/` directory is mounted read-only at `/library`. To browse a different disk, point that mount at it in `docker-compose.yml` (`/mnt/books:/library:ro`) and keep `:ro`.
 
-Absolute paths and paths outside `/library` are rejected. Folder imports scan PDFs directly inside the selected folder; they do not recurse into subfolders.
+The Library panel has two tabs:
+
+- **Browse** walks the mounted volume like Finder or Explorer — sub-folders (with a PDF count) and PDF files, with a breadcrumb to navigate back. **Import** on a file, or **Import all** on a folder (recursive), adds it to the index. Imported PDFs are **referenced in place** — nothing is copied — so a large collection does not double in size on disk. Removing a document from **Indexed** un-indexes it but leaves the original file untouched.
+- **Indexed** is the list of documents currently in the index, with their status, page/chunk counts, retry, and remove.
+
+**Upload PDF files** (in the Browse tab) still copies files onto the server, into `data/app/documents/` — use it for PDFs that are not already on a mounted disk.
+
+Absolute paths and paths outside `/library` are rejected.
 
 ## Configuration
 
@@ -320,7 +327,7 @@ Everything the library needs lives under `data/`:
 | Path | Contents | Rebuildable? |
 | --- | --- | --- |
 | `data/app/library.db` | document metadata and indexing state | no |
-| `data/app/documents/` | the uploaded PDFs (the only copy) | no |
+| `data/app/documents/` | PDFs added via **Upload** (the only copy); files imported from `/library` stay on the source disk | no |
 | `data/app/conversations.db` | saved Ask-mode conversations | no (but not essential) |
 | `data/app/extracted/`, `data/app/chunks/` | extracted text and passages | yes, from the PDFs |
 | `data/app/jobs/`, `data/app/logs/` | folder-import state, search log | not needed |
@@ -352,7 +359,9 @@ Important endpoints:
 - `POST /ask` — retrieve, then stream a grounded answer as Server-Sent Events (`token` chunks, `progress` in thorough mode, then one `sources` event); body: `{"question", "history": [{"role", "content"}], "model": "provider:model", "mode": "quick"|"thorough"}`. Returns 503 when no model is available. See [Ask mode](#ask-mode)
 - `GET /ask/models` — models the reader may pick, plus the current default
 - `GET|POST /conversations`, `GET|PUT|DELETE /conversations/{id}` — saved Ask conversations (server-side; the UI's **Chat** picker)
-- `POST /admin/ingest-folder` — import the mounted library folder
+- `GET /library/tree?path=` — one level of the mounted `/library` volume (sub-folders + PDF files, marked when indexed)
+- `POST /library/import` — import one PDF (referenced in place) or every PDF under a folder (recursive); body `{"path"}`
+- `POST /admin/ingest-folder` — recursively import a folder under `/library` (the older form of `POST /library/import` on a directory)
 - `GET /admin/search-log` — recent queries with their returned pages and scores
 - `GET /health/live` — process liveness
 - `GET /health/ready` — Qdrant readiness, indexing backlog, and ingest queue depth
@@ -387,6 +396,7 @@ npm run build
 ## Current limitations
 
 - PDF is the only accepted document format.
+- The Browse tab sees only what is mounted at `/library`. It is not a full filesystem browser — to reach another disk, add it as a bind mount. There is no in-browser PDF preview and no watching the disk for new files (re-import after adding files).
 - The service does not run OCR. A PDF that is mostly page-images with no text layer — a scan, or image-only typesetting — is rejected on upload with a message to OCR it first; a few full-page figure plates in an otherwise text PDF are fine.
 - When a minority of pages carry a corrupt OCR text layer, those pages are skipped and the rest of the document is indexed; the document then shows an `extraction_notes` message saying how many pages were left out. A PDF whose text layer is *mostly* corrupt is still refused whole.
 - Front and back matter — tables of contents, back-of-book indexes, bibliographies — is detected by shape and dropped before indexing, so those keyword-dense pages don't outrank real passages. Detection is conservative and skips nothing when it would flag more than 40% of a document.

@@ -29,6 +29,10 @@ services:
       - "${BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8000}:8000"
     volumes:
       - ./data/app:/app/data
+      # The Library → Browse tab shows this tree. Replace ./library with the
+      # host path of the disk or folder you want to browse and import from
+      # (e.g. /mnt/books:/library:ro). Keep :ro — imports reference files in
+      # place and never write here.
       - ./library:/library:ro
       - ./data/models:/models
     environment:
