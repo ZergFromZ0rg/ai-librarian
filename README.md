@@ -132,10 +132,10 @@ The host `library/` directory is mounted read-only at `/library`. To browse a di
 
 The Library panel has two tabs:
 
-- **Browse** walks the mounted volume like Finder or Explorer — sub-folders (with a PDF count) and PDF files, with a breadcrumb to navigate back. **Import** on a file, or **Import all** on a folder (recursive), adds it to the index. Imported PDFs are **referenced in place** — nothing is copied — so a large collection does not double in size on disk. Removing a document from **Indexed** un-indexes it but leaves the original file untouched.
+- **Browse** walks the mounted volume like Finder or Explorer — sub-folders (with a PDF count) and PDF files, with a breadcrumb to navigate back. **Attach main library folder** at the top imports every PDF under the mount in one click, recursively. Further down, **Import** on a single file or **Import all** on a folder does the same for just that file/folder. Imported PDFs are **referenced in place** — nothing is copied — so a large collection does not double in size on disk. Removing a document from **Indexed** un-indexes it but leaves the original file untouched.
 - **Indexed** is the list of documents currently in the index, with their status, page/chunk counts, retry, and remove.
 
-**Upload PDF files** (in the Browse tab) still copies files onto the server, into `data/app/documents/` — use it for PDFs that are not already on a mounted disk.
+The small **or upload a PDF file** link (in the Browse tab) still copies a file onto the server, into `data/app/documents/` — use it for the odd PDF that isn't already on the mounted disk.
 
 Absolute paths and paths outside `/library` are rejected.
 

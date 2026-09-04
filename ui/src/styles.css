@@ -130,39 +130,41 @@ button:disabled {
   font-size: 0.82rem;
 }
 
-.drop-zone {
-  display: block;
-  border: 1.5px dashed #91a59c;
+.library-attach {
+  border: 1px solid #dde2df;
   border-radius: 14px;
-  background: rgba(232, 240, 234, 0.55);
-  padding: 20px;
+  background: rgba(232, 240, 234, 0.4);
+  padding: 16px;
   text-align: center;
-  transition: 150ms ease;
 }
 
-.drop-zone:hover {
-  border-color: #31745e;
-  background: rgba(223, 238, 228, 0.8);
+.library-attach .primary {
+  width: 100%;
 }
 
-.drop-zone input {
+.library-attach .muted {
+  margin: 8px 0 0;
+}
+
+.upload-link {
+  display: inline-block;
+  margin-top: 10px;
+  color: #2b6654;
+  font-size: 0.8rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.upload-link:hover {
+  color: #1f4d3f;
+}
+
+.upload-link input {
   position: absolute;
   width: 1px;
   height: 1px;
   overflow: hidden;
   clip: rect(0, 0, 0, 0);
-}
-
-.drop-zone strong {
-  display: block;
-  color: #2b6654;
-}
-
-.drop-zone span {
-  display: block;
-  margin-top: 4px;
-  color: #6f7c77;
-  font-size: 0.82rem;
 }
 
 .field-row {

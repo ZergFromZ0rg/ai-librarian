@@ -85,6 +85,32 @@ def test_import_a_folder_recurses(service, tmp_path):
     assert {entry["file"] for entry in job["files"]} == {"a/top.pdf", "a/b/deep.pdf"}
 
 
+def test_import_dot_attaches_the_whole_library_root(service, tmp_path):
+    """The UI's "Attach main library folder" button posts path="." — this
+    must resolve to INGEST_ROOT itself and pick up nested PDFs too."""
+    _module, client, _indexed = service
+    root = _library(tmp_path)
+    (root / "top.pdf").write_bytes(make_pdf("absurd freedom at the root"))
+    (root / "Nested").mkdir()
+    (root / "Nested" / "deep.pdf").write_bytes(make_pdf("absurd freedom nested"))
+
+    resp = client.post("/library/import", json={"path": "."})
+    assert resp.status_code == 202
+    job_id = resp.json()["job_id"]
+
+    import time
+
+    deadline = time.time() + 5
+    job = None
+    while time.time() < deadline:
+        job = client.get(f"/admin/ingest-status/{job_id}").json()
+        if job["state"] in {"done", "partial", "error"}:
+            break
+        time.sleep(0.05)
+    assert job["state"] == "done"
+    assert {entry["file"] for entry in job["files"]} == {"top.pdf", "Nested/deep.pdf"}
+
+
 def test_import_deduplicates_by_content(service, tmp_path):
     _module, client, _indexed = service
     root = _library(tmp_path)
