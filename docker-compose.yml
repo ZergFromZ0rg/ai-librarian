@@ -29,11 +29,12 @@ services:
       - "${BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8000}:8000"
     volumes:
       - ./data/app:/app/data
-      # The Library → Browse tab shows this tree. Replace ./library with the
-      # host path of the disk or folder you want to browse and import from
-      # (e.g. /mnt/books:/library:ro). Keep :ro — imports reference files in
-      # place and never write here.
-      - ./library:/library:ro
+      # The single source of truth for your PDFs. Set LIBRARY_PATH in .env to
+      # the host folder that already holds them (any nesting, any size) —
+      # don't move files into ./library first. Keep :ro — imports reference
+      # files in place and never write here. This is what the Library →
+      # Browse tab walks, and what AUTO_INGEST_INTERVAL_SECONDS rescans.
+      - ${LIBRARY_PATH:-./library}:/library:ro
       - ./data/models:/models
     environment:
       PORT: "8000"
@@ -42,6 +43,7 @@ services:
       OFFLINE: ${OFFLINE:-0}
       DATA_DIR: /app/data
       INGEST_ROOT: /library
+      AUTO_INGEST_INTERVAL_SECONDS: ${AUTO_INGEST_INTERVAL_SECONDS:-60}
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: vault
       APP_TOKEN: ${APP_TOKEN:-}

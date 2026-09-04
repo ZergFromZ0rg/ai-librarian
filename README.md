@@ -7,7 +7,7 @@ No hosted AI API is required for extraction or search: once the container images
 ## What it does
 
 - Upload one or more PDFs from the browser.
-- Browse a read-only server disk like a file manager and import PDFs in place (no copy), one file or a whole folder tree.
+- Point at a folder of PDFs already on disk (`LIBRARY_PATH`, any nesting, any size) and have it auto-indexed in place — no copying, no manual step. Browse it like a file manager to look around or import ahead of the next scan.
 - Track each document through `queued`, `indexing`, `indexed`, or `error` states.
 - Retry failed indexing jobs and recover queued work after a restart.
 - Avoid duplicate documents using a SHA-256 content hash.
@@ -51,9 +51,13 @@ cp .env.example .env
 mkdir -p data/app data/qdrant data/models library
 ```
 
+Then edit `.env` and set `LIBRARY_PATH` to the folder that already holds your PDFs (any nesting, any size) — this is the app's single source of truth for documents. Point it straight at your real collection; don't copy or move files into `./library` first. Leaving it as `./library` (the default) is fine too — just put PDFs in that folder before or after starting.
+
 ```bash
 docker compose up -d --build
 ```
+
+Everything already sitting in `LIBRARY_PATH` is indexed automatically within a few seconds of startup, and anything added while it's running is picked up on the next scan (`AUTO_INGEST_INTERVAL_SECONDS`, default 60s) — no upload, no manual import click required. The Library panel's **Browse** tab is there for a first look around, or to import immediately instead of waiting for the next scan.
 
 The first indexing request takes longer because the document service downloads its embedding model. The reranker is downloaded on the first reranked search. Model files are persisted under `data/models/`.
 
@@ -128,16 +132,18 @@ The bundled UI keeps working — nginx forwards the token to the API. This prote
 
 ## Browsing and importing from a server folder
 
-The host `library/` directory is mounted read-only at `/library`. To browse a different disk, point that mount at it in `docker-compose.yml` (`/mnt/books:/library:ro`) and keep `:ro`.
+`LIBRARY_PATH` (in `.env`) is your single source of truth for documents — an absolute host path to the folder that already holds your PDFs, any nesting, any size. It's mounted read-only at `/library` inside the container; nothing is ever copied out of it or moved within it. Point it at your real collection directly, rather than moving files into the repo's `./library` folder.
+
+**This is automatic.** A background scan (`AUTO_INGEST_INTERVAL_SECONDS`, default every 60s) walks `LIBRARY_PATH` recursively and references any PDF it hasn't seen before — once immediately at startup (so a library populated before the first `docker compose up` needs no UI interaction), then again on every interval (so a file dropped in while the app is running gets picked up on its own). Set `AUTO_INGEST_INTERVAL_SECONDS=0` to disable this and rely only on manual import.
 
 The Library panel has two tabs:
 
-- **Browse** walks the mounted volume like Finder or Explorer — sub-folders (with a PDF count) and PDF files, with a breadcrumb to navigate back. **Attach main library folder** at the top imports every PDF under the mount in one click, recursively. Further down, **Import** on a single file or **Import all** on a folder does the same for just that file/folder. Imported PDFs are **referenced in place** — nothing is copied — so a large collection does not double in size on disk. Removing a document from **Indexed** un-indexes it but leaves the original file untouched.
+- **Browse** walks the mounted volume like Finder or Explorer — sub-folders (with a PDF count) and PDF files, with a breadcrumb to navigate back. **Attach main library folder** at the top imports every PDF under the mount in one click, recursively — useful to skip ahead of the next scheduled scan. Further down, **Import** on a single file or **Import all** on a folder does the same for just that file/folder. Imported PDFs are **referenced in place** — nothing is copied — so a large collection does not double in size on disk. Removing a document from **Indexed** un-indexes it but leaves the original file untouched.
 - **Indexed** is the list of documents currently in the index, with their status, page/chunk counts, retry, and remove.
 
-The small **or upload a PDF file** link (in the Browse tab) still copies a file onto the server, into `data/app/documents/` — use it for the odd PDF that isn't already on the mounted disk.
+The small **or upload a PDF file** link (in the Browse tab) still copies a file onto the server, into `data/app/documents/` — use it for the odd PDF that isn't already under `LIBRARY_PATH`.
 
-Absolute paths and paths outside `/library` are rejected.
+Absolute paths and paths outside `/library` are rejected. The folder structure you already have is preserved as-is — nested sub-folders are walked recursively, but the app does not reorganize or rename anything on disk.
 
 ## Configuration
 
@@ -146,6 +152,8 @@ Absolute paths and paths outside `/library` are rejected.
 | `BIND_ADDRESS` | `127.0.0.1` | Host interface used by published UI/API ports |
 | `UI_PORT` | `3100` | Browser UI port |
 | `API_PORT` | `8000` | Direct API and interactive docs port |
+| `LIBRARY_PATH` | `./library` | Host folder holding your PDFs (any nesting); mounted read-only at `/library` — the single source of truth for [Browsing and importing](#browsing-and-importing-from-a-server-folder) |
+| `AUTO_INGEST_INTERVAL_SECONDS` | `60` | How often to rescan `LIBRARY_PATH` for new PDFs to auto-import; `0` disables the scan (manual import only) |
 | `MAX_UPLOAD_MB` | `100` | Per-file backend upload limit |
 | `EMBEDDING_BATCH_SIZE` | `32` | Chunks embedded in each indexing batch |
 | `EMBEDDING_MODEL` | `BAAI/bge-base-en-v1.5` | Sentence-embedding model; a change re-embeds the library on next start (add `ALLOW_INDEX_RESET=1` once if the vector width changes) |
@@ -396,7 +404,7 @@ npm run build
 ## Current limitations
 
 - PDF is the only accepted document format.
-- The Browse tab sees only what is mounted at `/library`. It is not a full filesystem browser — to reach another disk, add it as a bind mount. There is no in-browser PDF preview and no watching the disk for new files (re-import after adding files).
+- The Browse tab sees only what is mounted at `/library` (`LIBRARY_PATH`). It is not a full filesystem browser — to reach another disk too, add it as a second bind mount. There is no in-browser PDF preview. New files are picked up automatically (`AUTO_INGEST_INTERVAL_SECONDS`), not instantly — up to one interval's delay, or use **Attach**/**Import** in Browse to skip the wait. The app never renames, moves, or otherwise reorganizes files on disk — sub-folder structure is only ever read, never written.
 - The service does not run OCR. A PDF that is mostly page-images with no text layer — a scan, or image-only typesetting — is rejected on upload with a message to OCR it first; a few full-page figure plates in an otherwise text PDF are fine.
 - When a minority of pages carry a corrupt OCR text layer, those pages are skipped and the rest of the document is indexed; the document then shows an `extraction_notes` message saying how many pages were left out. A PDF whose text layer is *mostly* corrupt is still refused whole.
 - Front and back matter — tables of contents, back-of-book indexes, bibliographies — is detected by shape and dropped before indexing, so those keyword-dense pages don't outrank real passages. Detection is conservative and skips nothing when it would flag more than 40% of a document.
