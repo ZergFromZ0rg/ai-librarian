@@ -12,6 +12,7 @@ out, and splices them back beside the line they followed so the equations reach
 the index.
 """
 
+import difflib
 import re
 import unicodedata
 from typing import Dict, List
@@ -144,11 +145,50 @@ def _looks_like_math(text: str) -> bool:
     return symbols >= 1 and _math_score(text) >= 0.12
 
 
+def _prose_signal(text: str, min_words: int) -> bool:
+    words = re.findall(r"[A-Za-z]{2,}", text)
+    return len(words) >= min_words and _math_score(text) < 0.06
+
+
 def _looks_like_prose(text: str) -> bool:
     """A long, symbol-sparse line is almost certainly a normalisation mismatch
     (hyphenation, ligature, OCR wobble), not something ``to_markdown`` dropped."""
-    words = re.findall(r"[A-Za-z]{2,}", text)
-    return len(text) > 45 and len(words) >= 7 and _math_score(text) < 0.06
+    return len(text) > 45 and _prose_signal(text, min_words=7)
+
+
+def _fuzzy_present(signature: str, markdown_signature: str, threshold: float = 0.85) -> bool:
+    """Is ``signature`` a near-miss for some stretch of ``markdown_signature``?
+
+    Catches a short prose line that IS already in the markdown but corrupted
+    by a stray glyph read off the raw page — e.g. a decorative rule near a
+    title misread as a letter, turning "All" into "A I" — as opposed to one
+    that's genuinely absent, which won't closely resemble anything nearby.
+    Long prose gets the cheap length-only exemption in ``_looks_like_prose``;
+    this is the same safety net for lines too short to qualify on length
+    alone, so it's only worth the extra cost for those.
+    """
+    n = len(signature)
+    if n < 8 or len(markdown_signature) < n:
+        return False
+    matcher = difflib.SequenceMatcher(None, signature, autojunk=False)
+    best = 0.0
+    # A stride, not every offset: SequenceMatcher.ratio() finds matching
+    # blocks wherever they fall inside the window, so it stays robust to a
+    # window that isn't perfectly aligned with the target — no need to pay
+    # for checking every single character offset across the whole page.
+    step = max(1, n // 6)
+    for start in range(0, len(markdown_signature) - n + 1, step):
+        matcher.set_seq2(markdown_signature[start : start + n])
+        # quick_ratio() is a cheap upper bound on ratio() — skip the pricier
+        # exact computation for windows that can't possibly clear the bar.
+        if matcher.quick_ratio() < threshold:
+            continue
+        ratio = matcher.ratio()
+        if ratio > best:
+            best = ratio
+            if best >= threshold:
+                return True
+    return best >= threshold
 
 
 def recover_dropped_text(page, markdown: str) -> str:
@@ -165,7 +205,12 @@ def recover_dropped_text(page, markdown: str) -> str:
             return True
         # Treat a prose line we can't match as "present": re-inserting it would
         # duplicate a paragraph over a trivial hyphen/ligature difference.
-        return _looks_like_prose(line["text"])
+        if _looks_like_prose(line["text"]):
+            return True
+        # Same situation, just too short for the check above to catch on
+        # length alone: a short prose line that nearly, but not quite,
+        # matches the markdown is corrupted-but-present, not dropped.
+        return _prose_signal(line["text"], min_words=4) and _fuzzy_present(signature, markdown_signature)
 
     present = [is_present(line) for line in lines]
 
