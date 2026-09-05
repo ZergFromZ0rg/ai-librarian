@@ -195,12 +195,30 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount, activeId
   const scrollRef = useRef(null);
   const savedRef = useRef("[]"); // JSON of what the server last has, so autosave is a no-op after a load
   const skipNextLoadRef = useRef(false); // set right before we already know the new id's content locally
+  const streamControllerRef = useRef(null); // in-flight /ask request, so switching chats or unmounting can cancel it
+
+  // Cancel an in-flight stream on unmount so it doesn't keep patching state
+  // nobody's watching. Switching *chats* is handled below, in the load effect
+  // (it fires on every activeId change, mount included).
+  useEffect(() => {
+    return () => streamControllerRef.current?.abort();
+  }, []);
 
   // Load whichever conversation `activeId` now points at. Skipped once, right
   // after *we* mint a brand-new id from autosave below — we already hold the
   // richer in-progress turn (sources, citations, streaming state) that a
   // server round-trip would flatten back down to bare role/content.
   useEffect(() => {
+    // Cancel whatever /ask stream is still running for the *previous*
+    // activeId. Without this, a chat switched away from mid-answer keeps
+    // streaming in the background and patchLast() keeps mutating the last
+    // message of *this* (now different) conversation — corrupting it, and
+    // then persisting that corruption back to the server once the stream
+    // ends. (No-op on the skip-ref path below: by the time autosave mints a
+    // new id, ask() has already finished and cleared this ref itself.)
+    streamControllerRef.current?.abort();
+    streamControllerRef.current = null;
+
     // Always clear the draft box and any stale error on a real switch (a
     // fresh "+ New chat" or picking a different one from the sidebar) — not
     // doing this left whatever was typed (or just submitted) sitting in the
@@ -392,6 +410,8 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount, activeId
         { role: "assistant", content: "", sources: null, pending: true, model: selectedModel },
       ]);
 
+      const controller = new AbortController();
+      streamControllerRef.current = controller;
       try {
         const providerKeys = Object.fromEntries(
           Object.entries(apiKeys).filter(([, v]) => v && v.trim()),
@@ -406,6 +426,7 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount, activeId
             ...(Object.keys(providerKeys).length ? { provider_keys: providerKeys } : {}),
           },
           {
+            signal: controller.signal,
             onEvent: (evt) => {
               if (evt.type === "token") {
                 patchLast((turn) => {
@@ -434,16 +455,27 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount, activeId
           },
         );
       } catch (err) {
-        setError(err.message);
-        patchLast((turn) => {
-          turn.error = err.message;
-          turn.pending = false;
-        });
+        // AbortError means the chat was switched away from (see the load
+        // effect) or this panel unmounted -- `conversation` no longer refers
+        // to this turn, so patching it here would corrupt whatever's showing
+        // now instead of reporting a real failure.
+        if (err.name !== "AbortError") {
+          setError(err.message);
+          patchLast((turn) => {
+            turn.error = err.message;
+            turn.pending = false;
+          });
+        }
       } finally {
         setBusy(false);
-        patchLast((turn) => {
-          turn.pending = false;
-        });
+        if (!controller.signal.aborted) {
+          patchLast((turn) => {
+            turn.pending = false;
+          });
+        }
+        if (streamControllerRef.current === controller) {
+          streamControllerRef.current = null;
+        }
       }
     },
     [apiBase, apiKeys, busy, conversation, patchLast, question, selectedModel, thorough],

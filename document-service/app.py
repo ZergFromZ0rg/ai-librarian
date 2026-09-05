@@ -411,6 +411,10 @@ SHUTDOWN = threading.Event()
 # through a folder-ingest job, so the worker can report progress back to it.
 INGEST_LINKS = {}
 INGEST_LINKS_LOCK = threading.Lock()
+# One ingest-job record is created per folder attach/import; without a cap a
+# container that runs for months without a restart would keep every one of
+# them in memory and on disk forever.
+MAX_RETAINED_JOBS = 200
 JOB_STATUS = {}
 JOB_STATUS_LOCK = threading.RLock()
 DOCUMENT_LOCKS = {}
@@ -418,6 +422,19 @@ DOCUMENT_LOCKS_LOCK = threading.Lock()
 WORKER_THREADS = []
 RERANK_EXECUTOR = None
 EXTRACTION_EXECUTOR = None
+
+
+def _new_extraction_executor() -> concurrent.futures.ProcessPoolExecutor:
+    # "fork" (Linux/Docker's default anyway, made explicit here): the worker
+    # only ever runs build_document_artifacts, a pure function of its plain
+    # arguments that touches none of this process's shared locks or open
+    # connections (STORE, Qdrant, the embedding model) -- exactly the case
+    # fork-in-a-threaded-process is safe for, since the child never needs
+    # any lock it might have inherited mid-acquisition.
+    return concurrent.futures.ProcessPoolExecutor(
+        max_workers=INDEX_EXTRACTION_WORKERS,
+        mp_context=multiprocessing.get_context("fork"),
+    )
 
 
 def signal_index_worker() -> None:
@@ -558,6 +575,28 @@ def load_job(job_id: str) -> Optional[dict]:
         return None
 
 
+_TERMINAL_JOB_STATES = {"done", "partial", "error", "interrupted"}
+
+
+def _prune_old_jobs() -> None:
+    """Drop the oldest finished job records once there are more than
+    MAX_RETAINED_JOBS, from both JOB_STATUS and JOBS_DIR."""
+    with JOB_STATUS_LOCK:
+        finished = sorted(
+            (job for job in JOB_STATUS.values() if job.get("state") in _TERMINAL_JOB_STATES),
+            key=lambda job: job.get("updated_at", ""),
+        )
+        excess = len(finished) - MAX_RETAINED_JOBS
+        if excess <= 0:
+            return
+        for job in finished[:excess]:
+            JOB_STATUS.pop(job["job_id"], None)
+            try:
+                job_path(job["job_id"]).unlink(missing_ok=True)
+            except OSError:
+                logger.exception("Could not remove old job file for %s", job["job_id"])
+
+
 def refresh_ingest_job(job_id: str) -> None:
     with JOB_STATUS_LOCK:
         job = JOB_STATUS.get(job_id)
@@ -682,6 +721,7 @@ def index_worker() -> None:
     a restart that re-queues the entire library cannot overflow anything or
     mark documents as failed for lack of space.
     """
+    global EXTRACTION_EXECUTOR
     pending: dict = {}
     while not SHUTDOWN.is_set():
         try:
@@ -708,9 +748,28 @@ def index_worker() -> None:
                 except Exception as exc:
                     _fail_indexing(doc_id, str(exc) or exc.__class__.__name__)
                     continue
-                future = EXTRACTION_EXECUTOR.submit(
-                    build_document_artifacts, stored_path, claimed["filename"], doc_id
-                )
+                try:
+                    future = EXTRACTION_EXECUTOR.submit(
+                        build_document_artifacts, stored_path, claimed["filename"], doc_id
+                    )
+                except concurrent.futures.BrokenExecutor:
+                    # A worker process for some earlier document crashed (segfault/OOM
+                    # on malformed PDF input) and left the pool unusable -- every
+                    # further submit() would raise the same way forever. Replace it
+                    # and retry this claim once against the fresh pool rather than
+                    # letting the exception escape and kill this whole worker thread.
+                    logger.exception(
+                        "Extraction process pool was broken; restarting it before retrying %s",
+                        doc_id,
+                    )
+                    EXTRACTION_EXECUTOR = _new_extraction_executor()
+                    try:
+                        future = EXTRACTION_EXECUTOR.submit(
+                            build_document_artifacts, stored_path, claimed["filename"], doc_id
+                        )
+                    except concurrent.futures.BrokenExecutor as exc:
+                        _fail_indexing(doc_id, str(exc) or exc.__class__.__name__)
+                        continue
                 pending[future] = doc_id
             else:
                 _embed_and_finish(doc_id)
@@ -1083,6 +1142,7 @@ def recover_interrupted_work() -> None:
                 JOB_STATUS[job["job_id"]] = job
         except Exception:
             logger.exception("Could not recover job %s", path)
+    _prune_old_jobs()
 
     # Mark everything that needs (re)indexing as ``queued`` and let the worker
     # pull it. The pipeline rebuild for stale documents happens in the worker,
@@ -1139,10 +1199,7 @@ def start_workers() -> None:
     # connections (STORE, Qdrant, the embedding model) -- exactly the case
     # fork-in-a-threaded-process is safe for, since the child never needs
     # any lock it might have inherited mid-acquisition.
-    EXTRACTION_EXECUTOR = concurrent.futures.ProcessPoolExecutor(
-        max_workers=INDEX_EXTRACTION_WORKERS,
-        mp_context=multiprocessing.get_context("fork"),
-    )
+    EXTRACTION_EXECUTOR = _new_extraction_executor()
     WORKER_THREADS = [
         threading.Thread(target=index_worker, daemon=True, name="index-worker"),
         threading.Thread(target=ingest_worker, daemon=True, name="ingest-worker"),
@@ -1748,6 +1805,8 @@ async def delete_document(doc_id: str):
             for path in artifacts:
                 path.unlink(missing_ok=True)
             STORE.delete(doc_id)
+        with DOCUMENT_LOCKS_LOCK:
+            DOCUMENT_LOCKS.pop(doc_id, None)
 
     try:
         await asyncio.to_thread(delete_all)
@@ -2101,6 +2160,7 @@ def _start_folder_ingest(folder: Path) -> dict:
     with JOB_STATUS_LOCK:
         JOB_STATUS[job_id] = job
         save_job(job)
+    _prune_old_jobs()
     try:
         INGEST_QUEUE.put((job_id, str(folder)), timeout=2)
     except queue.Full as exc:
