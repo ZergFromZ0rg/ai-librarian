@@ -201,6 +201,15 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount, activeId
   // richer in-progress turn (sources, citations, streaming state) that a
   // server round-trip would flatten back down to bare role/content.
   useEffect(() => {
+    // Always clear the draft box and any stale error on a real switch (a
+    // fresh "+ New chat" or picking a different one from the sidebar) — not
+    // doing this left whatever was typed (or just submitted) sitting in the
+    // box, and submitting it again as the "new" chat's first message made
+    // that chat inherit the old one's title, since a title is just its
+    // first message's content. A no-op on the skip-ref path below, since
+    // ask() already cleared the box before the save that triggered it.
+    setQuestion("");
+    setError("");
     if (skipNextLoadRef.current) {
       skipNextLoadRef.current = false;
       return;
