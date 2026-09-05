@@ -715,10 +715,12 @@ def build_document_artifacts(
     extraction_notes = None
     if garbled:
         # A minority of the pages are OCR garbage. Drop just those and index
-        # the rest rather than refusing the whole document.
+        # the rest rather than refusing the whole document. Page numbers must
+        # be read off before filtering — `garbled` indexes the original list.
+        skipped_page_numbers = sorted(pages[index]["page"] for index in garbled)
         pages = [page for index, page in enumerate(pages) if index not in garbled]
-        extraction_notes = describe_skipped_pages(len(garbled), total_pages)
-        logger.info("Skipped %d corrupt page(s) of %s", len(garbled), filename)
+        extraction_notes = describe_skipped_pages(skipped_page_numbers, total_pages)
+        logger.info("Skipped corrupt page(s) %s of %s", skipped_page_numbers, filename)
 
     # Contents / index / bibliography pages: keyword-dense, no retrievable prose.
     boilerplate = set(boilerplate_page_indices(pages))

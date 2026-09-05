@@ -333,10 +333,13 @@ def assess_text_layer(pages: List[Dict]) -> Optional[str]:
     return None
 
 
-def describe_skipped_pages(count: int, total: int) -> str:
+def describe_skipped_pages(page_numbers: List[int], total: int) -> str:
     """The note stored on a document that indexed with some pages dropped."""
+    count = len(page_numbers)
+    label = "page" if count == 1 else "pages"
+    numbers = ", ".join(str(n) for n in page_numbers)
     return (
-        f"{count} of {total} pages were skipped because their text layer is "
+        f"{count} of {total} pages ({label} {numbers}) were skipped because their text layer is "
         "corrupted (most likely a poor OCR scan of those pages); the rest of "
         "the document was indexed normally."
     )
