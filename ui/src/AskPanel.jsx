@@ -216,8 +216,17 @@ export default function AskPanel({ apiBase, onViewSource, indexedCount, activeId
     }
     let cancelled = false;
     if (!activeId) {
+      // Not `savedRef.current = "[]"` here: setConversation([]) doesn't
+      // apply until the *next* render, but this ref write would apply
+      // immediately — and the autosave effect below, re-running in this
+      // same pass (it also depends on activeId), would then compare the
+      // *previous* chat's still-current `conversation` closure against this
+      // freshly-blanked ref instead of against its own unchanged value. The
+      // mismatch looked like "unsaved changes" and POSTed the old chat's
+      // messages as a new conversation. The conversation.length === 0 guard
+      // below already covers the empty case correctly once state catches up
+      // — this line was redundant, and was the entire bug.
       setConversation([]);
-      savedRef.current = "[]";
       return undefined;
     }
     (async () => {
