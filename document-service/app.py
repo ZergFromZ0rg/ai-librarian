@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import logging.handlers
+import multiprocessing
 import os
 import queue
 import re
@@ -131,6 +132,12 @@ INDEX_POLL_SECONDS = float(os.environ.get("INDEX_POLL_SECONDS", "30"))
 # the scan entirely (Browse/Attach import remain manual-only).
 AUTO_INGEST_INTERVAL_SECONDS = float(os.environ.get("AUTO_INGEST_INTERVAL_SECONDS", "60"))
 RERANK_MAX_WORKERS = int(os.environ.get("RERANK_MAX_WORKERS", "2"))
+# PDF extraction's per-page ML layout pass dominates indexing time (profiled at
+# ~96% of it) and pymupdf4llm serializes every call to it within a process via
+# its own internal lock -- so only separate OS processes actually run it
+# concurrently, threads would just queue up behind that lock. Each worker
+# loads its own copy of the layout model, so keep this modest.
+INDEX_EXTRACTION_WORKERS = int(os.environ.get("INDEX_EXTRACTION_WORKERS", "2"))
 RERANK_TIMEOUT = float(os.environ.get("RERANK_TIMEOUT", "15"))
 # How many fused candidates the cross-encoder actually scores. Dense+sparse
 # fusion is only a coarse filter; the reranker is what picks the winning
@@ -410,6 +417,7 @@ DOCUMENT_LOCKS = {}
 DOCUMENT_LOCKS_LOCK = threading.Lock()
 WORKER_THREADS = []
 RERANK_EXECUTOR = None
+EXTRACTION_EXECUTOR = None
 
 
 def signal_index_worker() -> None:
@@ -612,16 +620,26 @@ def enqueue_index(task: IndexTask) -> None:
     signal_index_worker()
 
 
-def _index_one_document(metadata: dict) -> None:
-    """Embed and upsert one already-claimed (``indexing``) document."""
-    doc_id = metadata["document_id"]
+def _fail_indexing(doc_id: str, message: str) -> None:
+    logger.error("Indexing failed for document %s: %s", doc_id, message)
+    try:
+        delete_document_vectors(doc_id)
+    except Exception:
+        logger.exception("Could not clean partial vectors for %s", doc_id)
+    try:
+        update_metadata(doc_id, indexing_status="error", indexing_error=message)
+    except Exception:
+        logger.exception("Could not persist indexing error for %s", doc_id)
+    update_ingest_entry(doc_id, "error", message)
+
+
+def _embed_and_finish(doc_id: str) -> None:
+    """Embed and upsert a document's already-extracted chunks, then mark it
+    indexed. Runs under the document's lock: the embedding model, Qdrant
+    client, and metadata store are single shared instances in this process
+    (unlike extraction, which runs in its own worker process per document)."""
     with get_document_lock(doc_id):
         try:
-            if metadata.get("pipeline_version") != PIPELINE_VERSION:
-                # Queued before an extraction-pipeline upgrade: rebuild its
-                # blocks and chunks from the stored PDF before embedding.
-                rebuild_document_artifacts(metadata)
-                update_metadata(doc_id, indexing_status="indexing", indexing_error=None)
             update_ingest_entry(doc_id, "indexing")
             chunks = read_json(CHUNKS_DIR / f"{doc_id}.json")
             delete_document_vectors(doc_id)
@@ -644,32 +662,34 @@ def _index_one_document(metadata: dict) -> None:
             )
             update_ingest_entry(doc_id, "indexed")
         except Exception as exc:
-            message = str(exc) or exc.__class__.__name__
-            logger.exception("Indexing failed for document %s", doc_id)
-            try:
-                delete_document_vectors(doc_id)
-            except Exception:
-                logger.exception("Could not clean partial vectors for %s", doc_id)
-            try:
-                update_metadata(doc_id, indexing_status="error", indexing_error=message)
-            except Exception:
-                logger.exception("Could not persist indexing error for %s", doc_id)
-            update_ingest_entry(doc_id, "error", message)
+            _fail_indexing(doc_id, str(exc) or exc.__class__.__name__)
 
 
 def index_worker() -> None:
     """Drain every ``queued`` document whenever woken.
 
+    Extraction -- a per-page ML layout pass, by far the most expensive step
+    (profiled at ~96% of indexing time) -- is farmed out to
+    EXTRACTION_EXECUTOR (a process pool) up to INDEX_EXTRACTION_WORKERS at a
+    time, so documents queued together (a folder import, a bulk reindex, or
+    several uploads landing close together) actually extract concurrently
+    instead of one at a time. Embedding and upserting -- cheap by
+    comparison, and dependent on this process's single shared embedding
+    model and Qdrant client -- stay sequential here, run as each extraction
+    finishes.
+
     Pulling work from the database (rather than a bounded in-memory queue) means
     a restart that re-queues the entire library cannot overflow anything or
     mark documents as failed for lack of space.
     """
+    pending: dict = {}
     while not SHUTDOWN.is_set():
         try:
-            INDEX_SIGNAL.get(timeout=INDEX_POLL_SECONDS)
+            INDEX_SIGNAL.get(timeout=0.5 if pending else INDEX_POLL_SECONDS)
         except queue.Empty:
             pass
-        while not SHUTDOWN.is_set():
+
+        while not SHUTDOWN.is_set() and len(pending) < INDEX_EXTRACTION_WORKERS:
             try:
                 claimed = STORE.claim_for_indexing(utc_now())
             except Exception:
@@ -677,7 +697,51 @@ def index_worker() -> None:
                 break
             if claimed is None:
                 break
-            _index_one_document(claimed)
+            doc_id = claimed["document_id"]
+            if claimed.get("pipeline_version") != PIPELINE_VERSION:
+                try:
+                    stored_path = pdf_path(claimed)
+                    if not stored_path.exists():
+                        raise FileNotFoundError(
+                            "the source PDF is missing (moved, or its disk is unmounted)"
+                        )
+                except Exception as exc:
+                    _fail_indexing(doc_id, str(exc) or exc.__class__.__name__)
+                    continue
+                future = EXTRACTION_EXECUTOR.submit(
+                    build_document_artifacts, stored_path, claimed["filename"], doc_id
+                )
+                pending[future] = doc_id
+            else:
+                _embed_and_finish(doc_id)
+
+        if not pending:
+            continue
+        done, _ = concurrent.futures.wait(
+            pending.keys(), timeout=1, return_when=concurrent.futures.FIRST_COMPLETED
+        )
+        for future in done:
+            doc_id = pending.pop(future)
+            try:
+                page_count, chunks, group_count, extraction_notes = future.result()
+            except Exception as exc:
+                _fail_indexing(doc_id, str(exc) or exc.__class__.__name__)
+                continue
+            try:
+                update_metadata(
+                    doc_id,
+                    pages=page_count,
+                    chunks=group_count,
+                    retrieval_units=len(chunks),
+                    pipeline_version=PIPELINE_VERSION,
+                    index_schema_version=0,
+                    indexing_error=None,
+                    extraction_notes=extraction_notes,
+                )
+            except Exception as exc:
+                _fail_indexing(doc_id, str(exc) or exc.__class__.__name__)
+                continue
+            _embed_and_finish(doc_id)
 
 
 def hash_file(path: Path) -> str:
@@ -788,27 +852,6 @@ def build_document_artifacts(
     return total_pages, chunks, len(groups), extraction_notes
 
 
-def rebuild_document_artifacts(metadata: dict) -> dict:
-    doc_id = metadata["document_id"]
-    stored_path = pdf_path(metadata)
-    if not stored_path.exists():
-        raise FileNotFoundError("the source PDF is missing (moved, or its disk is unmounted)")
-    page_count, chunks, group_count, extraction_notes = build_document_artifacts(
-        stored_path, metadata["filename"], doc_id
-    )
-    return update_metadata(
-        doc_id,
-        pages=page_count,
-        chunks=group_count,
-        retrieval_units=len(chunks),
-        pipeline_version=PIPELINE_VERSION,
-        index_schema_version=0,
-        indexing_status="queued",
-        indexing_error=None,
-        extraction_notes=extraction_notes,
-    )
-
-
 def create_document(
     stored_path: Path,
     filename: str,
@@ -817,45 +860,54 @@ def create_document(
     doc_id: Optional[str] = None,
     source_path: Optional[str] = None,
 ) -> dict:
-    """Extract + record one document. ``source_path`` (relative to
-    ``INGEST_ROOT``) means the PDF is referenced in place, not owned by us."""
-    doc_id = doc_id or generate_id()
-    try:
-        page_count, chunks, group_count, extraction_notes = build_document_artifacts(
-            stored_path, filename, doc_id
-        )
+    """Record one document and queue it for extraction + indexing in the
+    background. ``source_path`` (relative to ``INGEST_ROOT``) means the PDF
+    is referenced in place, not owned by us.
 
-        now = utc_now()
-        metadata = {
-            "document_id": doc_id,
-            "filename": filename,
-            "file_type": "pdf",
-            "title": title_from_filename(filename),
-            "stored_filename": stored_path.name,
-            "content_sha256": content_sha256,
-            "source_path": source_path,
-            "uploaded_at": now,
-            "updated_at": now,
-            "pages": page_count,
-            "chunks": group_count,
-            "retrieval_units": len(chunks),
-            "extraction_notes": extraction_notes,
-            # "pending" until enqueue_index flips it to "queued": the index
-            # worker only claims "queued" rows, so a folder-ingest job always
-            # has its progress link registered before the worker can pick it up.
-            "indexing_status": "pending",
-            "indexing_error": None,
-            "embedding_model": EMBEDDING_MODEL,
-            "vector_dim": 0,
-            "pipeline_version": PIPELINE_VERSION,
-            "index_schema_version": 0,
-        }
+    Extraction used to happen right here, synchronously, before this ever
+    returned -- which meant an upload (or a folder import) never overlapped
+    with any other document's extraction, the single most expensive step in
+    the pipeline (a per-page ML layout pass). Recording it immediately with
+    a sentinel ``pipeline_version`` and letting the background worker pool
+    extract it lets documents queued together actually run concurrently,
+    regardless of how they arrived. A PDF that turns out to have no
+    extractable text, say, now fails later as this document's
+    ``indexing_status`` rather than as an immediate error response here.
+    """
+    doc_id = doc_id or generate_id()
+    now = utc_now()
+    metadata = {
+        "document_id": doc_id,
+        "filename": filename,
+        "file_type": "pdf",
+        "title": title_from_filename(filename),
+        "stored_filename": stored_path.name,
+        "content_sha256": content_sha256,
+        "source_path": source_path,
+        "uploaded_at": now,
+        "updated_at": now,
+        "pages": 0,
+        "chunks": 0,
+        "retrieval_units": 0,
+        "extraction_notes": None,
+        # "pending" until enqueue_index flips it to "queued": the index
+        # worker only claims "queued" rows, so a folder-ingest job always
+        # has its progress link registered before the worker can pick it up.
+        "indexing_status": "pending",
+        "indexing_error": None,
+        "embedding_model": EMBEDDING_MODEL,
+        "vector_dim": 0,
+        # Never a real version (those start at 1): guarantees the worker
+        # takes its "needs extraction" path regardless of today's
+        # PIPELINE_VERSION, since this document has no chunks yet at all.
+        "pipeline_version": -1,
+        "index_schema_version": 0,
+    }
+    try:
         return STORE.create(metadata)
     except Exception:
         if source_path is None:  # only ever delete a PDF we own
             stored_path.unlink(missing_ok=True)
-        (EXTRACTED_DIR / f"{doc_id}.json").unlink(missing_ok=True)
-        (CHUNKS_DIR / f"{doc_id}.json").unlink(missing_ok=True)
         STORE.delete(doc_id)
         raise
 
@@ -1073,13 +1125,23 @@ def recover_interrupted_work() -> None:
 
 
 def start_workers() -> None:
-    global WORKER_THREADS, RERANK_EXECUTOR
+    global WORKER_THREADS, RERANK_EXECUTOR, EXTRACTION_EXECUTOR
     if any(thread.is_alive() for thread in WORKER_THREADS):
         return
     SHUTDOWN.clear()
     RERANK_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
         max_workers=RERANK_MAX_WORKERS,
         thread_name_prefix="reranker",
+    )
+    # "fork" (Linux/Docker's default anyway, made explicit here): the worker
+    # only ever runs build_document_artifacts, a pure function of its plain
+    # arguments that touches none of this process's shared locks or open
+    # connections (STORE, Qdrant, the embedding model) -- exactly the case
+    # fork-in-a-threaded-process is safe for, since the child never needs
+    # any lock it might have inherited mid-acquisition.
+    EXTRACTION_EXECUTOR = concurrent.futures.ProcessPoolExecutor(
+        max_workers=INDEX_EXTRACTION_WORKERS,
+        mp_context=multiprocessing.get_context("fork"),
     )
     WORKER_THREADS = [
         threading.Thread(target=index_worker, daemon=True, name="index-worker"),
@@ -1095,7 +1157,7 @@ def start_workers() -> None:
 
 
 def stop_workers() -> None:
-    global RERANK_EXECUTOR
+    global RERANK_EXECUTOR, EXTRACTION_EXECUTOR
     SHUTDOWN.set()
     signal_index_worker()
     try:
@@ -1107,6 +1169,9 @@ def stop_workers() -> None:
     if RERANK_EXECUTOR is not None:
         RERANK_EXECUTOR.shutdown(wait=False, cancel_futures=True)
         RERANK_EXECUTOR = None
+    if EXTRACTION_EXECUTOR is not None:
+        EXTRACTION_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+        EXTRACTION_EXECUTOR = None
 
 
 @asynccontextmanager
@@ -1522,11 +1587,11 @@ async def upload_document(file: UploadFile = File(...)):
         metadata = await asyncio.to_thread(
             create_document, stored_path, Path(file.filename).name, digest.hexdigest(), doc_id=doc_id
         )
-    except ValueError as exc:
-        # A deliberate, user-facing rejection from build_document_artifacts
-        # (no extractable text, corrupt OCR layer, no searchable chunks).
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
+        # Extraction itself now happens in the background (see
+        # create_document) -- a rejection like "no extractable text" surfaces
+        # later as this document's indexing_status, not here. Only a genuine
+        # bookkeeping failure (the metadata insert itself) reaches this.
         raise _sanitized_http_error(
             422, "document ingestion failed", exc, log_context=file.filename
         ) from exc
@@ -1648,20 +1713,21 @@ async def get_document_page(
 
 @app.post("/documents/{doc_id}/retry")
 async def retry_document(doc_id: str):
+    """Queue a document for another indexing attempt. Extraction (if its
+    pipeline is behind PIPELINE_VERSION) and embedding both now happen in
+    the background worker -- via the process pool for extraction -- rather
+    than blocking this request, so retrying several documents at once (a
+    bulk reindex) actually overlaps instead of running one at a time."""
     metadata = await asyncio.to_thread(read_metadata, doc_id)
     if metadata.get("indexing_status") in {"queued", "indexing"}:
         raise HTTPException(status_code=409, detail="document is already queued for indexing")
-    if metadata.get("pipeline_version") != PIPELINE_VERSION:
-        try:
-            metadata = await asyncio.to_thread(rebuild_document_artifacts, metadata)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except Exception as exc:
-            raise _sanitized_http_error(
-                422, "document rebuild failed", exc, log_context=doc_id
-            ) from exc
-    chunks_path = CHUNKS_DIR / f"{doc_id}.json"
-    if not chunks_path.exists():
+    stale_pipeline = metadata.get("pipeline_version") != PIPELINE_VERSION
+    if stale_pipeline:
+        if not await asyncio.to_thread(lambda: pdf_path(metadata).exists()):
+            raise HTTPException(
+                status_code=404, detail="the source PDF is missing (moved, or its disk is unmounted)"
+            )
+    elif not (CHUNKS_DIR / f"{doc_id}.json").exists():
         raise HTTPException(status_code=409, detail="document chunks are missing; upload the document again")
     enqueue_index(IndexTask(doc_id))
     return await asyncio.to_thread(read_metadata, doc_id)
@@ -2122,9 +2188,10 @@ async def library_import(request: LibraryImportRequest):
         )
     except HTTPException:
         raise
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
+        # Extraction now happens in the background (see create_document); a
+        # rejection like "no extractable text" surfaces later as this
+        # document's indexing_status, not here.
         raise _sanitized_http_error(422, "import failed", exc, log_context=request.path) from exc
     if deduplicated:
         return JSONResponse({**metadata, "deduplicated": True}, status_code=200)
