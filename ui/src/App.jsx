@@ -6,7 +6,12 @@ import LibraryBrowser from "./LibraryBrowser.jsx";
 import ResultCard from "./ResultCard.jsx";
 import Settings from "./Settings.jsx";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "/api";
+// `??`, not `||`: the production Docker build sets VITE_API_BASE="" on purpose
+// (document-service serves the UI and the API from the same origin, so no
+// prefix is needed there) -- an empty string must NOT fall back to "/api". The
+// dev server (`npm run dev`) leaves VITE_API_BASE unset and relies on
+// vite.config.js's own /api proxy to a standalone backend instead.
+const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 const TERMINAL_JOB_STATES = new Set(["done", "partial", "error", "interrupted"]);
 const THEME_KEY = "ai-librarian.theme";
 const SIDEBAR_KEY = "ai-librarian.sidebar-collapsed";

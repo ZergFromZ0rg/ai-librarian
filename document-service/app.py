@@ -24,6 +24,7 @@ import pymupdf
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.datastructures import Headers, MutableHeaders
 
@@ -111,11 +112,18 @@ SEARCH_LOG_ENABLED = os.environ.get("SEARCH_LOG", "on").strip().lower() not in {
 SEARCH_LOG_MAX_BYTES = int(os.environ.get("SEARCH_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
 SEARCH_LOG_BACKUPS = int(os.environ.get("SEARCH_LOG_BACKUPS", "3"))
 
-# When set, every endpoint except the health checks requires
-# ``Authorization: Bearer <APP_TOKEN>``. Empty (the default) leaves the API open,
-# which is the intended posture for a loopback / SSH-tunnel deployment.
+# When set, every endpoint except the health checks and the static UI (below)
+# requires ``Authorization: Bearer <APP_TOKEN>``. Empty (the default) leaves
+# the API open, which is the intended posture for a loopback / SSH-tunnel
+# deployment.
 APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()
-_AUTH_EXEMPT_PATHS = {"/health", "/health/live", "/health/ready"}
+_AUTH_EXEMPT_PATHS = {"/health", "/health/live", "/health/ready", "/", "/index.html"}
+# The built UI's own static assets (see the StaticFiles mount at the bottom of
+# this file) -- these were always served unauthenticated, straight off nginx's
+# filesystem, in the old two-container layout, so this preserves that: the
+# token still gates every real API call the page goes on to make, just not
+# loading the page itself.
+_AUTH_EXEMPT_PREFIXES = ("/assets/",)
 REQUEST_ID: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "100")) * 1024 * 1024
@@ -1243,7 +1251,8 @@ async def lifespan(_app: FastAPI):
 def _request_authorized(scope) -> bool:
     if not APP_TOKEN or scope["method"] == "OPTIONS":
         return True
-    if scope["path"] in _AUTH_EXEMPT_PATHS:
+    path = scope["path"]
+    if path in _AUTH_EXEMPT_PATHS or path.startswith(_AUTH_EXEMPT_PREFIXES):
         return True
     scheme, _, token = Headers(scope=scope).get("authorization", "").partition(" ")
     return scheme.lower() == "bearer" and secrets.compare_digest(token, APP_TOKEN)
@@ -2319,6 +2328,18 @@ async def health_ready():
         "ingest_queue": INGEST_QUEUE.qsize(),
     }
     return JSONResponse(payload, status_code=200 if qdrant_ok else 503)
+
+
+# Serve the built UI (see the Dockerfile's ui-build stage, which copies
+# ui/dist here) at "/", *after* every API route above -- Starlette matches
+# routes in registration order, so a real request for e.g. /documents is
+# handled by that route, and only paths nothing above claims fall through to
+# static files. html=True serves index.html for "/". Missing in local dev
+# (no image build has happened) -- guarded so `pytest`/`uvicorn app:app`
+# without a built ui/dist still starts, just without a UI at "/".
+_UI_DIST_DIR = Path(os.environ.get("UI_DIST_DIR", str(Path(__file__).resolve().parent / "static")))
+if _UI_DIST_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=_UI_DIST_DIR, html=True), name="ui")
 
 
 if __name__ == "__main__":
