@@ -218,6 +218,8 @@ export default function App() {
   const [searching, setSearching] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [attaching, setAttaching] = useState(false);
+  const [selectedDocs, setSelectedDocs] = useState(() => new Set());
+  const [reindexing, setReindexing] = useState(false);
   const [source, setSource] = useState(null);
   const [askEnabled, setAskEnabled] = useState(false);
   const [view, setView] = useState("search");
@@ -537,16 +539,46 @@ export default function App() {
     }
   }
 
-  async function retryDocument(documentId) {
-    try {
-      await api(`/documents/${documentId}/retry`, { method: "POST" });
-      setNotice("Document queued for another indexing attempt.");
+  // Handles both the single-document "Retry" button and the bulk
+  // "Reindex selected/all" actions. `/retry` already rebuilds from the
+  // source PDF whenever a document's pipeline_version is behind the
+  // server's current one — exactly what picking up an extraction fix
+  // needs — so this needed no new backend endpoint, just a way to call the
+  // existing one for more than one document without one failure stopping
+  // the rest of the batch.
+  async function reindexDocuments(ids) {
+    if (!ids.length || reindexing) return;
+    setReindexing(true);
+    let succeeded = 0;
+    let failed = 0;
+    for (const id of ids) {
+      setNotice(`Reindexing… (${succeeded + failed + 1}/${ids.length})`);
       setNoticeError(false);
-      refreshDocuments();
-    } catch (error) {
-      setNotice(error.message);
-      setNoticeError(true);
+      try {
+        await api(`/documents/${id}/retry`, { method: "POST" });
+        succeeded += 1;
+      } catch (_error) {
+        failed += 1;
+      }
     }
+    setNotice(
+      failed
+        ? `Reindexed ${succeeded} document${succeeded === 1 ? "" : "s"}; ${failed} failed.`
+        : `Queued ${succeeded} document${succeeded === 1 ? "" : "s"} for reindexing.`,
+    );
+    setNoticeError(Boolean(failed));
+    setSelectedDocs(new Set());
+    setReindexing(false);
+    refreshDocuments();
+  }
+
+  function toggleDocSelected(id) {
+    setSelectedDocs((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }
 
   async function removeDocument(document) {
@@ -715,9 +747,51 @@ export default function App() {
               ) : (
                 <div className="document-list">
                   {documents.length === 0 && <p className="muted">Nothing indexed yet. Import a PDF from the Browse tab.</p>}
+                  {documents.length > 0 && (
+                    <div className="document-list-actions">
+                      <label className="document-select-all">
+                        <input
+                          type="checkbox"
+                          ref={(el) => {
+                            if (el) el.indeterminate = selectedDocs.size > 0 && selectedDocs.size < documents.length;
+                          }}
+                          checked={documents.length > 0 && selectedDocs.size === documents.length}
+                          onChange={(event) =>
+                            setSelectedDocs(event.target.checked ? new Set(documents.map((d) => d.document_id)) : new Set())
+                          }
+                        />
+                        <span>{selectedDocs.size ? `${selectedDocs.size} selected` : "Select all"}</span>
+                      </label>
+                      <button
+                        type="button"
+                        className="link"
+                        disabled={reindexing || selectedDocs.size === 0}
+                        onClick={() => reindexDocuments([...selectedDocs])}
+                      >
+                        Reindex selected
+                      </button>
+                      <button
+                        type="button"
+                        className="link"
+                        disabled={reindexing}
+                        onClick={() => reindexDocuments(documents.map((d) => d.document_id))}
+                        title="Re-extracts and re-chunks every document from its source PDF — worth doing after an extraction-quality fix."
+                      >
+                        Reindex all
+                      </button>
+                    </div>
+                  )}
                   {documents.map((document) => (
-                    <article className="document-card" key={document.document_id}>
-                      <div className="document-name" title={document.filename}>{document.filename}</div>
+                    <article className={`document-card${selectedDocs.has(document.document_id) ? " selected" : ""}`} key={document.document_id}>
+                      <div className="document-card-head">
+                        <input
+                          type="checkbox"
+                          checked={selectedDocs.has(document.document_id)}
+                          onChange={() => toggleDocSelected(document.document_id)}
+                          aria-label={`Select ${document.filename}`}
+                        />
+                        <div className="document-name" title={document.filename}>{document.filename}</div>
+                      </div>
                       <div className="document-meta">
                         <span className={`badge ${document.indexing_status}`}>{document.indexing_status}</span>
                         <span>{document.pages} pages</span>
@@ -730,7 +804,14 @@ export default function App() {
                       {document.extraction_notes && <div className="status-message">{document.extraction_notes}</div>}
                       <div className="document-actions">
                         {document.indexing_status === "error" && (
-                          <button className="secondary" type="button" onClick={() => retryDocument(document.document_id)}>Retry</button>
+                          <button
+                            className="secondary"
+                            type="button"
+                            disabled={reindexing}
+                            onClick={() => reindexDocuments([document.document_id])}
+                          >
+                            Retry
+                          </button>
                         )}
                         <button className="danger" type="button" onClick={() => removeDocument(document)}>Remove</button>
                       </div>
@@ -787,6 +868,9 @@ export default function App() {
                   rootNotice={rootNotice}
                   rootError={rootError}
                   onSetLibraryFolder={setLibraryFolder}
+                  documentCount={documents.length}
+                  reindexing={reindexing}
+                  onReindexAll={() => reindexDocuments(documents.map((d) => d.document_id))}
                   onClose={() => setSettingsOpen(false)}
                 />
               )}
