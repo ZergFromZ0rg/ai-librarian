@@ -77,9 +77,6 @@ export default function Settings({
     <div className="settings-popover" ref={popoverRef} role="dialog" aria-label="Settings">
       <div className="settings-head">
         <strong>Settings</strong>
-        <button type="button" className="link" onClick={onClose}>
-          Done
-        </button>
       </div>
 
       <section className="settings-section">

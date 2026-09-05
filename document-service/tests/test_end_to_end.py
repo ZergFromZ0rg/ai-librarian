@@ -272,7 +272,9 @@ def test_document_with_a_few_corrupt_pages_indexes_the_rest_with_a_note(service)
 
     metadata = wait_for_status(client, doc_id, "indexed")
     assert metadata["pages"] == 12  # the true page count, not the kept count
-    assert "2 of 12 pages were skipped" in (metadata["extraction_notes"] or "")
+    notes = metadata["extraction_notes"] or ""
+    assert "2 of 12 pages" in notes
+    assert "pages 11, 12" in notes
 
 
 def test_indexing_error_is_persisted_and_retryable(service, monkeypatch):

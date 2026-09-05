@@ -653,6 +653,30 @@ button.rescan-link:disabled {
   color: var(--danger-text);
 }
 
+.status-message.success {
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+
+.job-progress-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.job-progress-bar {
+  height: 5px;
+  background: var(--border-strong);
+  overflow: hidden;
+}
+
+.job-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
 .document-list {
   display: grid;
   gap: 8px;
@@ -724,6 +748,25 @@ button.rescan-link:disabled {
 
 .document-actions {
   justify-content: flex-end;
+}
+
+.document-notice-toggle {
+  display: block;
+  margin-top: 7px;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--warning-text);
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.document-notice-toggle.error {
+  color: var(--danger);
+}
+
+.document-notice-toggle:hover {
+  text-decoration: underline;
 }
 
 .badge {
@@ -999,17 +1042,22 @@ button.rescan-link:disabled {
 
 /* Library browser ----------------------------------------------------- */
 
+/* No full-width border-bottom on these two (unlike the base .panel-tabs):
+   in the narrow sidebar, a divider spanning well past two short tab labels
+   read as room left for a third tab that was never coming. Each tab's own
+   active-state underline is signal enough. */
 .library-tabs {
   margin: -4px 0 14px;
   padding: 0 0 0;
   background: none;
+  border-bottom: none;
 }
 
 .sidebar-section-tabs {
   margin: -4px 0 16px;
   padding: 0 0 8px;
   background: none;
-  border-bottom: 1px solid var(--border);
+  border-bottom: none;
 }
 
 /* Sidebar: chat history -------------------------------------------------- */
@@ -1017,7 +1065,7 @@ button.rescan-link:disabled {
 .chat-list {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 5px;
 }
 
 .chat-list-new {
@@ -1050,11 +1098,18 @@ button.rescan-link:disabled {
   display: flex;
   align-items: center;
   gap: 2px;
+  /* A background at rest, not just on hover/active — with .sidebar's own
+     flat background right behind it, adjacent rows with no fill at all
+     were hard to tell apart from one another and from the sidebar itself. */
+  background: var(--surface);
 }
 
-.chat-list-item:hover,
-.chat-list-item.active {
+.chat-list-item:hover {
   background: var(--surface-tint-soft);
+}
+
+.chat-list-item.active {
+  background: var(--accent-tint);
 }
 
 .chat-list-title {
