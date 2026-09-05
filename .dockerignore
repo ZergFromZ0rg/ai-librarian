@@ -1,0 +1,31 @@
+# document-service build context is now the repo root (so its Dockerfile can
+# also COPY in ui/ for the static-UI build stage) -- this keeps that context
+# transfer small and keeps host-only artifacts out of the image.
+.git/
+.github/
+.claude/
+data/
+library/
+*.ses
+.env
+.env.example
+
+document-service/__pycache__/
+document-service/**/__pycache__/
+document-service/*.pyc
+document-service/.venv/
+document-service/venv/
+document-service/env/
+document-service/data/
+document-service/*.sqlite3
+document-service/*.log
+document-service/tests/
+document-service/.pytest_cache/
+document-service/.ruff_cache/
+
+ui/node_modules/
+ui/dist/
+ui/npm-debug.log*
+ui/.pytest_cache/
+
+.DS_Store

@@ -20,12 +20,22 @@ services:
 
   document-service:
     build:
-      context: ./document-service
-      dockerfile: Dockerfile
+      # Repo root, not ./document-service: the Dockerfile's first stage also
+      # builds ui/ and copies the static bundle in, so document-service can
+      # serve the UI itself -- no separate nginx/UI container.
+      context: .
+      dockerfile: document-service/Dockerfile
       args:
         PREBAKE_MODELS: ${PREBAKE_MODELS:-0}
     restart: unless-stopped
     ports:
+      # Same container, same port, published twice: UI_PORT is the browser
+      # entrypoint, API_PORT is for direct API/`/docs` access -- both now hit
+      # the literal same server (it serves the static UI at "/" and its API
+      # routes at their existing paths; see app.py's static mount at the
+      # bottom of the file). Kept as two ports anyway so an existing
+      # bookmark, SSH tunnel, or script pointed at either one still works.
+      - "${BIND_ADDRESS:-127.0.0.1}:${UI_PORT:-3100}:8000"
       - "${BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8000}:8000"
     volumes:
       - ./data/app:/app/data
@@ -119,28 +129,5 @@ services:
       timeout: 5s
       retries: 12
       start_period: 30s
-    security_opt:
-      - no-new-privileges:true
-
-  ui:
-    build:
-      context: ./ui
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${UI_PORT:-3100}:8080"
-    environment:
-      # "Bearer <token>" when APP_TOKEN is set, empty otherwise; nginx forwards
-      # it so the bundled UI keeps working when the API requires a token.
-      APP_TOKEN_HEADER: "${APP_TOKEN:+Bearer }${APP_TOKEN:-}"
-      NGINX_ENVSUBST_FILTER: "^APP_TOKEN_HEADER$$"
-    depends_on:
-      document-service:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
     security_opt:
       - no-new-privileges:true

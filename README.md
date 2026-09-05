@@ -24,17 +24,20 @@ No hosted AI API is required for extraction or search: once the container images
 Browser
   │
   ▼
-Nginx UI ── /api ──► FastAPI document service
-                         ├── PyMuPDF4LLM layout extraction
-                         ├── Typed paragraph/heading/equation/table/caption blocks
-                         ├── 180-token target, protected groups, 32-token overlap
-                         ├── Sentence Transformer embeddings/reranking
-                         ├── Qdrant dense + sparse hybrid retrieval
-                         └── Ask mode (optional): grounded answer generation
-                             via a local Ollama model or a cloud API
+FastAPI document service (serves the static UI and the API from one process)
+  ├── PyMuPDF4LLM layout extraction
+  ├── Typed paragraph/heading/equation/table/caption blocks
+  ├── 180-token target, protected groups, 32-token overlap
+  ├── Sentence Transformer embeddings/reranking
+  ├── Qdrant dense + sparse hybrid retrieval
+  └── Ask mode (optional): grounded answer generation
+      via a local Ollama model or a cloud API
 ```
 
-Qdrant is private to the Compose network. Only the UI and API are published, and both bind to `127.0.0.1` by default.
+One container serves both the UI and the API — `UI_PORT` and `API_PORT` are the same
+server published on two ports (see [Configuration](#configuration)); use whichever is
+convenient. Qdrant is a second container, private to the Compose network and never
+published to the host.
 
 ## Server quick start
 
@@ -116,19 +119,19 @@ BIND_ADDRESS=0.0.0.0
 UI_PORT=3100
 ```
 
-Then open `http://SERVER_LAN_IP:3100`. If port 3100 is already occupied, choose another unused `UI_PORT`; the container still listens internally on port 8080.
+Then open `http://SERVER_LAN_IP:3100`. If port 3100 is already occupied, choose another unused `UI_PORT`; the container still listens internally on port 8000.
 
-Restrict ports 3100 and 8000 with the server firewall.
+Restrict ports 3100 and 8000 with the server firewall — both now reach the same server (see [Architecture](#architecture)), so both need it equally.
 
 ### API token
 
-Set `APP_TOKEN` in `.env` to require `Authorization: Bearer <APP_TOKEN>` on every document-service endpoint except the health checks:
+Set `APP_TOKEN` in `.env` to require `Authorization: Bearer <APP_TOKEN>` on every document-service endpoint except the health checks and the UI's own static files (its HTML/JS/CSS load unauthenticated, same as any static site — the token gates the *API calls the page goes on to make*, not the page itself):
 
 ```dotenv
 APP_TOKEN=$(openssl rand -hex 24)
 ```
 
-The bundled UI keeps working — nginx forwards the token to the API. This protects **direct** API access (port 8000); a request that reaches the UI's nginx (port 3100) is still proxied through. Exposing the UI to an untrusted network therefore still needs Tailscale or an authenticated TLS reverse proxy in front. Unhandled errors now return a generic message plus an `X-Request-ID` that matches the full exception in the service logs.
+The UI and API are served by the same process now, so there's no longer a separate hop that can transparently attach the token for you: the bundled UI does not currently prompt for or send `APP_TOKEN`, so setting it will make the UI's own search/upload/ask calls start failing with 401 until that's added. If you need `APP_TOKEN` today, use it for direct/API-only access (`/docs`, scripts, `curl`) and leave it unset while using the browser UI. Either way, exposing this to an untrusted network needs Tailscale or an authenticated TLS reverse proxy in front — `APP_TOKEN` alone was never a substitute for that. Unhandled errors return a generic message plus an `X-Request-ID` that matches the full exception in the service logs.
 
 ## Browsing and importing from a server folder
 
@@ -157,6 +160,8 @@ Absolute paths and paths outside `/library` are rejected. The folder structure y
 | `API_PORT` | `8000` | Direct API and interactive docs port |
 | `LIBRARY_PATH` | `./library` | Host folder mounted read-only at `/library`; can be your exact PDF folder or something broader — see [Browsing and importing](#browsing-and-importing-from-a-server-folder) |
 | `AUTO_INGEST_INTERVAL_SECONDS` | `60` | How often to rescan `LIBRARY_PATH` for new PDFs to auto-import; `0` disables the scan (manual import only) |
+| `INDEX_EXTRACTION_WORKERS` | `2` | PDFs extracted in parallel (one OS process each) when several are queued together — a folder import, a bulk reindex, or uploads landing close together. Extraction is ~96% of indexing time, so this is the main lever on indexing throughput; raise it on a machine with CPU and RAM to spare, lower it on a constrained one |
+| `INDEX_POLL_SECONDS` | `30` | How often the index worker checks for newly queued documents when it isn't already woken by one being enqueued |
 | `MAX_UPLOAD_MB` | `100` | Per-file backend upload limit |
 | `EMBEDDING_BATCH_SIZE` | `32` | Chunks embedded in each indexing batch |
 | `EMBEDDING_MODEL` | `BAAI/bge-base-en-v1.5` | Sentence-embedding model; a change re-embeds the library on next start (add `ALLOW_INDEX_RESET=1` once if the vector width changes) |
@@ -171,6 +176,7 @@ Absolute paths and paths outside `/library` are rejected. The folder structure y
 | `RERANK_PASSAGE` | `group` | Text the reranker scores: `group` (the whole passage) or `matched` (just the winning retrieval unit). `group` gives the reranker context to separate near-duplicates; `matched` saturates a 0..1 model on short fragments. A search request may override it |
 | `RERANK_TIMEOUT` | `15` | Maximum reranker time in seconds; on a timeout the fused order is returned unranked |
 | `RERANK_CANDIDATES` | `60` | Fused candidates the cross-encoder scores per query; cheap at 60 with MiniLM, the main latency knob with a heavier model |
+| `RERANK_MAX_WORKERS` | `2` | Reranker requests handled in parallel; raise it if concurrent searches queue up behind a single-threaded reranker |
 | `RERANK_MIN_SCORE` | `-2.0` | Hard floor on the reranker score; hits below it are dropped so an unanswerable query returns empty. `-2.0` suits the default MiniLM on this library (off-topic probes score below −3.5, real answers above −2); `BAAI/bge-reranker-base` can't be gated at all. Re-fit with `eval/harness.py calibrate` after changing `RERANK_MODEL`; `off` disables |
 | `RERANK_LOWCONF_SCORE` | `0.0` | Soft version: when the top reranked hit scores below this, the response is flagged `low_confidence` and the UI shows a "nothing clearly matched" banner without hiding results. `0.0` suits MiniLM logits; raise (~0.3) for a 0..1 model; `off` disables |
 | `CHUNK_TARGET_TOKENS` | `180` | Preferred token budget for a searchable passage |
@@ -179,7 +185,7 @@ Absolute paths and paths outside `/library` are rejected. The folder structure y
 | `CHUNK_OVERLAP_TOKENS` | `32` | Context repeated between children of an oversized block |
 | `CORS_ORIGINS` | local development origins | Allowed origins for direct API development |
 
-If `MAX_UPLOAD_MB` is raised above 100, also update `client_max_body_size` in `ui/nginx.conf.template`.
+`MAX_UPLOAD_MB` is the only limit that applies — there's no separate proxy in front enforcing its own cap.
 
 ## Ask mode
 
@@ -262,6 +268,12 @@ paragraphs of one chapter:
   tanks its scores. The model still gets your exact question.
 - `ASK_THOROUGH_MIN_SCORE` (default −5.0) — Thorough mode uses a much looser reranker gate
   than Quick mode's `RERANK_MIN_SCORE`, since its per-document map step is the real filter.
+- `ASK_THOROUGH_MAX_PER_DOC` (default 6) — Thorough mode's own, looser version of
+  `ASK_MAX_PER_DOC`, applied to the wider `ASK_THOROUGH_PASSAGES` retrieval pool.
+- `ASK_THOROUGH_MAX_DOCS` (default 15) — after retrieval is grouped by document, only the
+  top-ranked this many documents are sent through the per-document map step; raise it for a
+  "what have I read about X" question that should sweep a larger library, at the cost of one
+  extra map call per additional document.
 
 Each answer's source header shows the spread — "*N passages · M documents · K relevant
 matches*" — so you can see when coverage is thin.
@@ -314,7 +326,7 @@ docker compose start
 docker compose ps
 
 # Follow application logs (timestamped; set LOG_LEVEL=DEBUG in .env for more)
-docker compose logs -f document-service ui qdrant
+docker compose logs -f document-service qdrant
 
 # Restart services without deleting data
 docker compose restart
@@ -325,11 +337,11 @@ docker compose down
 
 Do not use `docker compose down --volumes` or delete `data/` unless you intend to remove the library's persistent state.
 
-Both application containers run as a non-root user. On Linux the document
-service takes ownership of `data/app` and `data/models` on first start (uid
-`10001`), so reading those paths from the host afterwards may need `sudo`; to
-run the container as your own user instead, add `user: "$(id -u):$(id -g)"` to
-the `document-service` service and make sure `data/` is owned by you.
+The document-service container runs as a non-root user. On Linux it takes
+ownership of `data/app` and `data/models` on first start (uid `10001`), so
+reading those paths from the host afterwards may need `sudo`; to run the
+container as your own user instead, add `user: "$(id -u):$(id -g)"` to the
+`document-service` service and make sure `data/` is owned by you.
 
 ### Backup and restore
 
