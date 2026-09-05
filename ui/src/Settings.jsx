@@ -18,6 +18,9 @@ export default function Settings({
   rootNotice,
   rootError,
   onSetLibraryFolder,
+  documentCount,
+  reindexing,
+  onReindexAll,
   onClose,
 }) {
   const popoverRef = useRef(null);
@@ -141,6 +144,18 @@ export default function Settings({
         </p>
         {rootError && <div className="status-message error">{rootError}</div>}
         {rootNotice && !rootError && <div className="status-message">{rootNotice}</div>}
+      </section>
+
+      <section className="settings-section">
+        <h3>Reindex</h3>
+        <p className="settings-note">
+          Re-extracts and re-chunks every document from its source PDF — worth doing after an
+          extraction-quality fix, so already-indexed documents pick it up too. To reindex only
+          specific documents, select them from the Indexed tab in the sidebar instead.
+        </p>
+        <button type="button" className="secondary" disabled={reindexing || !documentCount} onClick={onReindexAll}>
+          {reindexing ? "Reindexing…" : `Reindex all documents${documentCount ? ` (${documentCount})` : ""}`}
+        </button>
       </section>
 
       <section className="settings-section">
