@@ -4,7 +4,7 @@ import os
 import time
 
 import fitz
-from conftest import make_pdf, wait_for_status
+from conftest import make_pdf, wait_for_pipeline_version, wait_for_status
 
 
 def make_scanned_pdf(image_pages: int, text_pages: int = 0) -> bytes:
@@ -241,23 +241,30 @@ def test_stored_pdf_and_rendered_pages_are_served(service):
 
 
 def test_pdf_with_a_corrupt_ocr_text_layer_is_rejected(service):
+    # Extraction now happens in the background: the upload itself always
+    # succeeds (it only records the document and queues it), and a rejection
+    # like this one surfaces afterward as the document's own error status.
     _module, client, _indexed = service
-    response = client.post(
+    upload = client.post(
         "/documents",
         files={"file": ("scan.pdf", make_pdf(_OCR_MUSH, pages=8), "application/pdf")},
     )
-    assert response.status_code == 422
-    assert "corrupted" in response.json()["detail"]
+    assert upload.status_code == 201
+    doc_id = upload.json()["document_id"]
+    metadata = wait_for_status(client, doc_id, "error")
+    assert "corrupted" in metadata["indexing_error"]
 
 
 def test_a_scanned_image_only_pdf_is_rejected_with_an_ocr_message(service):
     _module, client, _indexed = service
-    response = client.post(
+    upload = client.post(
         "/documents",
         files={"file": ("scan.pdf", make_scanned_pdf(image_pages=8, text_pages=2), "application/pdf")},
     )
-    assert response.status_code == 422
-    assert "OCR" in response.json()["detail"]
+    assert upload.status_code == 201
+    doc_id = upload.json()["document_id"]
+    metadata = wait_for_status(client, doc_id, "error")
+    assert "OCR" in metadata["indexing_error"]
 
 
 def test_document_with_a_few_corrupt_pages_indexes_the_rest_with_a_note(service):
@@ -386,8 +393,10 @@ def test_rebuild_reads_a_referenced_document_from_its_source(service, tmp_path):
     doc_id = created["document_id"]
     wait_for_status(client, doc_id, "indexed")
 
-    stale = module.update_metadata(doc_id, pipeline_version=1, index_schema_version=1)
-    rebuilt = module.rebuild_document_artifacts(stale)
+    module.update_metadata(doc_id, pipeline_version=1, index_schema_version=1)
+    retry = client.post(f"/documents/{doc_id}/retry")
+    assert retry.status_code == 200
+    rebuilt = wait_for_pipeline_version(client, doc_id, module.PIPELINE_VERSION)
     assert rebuilt["pipeline_version"] == module.PIPELINE_VERSION
     assert not any(module.DOCUMENTS_DIR.glob("*.pdf"))
 
@@ -516,14 +525,16 @@ def test_stored_pdf_can_be_rebuilt_for_new_pipeline_version(service):
     assert upload.status_code == 201
     doc_id = upload.json()["document_id"]
     wait_for_status(client, doc_id, "indexed")
-    stale = module.update_metadata(doc_id, pipeline_version=1, index_schema_version=1)
+    module.update_metadata(doc_id, pipeline_version=1, index_schema_version=1)
 
-    rebuilt = module.rebuild_document_artifacts(stale)
+    retry = client.post(f"/documents/{doc_id}/retry")
+    assert retry.status_code == 200
+    rebuilt = wait_for_pipeline_version(client, doc_id, module.PIPELINE_VERSION)
     chunks = client.get(f"/documents/{doc_id}/chunks").json()
     extracted = module.read_json(module.EXTRACTED_DIR / f"{doc_id}.json")
 
     assert rebuilt["pipeline_version"] == module.PIPELINE_VERSION
-    assert rebuilt["index_schema_version"] == 0
+    assert rebuilt["index_schema_version"] == module.INDEX_SCHEMA_VERSION
     assert extracted["format"] == "typed-markdown"
     assert extracted["blocks"][0]["type"] == "paragraph"
     assert chunks[0]["format"] == "markdown"

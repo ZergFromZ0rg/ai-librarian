@@ -26,7 +26,11 @@ def make_pdf(text: str, pages: int = 1) -> bytes:
     return content
 
 
-def wait_for_status(client: TestClient, doc_id: str, expected: str, timeout: float = 3) -> dict:
+def wait_for_status(client: TestClient, doc_id: str, expected: str, timeout: float = 10) -> dict:
+    # 10s, not 3s: extraction now runs in a fresh worker process (the `service`
+    # fixture reimports `app` per test, so its process pool is never warm),
+    # and that process's first call has to cold-start the ML layout model
+    # pymupdf4llm uses internally before it can process even a tiny test PDF.
     deadline = time.time() + timeout
     while time.time() < deadline:
         response = client.get(f"/documents/{doc_id}")
@@ -36,6 +40,22 @@ def wait_for_status(client: TestClient, doc_id: str, expected: str, timeout: flo
             return metadata
         time.sleep(0.02)
     pytest.fail(f"document {doc_id} did not reach {expected}")
+
+
+def wait_for_pipeline_version(client: TestClient, doc_id: str, version: int, timeout: float = 10) -> dict:
+    """Like wait_for_status, but for confirming a rebuild actually ran: a
+    document already sitting at ``indexed`` before a retry would make
+    wait_for_status(..., "indexed") return immediately without ever
+    observing the queued -> indexing round-trip."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        response = client.get(f"/documents/{doc_id}")
+        assert response.status_code == 200
+        metadata = response.json()
+        if metadata.get("pipeline_version") == version and metadata["indexing_status"] == "indexed":
+            return metadata
+        time.sleep(0.02)
+    pytest.fail(f"document {doc_id} did not reach pipeline_version {version}")
 
 
 @pytest.fixture
