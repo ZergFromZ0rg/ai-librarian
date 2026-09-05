@@ -158,6 +158,51 @@ function SourceViewer({ source, onClose }) {
   );
 }
 
+// One row in the Indexed tab. Its indexing error (a real failure) or
+// extraction notes (an FYI, e.g. pages skipped for a corrupt text layer)
+// stay collapsed behind a toggle instead of always taking up space, since
+// most documents have neither and the ones that do are the exception.
+function DocumentCard({ document, selected, onToggleSelect, onRetry, onRemove, reindexing }) {
+  const [notesOpen, setNotesOpen] = useState(false);
+  const hasError = Boolean(document.indexing_error);
+  const hasNotes = Boolean(document.extraction_notes);
+
+  return (
+    <article className={`document-card${selected ? " selected" : ""}`}>
+      <div className="document-card-head">
+        <input type="checkbox" checked={selected} onChange={onToggleSelect} aria-label={`Select ${document.filename}`} />
+        <div className="document-name" title={document.filename}>{document.filename}</div>
+      </div>
+      <div className="document-meta">
+        <span className={`badge ${document.indexing_status}`}>{document.indexing_status}</span>
+        <span>{document.pages} pages</span>
+        <span>{document.chunks} chunks</span>
+      </div>
+      {document.source_path && (
+        <div className="document-meta"><span title={document.source_path}>↪ {document.source_path}</span></div>
+      )}
+      {(hasError || hasNotes) && (
+        <button
+          type="button"
+          className={`document-notice-toggle${hasError ? " error" : ""}`}
+          onClick={() => setNotesOpen((open) => !open)}
+          aria-expanded={notesOpen}
+        >
+          {hasError ? "Error found" : "Notes"} {notesOpen ? "▴" : "▾"}
+        </button>
+      )}
+      {notesOpen && hasError && <div className="status-message error">{document.indexing_error}</div>}
+      {notesOpen && hasNotes && <div className="status-message">{document.extraction_notes}</div>}
+      <div className="document-actions">
+        {document.indexing_status === "error" && (
+          <button className="secondary" type="button" disabled={reindexing} onClick={onRetry}>Retry</button>
+        )}
+        <button className="danger" type="button" onClick={onRemove}>Remove</button>
+      </div>
+    </article>
+  );
+}
+
 // The sidebar's "Chats" tab: a full conversation list (switch/create/delete),
 // replacing what used to be a cramped <select> inside the Ask panel itself.
 function ChatList({ chats, activeId, onSelect, onNew, onDelete }) {
@@ -210,7 +255,7 @@ export default function App() {
   const [sidebarSection, setSidebarSection] = useState("library");
   const [job, setJob] = useState(null);
   const [notice, setNotice] = useState("");
-  const [noticeError, setNoticeError] = useState(false);
+  const [noticeTone, setNoticeTone] = useState("neutral");
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
   const [lowConfidence, setLowConfidence] = useState(false);
@@ -309,7 +354,7 @@ export default function App() {
       refreshChatList();
     } catch (error) {
       setNotice(error.message);
-      setNoticeError(true);
+      setNoticeTone("error");
     }
   }
 
@@ -330,10 +375,10 @@ export default function App() {
     try {
       const data = await api("/documents");
       setDocuments(data.documents || []);
-      setNoticeError(false);
+      setNoticeTone("neutral");
     } catch (error) {
       setNotice(error.message);
-      setNoticeError(true);
+      setNoticeTone("error");
     }
   }, [api]);
 
@@ -399,12 +444,12 @@ export default function App() {
         setJob(next);
         if (TERMINAL_JOB_STATES.has(next.state)) {
           setNotice(`Folder ingestion finished with status: ${next.state}.`);
-          setNoticeError(["partial", "error", "interrupted"].includes(next.state));
+          setNoticeTone(next.state === "done" ? "success" : "error");
           refreshDocuments();
         }
       } catch (error) {
         setNotice(error.message);
-        setNoticeError(true);
+        setNoticeTone("error");
       }
     }, 2000);
     return () => window.clearInterval(timer);
@@ -418,7 +463,7 @@ export default function App() {
     try {
       for (const file of files) {
         setNotice(`Uploading ${file.name}… (${completed + 1}/${files.length})`);
-        setNoticeError(false);
+        setNoticeTone("neutral");
         const form = new FormData();
         form.append("file", file, file.name);
         const result = await api("/documents", { method: "POST", body: form });
@@ -428,7 +473,7 @@ export default function App() {
       await refreshDocuments();
     } catch (error) {
       setNotice(error.message);
-      setNoticeError(true);
+      setNoticeTone("error");
     } finally {
       setUploading(false);
     }
@@ -464,7 +509,7 @@ export default function App() {
     const pdfs = dropped.filter((file) => file.type === "application/pdf" || /\.pdf$/i.test(file.name));
     if (pdfs.length < dropped.length) {
       setNotice(dropped.length === 1 ? "Only PDF files can be added." : `Skipped ${dropped.length - pdfs.length} non-PDF file(s).`);
-      setNoticeError(pdfs.length === 0);
+      setNoticeTone(pdfs.length === 0 ? "error" : "neutral");
     }
     if (pdfs.length) uploadFiles(pdfs);
   }
@@ -475,7 +520,7 @@ export default function App() {
   async function rescanLibraryFolder() {
     setAttaching(true);
     setNotice("Rescanning the library folder…");
-    setNoticeError(false);
+    setNoticeTone("neutral");
     try {
       const result = await api("/library/import", {
         method: "POST",
@@ -486,7 +531,7 @@ export default function App() {
       setNotice(`Rescan job ${result.job_id} is queued.`);
     } catch (error) {
       setNotice(error.message);
-      setNoticeError(true);
+      setNoticeTone("error");
     } finally {
       setAttaching(false);
     }
@@ -553,7 +598,7 @@ export default function App() {
     let failed = 0;
     for (const id of ids) {
       setNotice(`Reindexing… (${succeeded + failed + 1}/${ids.length})`);
-      setNoticeError(false);
+      setNoticeTone("neutral");
       try {
         await api(`/documents/${id}/retry`, { method: "POST" });
         succeeded += 1;
@@ -566,7 +611,7 @@ export default function App() {
         ? `Reindexed ${succeeded} document${succeeded === 1 ? "" : "s"}; ${failed} failed.`
         : `Queued ${succeeded} document${succeeded === 1 ? "" : "s"} for reindexing.`,
     );
-    setNoticeError(Boolean(failed));
+    setNoticeTone(failed ? "error" : "success");
     setSelectedDocs(new Set());
     setReindexing(false);
     refreshDocuments();
@@ -586,11 +631,11 @@ export default function App() {
     try {
       await api(`/documents/${document.document_id}`, { method: "DELETE" });
       setNotice(`${document.filename} was removed.`);
-      setNoticeError(false);
+      setNoticeTone("neutral");
       refreshDocuments();
     } catch (error) {
       setNotice(error.message);
-      setNoticeError(true);
+      setNoticeTone("error");
     }
   }
 
@@ -609,13 +654,13 @@ export default function App() {
       setLowConfidence(Boolean(result.low_confidence));
       setSearched(true);
       setNotice(`Found ${result.results?.length || 0} relevant passages.`);
-      setNoticeError(false);
+      setNoticeTone("neutral");
     } catch (error) {
       setResults([]);
       setLowConfidence(false);
       setSearched(true);
       setNotice(error.message);
-      setNoticeError(true);
+      setNoticeTone("error");
     } finally {
       setSearching(false);
     }
@@ -782,51 +827,36 @@ export default function App() {
                     </div>
                   )}
                   {documents.map((document) => (
-                    <article className={`document-card${selectedDocs.has(document.document_id) ? " selected" : ""}`} key={document.document_id}>
-                      <div className="document-card-head">
-                        <input
-                          type="checkbox"
-                          checked={selectedDocs.has(document.document_id)}
-                          onChange={() => toggleDocSelected(document.document_id)}
-                          aria-label={`Select ${document.filename}`}
-                        />
-                        <div className="document-name" title={document.filename}>{document.filename}</div>
-                      </div>
-                      <div className="document-meta">
-                        <span className={`badge ${document.indexing_status}`}>{document.indexing_status}</span>
-                        <span>{document.pages} pages</span>
-                        <span>{document.chunks} chunks</span>
-                      </div>
-                      {document.source_path && (
-                        <div className="document-meta"><span title={document.source_path}>↪ {document.source_path}</span></div>
-                      )}
-                      {document.indexing_error && <div className="status-message error">{document.indexing_error}</div>}
-                      {document.extraction_notes && <div className="status-message">{document.extraction_notes}</div>}
-                      <div className="document-actions">
-                        {document.indexing_status === "error" && (
-                          <button
-                            className="secondary"
-                            type="button"
-                            disabled={reindexing}
-                            onClick={() => reindexDocuments([document.document_id])}
-                          >
-                            Retry
-                          </button>
-                        )}
-                        <button className="danger" type="button" onClick={() => removeDocument(document)}>Remove</button>
-                      </div>
-                    </article>
+                    <DocumentCard
+                      key={document.document_id}
+                      document={document}
+                      selected={selectedDocs.has(document.document_id)}
+                      onToggleSelect={() => toggleDocSelected(document.document_id)}
+                      onRetry={() => reindexDocuments([document.document_id])}
+                      onRemove={() => removeDocument(document)}
+                      reindexing={reindexing}
+                    />
                   ))}
                 </div>
               )}
 
-              {notice && <div className={`status-message ${noticeError ? "error" : ""}`}>{notice}</div>}
+              {notice && <div className={`status-message ${noticeTone !== "neutral" ? noticeTone : ""}`}>{notice}</div>}
 
-              {job?.files?.length > 0 && !TERMINAL_JOB_STATES.has(job.state) && (
-                <div className="status-message">
-                  {job.files.filter((file) => ["indexed", "duplicate"].includes(file.status)).length}/{job.files.length} files ready
-                </div>
-              )}
+              {job?.files?.length > 0 && !TERMINAL_JOB_STATES.has(job.state) && (() => {
+                const done = job.files.filter((file) => ["indexed", "duplicate"].includes(file.status)).length;
+                const percent = Math.round((done / job.files.length) * 100);
+                return (
+                  <div className="status-message job-progress">
+                    <div className="job-progress-label">
+                      <span>{done}/{job.files.length} files ready</span>
+                      <span>{percent}%</span>
+                    </div>
+                    <div className="job-progress-bar">
+                      <div className="job-progress-fill" style={{ width: `${percent}%` }} />
+                    </div>
+                  </div>
+                );
+              })()}
             </>
           )}
         </div>
