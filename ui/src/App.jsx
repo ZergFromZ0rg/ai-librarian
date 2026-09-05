@@ -209,6 +209,11 @@ function ChatList({ chats, activeId, onSelect, onNew, onDelete }) {
   const [filter, setFilter] = useState("");
   const query = filter.trim().toLowerCase();
   const visible = query ? chats.filter((chat) => (chat.title || "Untitled").toLowerCase().includes(query)) : chats;
+  // No chat selected means exactly this: a new, not-yet-saved conversation
+  // is the current one (that's what "+ New chat" sets activeId to). Show it
+  // immediately rather than only once its first answer finishes and it gets
+  // a real id — the row appearing on click is the point.
+  const showDraft = activeId === null && !query;
 
   return (
     <div className="chat-list">
@@ -226,8 +231,13 @@ function ChatList({ chats, activeId, onSelect, onNew, onDelete }) {
           />
         </div>
       )}
-      {chats.length === 0 && <p className="chat-list-empty">No conversations yet — ask a question to start one.</p>}
-      {chats.length > 0 && visible.length === 0 && <p className="chat-list-empty">No chats match “{filter}”.</p>}
+      {chats.length === 0 && !showDraft && <p className="chat-list-empty">No conversations yet — ask a question to start one.</p>}
+      {chats.length > 0 && visible.length === 0 && !showDraft && <p className="chat-list-empty">No chats match “{filter}”.</p>}
+      {showDraft && (
+        <div className="chat-list-item active">
+          <span className="chat-list-title chat-list-draft">Untitled</span>
+        </div>
+      )}
       {visible.map((chat) => (
         <div className={`chat-list-item${chat.id === activeId ? " active" : ""}`} key={chat.id}>
           <button type="button" className="chat-list-title" onClick={() => onSelect(chat.id)}>
