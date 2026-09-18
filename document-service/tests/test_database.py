@@ -110,16 +110,10 @@ def test_migration_adds_later_columns_to_an_older_database(tmp_path):
 
     db_path = tmp_path / "older.db"
     legacy = sqlite3.connect(db_path)
-    # The schema as it stood before extraction_notes / source_path were added:
-    # drop both trailing columns and the now-dangling comma.
-    old_schema = (
-        SCHEMA.replace("    extraction_notes      TEXT,\n", "")
-        .replace("    source_path           TEXT\n", "")
-        .replace(
-            "    index_schema_version  INTEGER NOT NULL DEFAULT 0,\n",
-            "    index_schema_version  INTEGER NOT NULL DEFAULT 0\n",
-        )
-    )
+    # The schema as it stood before any column after index_schema_version was
+    # added: cut everything from there to the end of the table definition.
+    head, rest = SCHEMA.split("    index_schema_version  INTEGER NOT NULL DEFAULT 0,\n", 1)
+    old_schema = head + "    index_schema_version  INTEGER NOT NULL DEFAULT 0\n" + rest[rest.index(");"):]
     legacy.executescript(old_schema)
     legacy.execute(
         "INSERT INTO documents "
@@ -132,9 +126,10 @@ def test_migration_adds_later_columns_to_an_older_database(tmp_path):
     store = MetadataStore(db_path)
     try:
         columns = {row[1] for row in store._conn.execute("PRAGMA table_info(documents)")}
-        assert {"extraction_notes", "source_path"} <= columns
+        later = {"extraction_notes", "source_path", "kind", "kind_override", "owned", "read_at"}
+        assert later <= columns
         row = store.get("aaaaaaaaaaaa")
-        assert row["extraction_notes"] is None and row["source_path"] is None
+        assert all(row[column] is None for column in later)
     finally:
         store.close()
 

@@ -143,6 +143,19 @@ def test_ask_thorough_uses_a_looser_gate(service, monkeypatch):
     assert [e for e in thorough if e["type"] == "sources"][0]["results"]  # survives at -5.0
 
 
+def test_ask_min_score_overrides_the_gate(service, monkeypatch):
+    module, client, _indexed = service
+    index_essay(client)
+    enable_fake_model(monkeypatch, module)
+    monkeypatch.setattr(module, "rerank", lambda query, passages: [-3.5 for _ in passages])
+    monkeypatch.setattr(module.generation, "generate_stream", make_fake_stream())
+
+    lenient = parse_sse(
+        client.post("/ask", json={"question": "the absurd", "min_score": -4.0}).text
+    )
+    assert [e for e in lenient if e["type"] == "sources"][0]["results"]  # -3.5 clears -4.0
+
+
 def test_ask_no_hits_skips_generation(service, monkeypatch):
     module, client, _indexed = service
     index_essay(client)

@@ -240,6 +240,54 @@ def test_stored_pdf_and_rendered_pages_are_served(service):
     assert client.get("/documents/ffffffffffff/file").status_code == 404
 
 
+def test_thumbnail_is_rendered_cached_and_removed_with_the_document(service):
+    module, client, _indexed = service
+    upload = client.post(
+        "/documents",
+        files={"file": ("cover.pdf", make_pdf("A cover page.", pages=2), "application/pdf")},
+    )
+    doc_id = upload.json()["document_id"]
+
+    first = client.get(f"/documents/{doc_id}/thumbnail", params={"w": 300})
+    assert first.status_code == 200
+    assert first.headers["content-type"] == "image/jpeg"
+    assert first.content[:3] == b"\xff\xd8\xff"
+    # Widths snap to a fixed set, so the cache holds one file per size.
+    cached = module.THUMBNAILS_DIR / f"{doc_id}-320.jpg"
+    assert cached.exists()
+    assert client.get(f"/documents/{doc_id}/thumbnail", params={"w": 330}).content == first.content
+
+    assert client.get(f"/documents/{doc_id}/thumbnail", params={"w": 10}).status_code == 422
+    assert client.get("/documents/ffffffffffff/thumbnail").status_code == 404
+
+    client.delete(f"/documents/{doc_id}")
+    assert not cached.exists()
+
+
+def test_kind_is_detected_and_reader_marks_persist(service):
+    _module, client, _indexed = service
+    upload = client.post(
+        "/documents",
+        files={"file": ("textbook.pdf", make_pdf("Calculus\nISBN 978-0-534-39339-7\nCopyright page.", pages=2), "application/pdf")},
+    )
+    doc_id = upload.json()["document_id"]
+    doc = wait_for_status(client, doc_id, "indexed")
+    assert doc["kind"] == "book"
+    assert doc["owned"] is None and doc["read_at"] is None
+
+    marked = client.patch(f"/documents/{doc_id}", json={"owned": True, "read": True}).json()
+    assert marked["owned"] == 1 and marked["read_at"]
+    # Only the fields sent change; read stays set.
+    assert client.patch(f"/documents/{doc_id}", json={"owned": False}).json()["read_at"]
+
+    corrected = client.patch(f"/documents/{doc_id}", json={"kind": "paper", "read": False}).json()
+    assert corrected["kind_override"] == "paper" and corrected["read_at"] is None
+    assert client.patch(f"/documents/{doc_id}", json={"kind": "auto"}).json()["kind_override"] is None
+
+    assert client.patch(f"/documents/{doc_id}", json={"kind": "novel"}).status_code == 422
+    assert client.patch("/documents/ffffffffffff", json={"read": True}).status_code == 404
+
+
 def test_pdf_with_a_corrupt_ocr_text_layer_is_rejected(service):
     # Extraction now happens in the background: the upload itself always
     # succeeds (it only records the document and queues it), and a rejection
