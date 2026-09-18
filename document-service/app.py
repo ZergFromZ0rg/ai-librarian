@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from starlette.datastructures import Headers, MutableHeaders
 
 import generation
+from doc_kind import detect_kind
 from chunking import build_semantic_groups, normalize_for_embedding, parse_typed_blocks
 from conversations import ConversationStore
 from database import MetadataStore
@@ -98,6 +99,9 @@ METADATA_DIR = DATA_DIR / "metadata"
 EXTRACTED_DIR = DATA_DIR / "extracted"
 CHUNKS_DIR = DATA_DIR / "chunks"
 JOBS_DIR = DATA_DIR / "jobs"
+# Cached first-page covers for the UI's shelves (see /documents/{id}/thumbnail).
+# Pure derived data: safe to delete, rebuilt on the next request.
+THUMBNAILS_DIR = DATA_DIR / "thumbnails"
 LOGS_DIR = DATA_DIR / "logs"
 INGEST_ROOT = Path(os.environ.get("INGEST_ROOT", str(DATA_DIR / "inbox"))).resolve()
 # The mount's path on the HOST, for display only -- never used for filesystem
@@ -367,6 +371,17 @@ class SearchRequest(BaseModel):
     fusion: Optional[str] = Field(default=None, pattern=r"^(rrf|dbsf|rsf)$")
     dense_weight: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     max_text_chars: int = Field(default=20_000, ge=100, le=50_000)
+    # Cap how many of the returned passages may come from any one document, so
+    # a single long book can't fill every slot. 0 = no cap.
+    max_per_doc: int = Field(default=0, ge=0, le=50)
+
+
+class DocumentPatch(BaseModel):
+    # Only the fields sent are changed. `owned` may be null to clear it;
+    # `kind` "auto" drops the reader's override and goes back to the guess.
+    owned: Optional[bool] = None
+    read: Optional[bool] = None
+    kind: Optional[str] = Field(default=None, pattern=r"^(book|paper|document|auto)$")
 
 
 class ConversationBody(BaseModel):
@@ -398,6 +413,9 @@ class AskRequest(BaseModel):
     model: Optional[str] = Field(default=None, max_length=120)
     # "quick" = one grounded pass; "thorough" = map-reduce over a wider pool.
     mode: str = Field(default="quick", pattern=r"^(quick|thorough)$")
+    # Overrides the relevance gate (reranker score floor) for this question;
+    # absent -> RERANK_MIN_SCORE (quick) or ASK_THOROUGH_MIN_SCORE (thorough).
+    min_score: Optional[float] = Field(default=None, ge=-100, le=100)
     # Per-request cloud API keys the browser holds (it never persists them
     # server-side). {"anthropic"|"openai"|"google": "<key>"}. Never logged.
     provider_keys: Optional[dict] = None
@@ -680,6 +698,34 @@ def _fail_indexing(doc_id: str, message: str) -> None:
     update_ingest_entry(doc_id, "error", message)
 
 
+def _detect_document_kind(doc_id: str, page_count: int) -> Optional[str]:
+    """Book / paper / document, from the text extraction already wrote.
+    Best effort: a missing or unreadable extraction just leaves it unset."""
+    try:
+        extracted = read_json(EXTRACTED_DIR / f"{doc_id}.json")
+        texts = [page.get("text") or "" for page in extracted.get("pages") or []]
+        return detect_kind(texts, page_count or len(texts))
+    except Exception:
+        logger.warning("Could not detect the kind of document %s", doc_id, exc_info=True)
+        return None
+
+
+def backfill_document_kinds() -> None:
+    """Classify documents indexed before kind detection existed. Runs once
+    per start, in the background, and only touches rows with no kind yet."""
+    for doc in list_metadata():
+        if SHUTDOWN.is_set():
+            return
+        if doc.get("kind") or doc.get("indexing_status") != "indexed":
+            continue
+        kind = _detect_document_kind(doc["document_id"], doc.get("pages") or 0)
+        if kind:
+            try:
+                STORE.update(doc["document_id"], {"kind": kind})
+            except KeyError:
+                pass
+
+
 def _embed_and_finish(doc_id: str) -> None:
     """Embed and upsert a document's already-extracted chunks, then mark it
     indexed. Runs under the document's lock: the embedding model, Qdrant
@@ -706,6 +752,7 @@ def _embed_and_finish(doc_id: str) -> None:
                 embedding_model=EMBEDDING_MODEL,
                 vector_dim=vector_dim,
                 index_schema_version=INDEX_SCHEMA_VERSION,
+                kind=_detect_document_kind(doc_id, read_metadata(doc_id).get("pages") or 0),
             )
             update_ingest_entry(doc_id, "indexed")
         except Exception as exc:
@@ -1212,6 +1259,7 @@ def start_workers() -> None:
         threading.Thread(target=index_worker, daemon=True, name="index-worker"),
         threading.Thread(target=ingest_worker, daemon=True, name="ingest-worker"),
         threading.Thread(target=recover_interrupted_work, daemon=True, name="recovery-worker"),
+        threading.Thread(target=backfill_document_kinds, daemon=True, name="kind-backfill"),
     ]
     if AUTO_INGEST_INTERVAL_SECONDS > 0:
         WORKER_THREADS.append(
@@ -1316,7 +1364,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins or [],
     allow_credentials="*" not in cors_origins,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -1593,6 +1641,9 @@ async def config():
         "reranker_model": RERANK_MODEL,
         "rerank_passage": RERANK_PASSAGE,
         "rerank_lowconf_score": RERANK_LOWCONF_SCORE,
+        # Defaults the UI's relevance-threshold controls start from.
+        "rerank_min_score": RERANK_MIN_SCORE,
+        "ask_thorough_min_score": ASK_THOROUGH_MIN_SCORE,
         "generation": await generation.backend_info(),
         "pipeline_version": PIPELINE_VERSION,
         "index_schema_version": INDEX_SCHEMA_VERSION,
@@ -1733,6 +1784,58 @@ async def get_document_file(doc_id: str):
     )
 
 
+def _thumbnail_width(requested: int) -> int:
+    # Snap to a few sizes so the on-disk cache can't be filled with one file
+    # per arbitrary width.
+    return min((160, 320, 480), key=lambda size: abs(size - requested))
+
+
+@app.get("/documents/{doc_id}/thumbnail")
+async def get_document_thumbnail(doc_id: str, w: int = Query(default=320, ge=80, le=640)):
+    """The document's first page as a small JPEG, cached on disk.
+
+    The UI shows these as covers on its shelves, often dozens at once, so they
+    are rendered once at a fixed set of widths and then served from the cache
+    until the source PDF changes.
+    """
+    stored = await asyncio.to_thread(_stored_pdf_path, doc_id)
+    width = _thumbnail_width(w)
+    cached = THUMBNAILS_DIR / f"{doc_id}-{width}.jpg"
+
+    def render() -> bytes:
+        try:
+            if cached.stat().st_mtime >= stored.stat().st_mtime:
+                return cached.read_bytes()
+        except OSError:
+            pass
+        with pymupdf.open(stored) as source:
+            if source.page_count < 1:
+                raise HTTPException(status_code=404, detail="document has no pages")
+            page = source[0]
+            scale = width / max(page.rect.width, 1)
+            pixmap = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
+            data = pixmap.tobytes("jpeg", jpg_quality=82)
+        THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
+        temporary = cached.with_suffix(f".{uuid.uuid4().hex}.tmp")
+        temporary.write_bytes(data)
+        os.replace(temporary, cached)
+        return data
+
+    try:
+        image = await asyncio.to_thread(render)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _sanitized_http_error(
+            500, "could not render thumbnail", exc, log_context=f"thumbnail of {doc_id}"
+        ) from exc
+    return Response(
+        content=image,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.get("/documents/{doc_id}/page/{page}")
 async def get_document_page(
     doc_id: str,
@@ -1799,6 +1902,26 @@ async def retry_document(doc_id: str):
     return await asyncio.to_thread(read_metadata, doc_id)
 
 
+@app.patch("/documents/{doc_id}")
+async def patch_document(doc_id: str, patch: DocumentPatch):
+    """The reader's own marks on a document: owned (for books), read, and a
+    correction to the detected kind."""
+    await asyncio.to_thread(read_metadata, doc_id)
+    changes = {}
+    sent = patch.model_fields_set
+    if "owned" in sent:
+        changes["owned"] = None if patch.owned is None else int(patch.owned)
+    if "read" in sent and patch.read is not None:
+        changes["read_at"] = utc_now() if patch.read else None
+    if "kind" in sent and patch.kind is not None:
+        changes["kind_override"] = None if patch.kind == "auto" else patch.kind
+    if not changes:
+        return await asyncio.to_thread(read_metadata, doc_id)
+    # Not update_metadata(): a reader's mark isn't a pipeline change, so it
+    # shouldn't bump updated_at (which orders the indexing queue).
+    return await asyncio.to_thread(STORE.update, doc_id, changes)
+
+
 @app.delete("/documents/{doc_id}")
 async def delete_document(doc_id: str):
     metadata = await asyncio.to_thread(read_metadata, doc_id)
@@ -1807,6 +1930,7 @@ async def delete_document(doc_id: str):
         with get_document_lock(doc_id):
             delete_document_vectors(doc_id)
             artifacts = [EXTRACTED_DIR / f"{doc_id}.json", CHUNKS_DIR / f"{doc_id}.json"]
+            artifacts.extend(THUMBNAILS_DIR.glob(f"{doc_id}-*.jpg"))
             # Only remove the PDF itself when we own it (an upload). A
             # referenced library file is left exactly where the reader put it.
             if not (metadata.get("source_path") or "").strip():
@@ -1840,6 +1964,7 @@ async def search(request: SearchRequest):
             fusion=request.fusion,
             dense_weight=request.dense_weight,
             rerank_passage=request.rerank_passage,
+            max_per_doc=request.max_per_doc,
         )
     except Exception as exc:
         raise _sanitized_http_error(503, "search failed", exc) from exc
@@ -1969,6 +2094,8 @@ async def ask(request: AskRequest):
         passages = max(request.top_k, generation.context_passages_for(model))
         max_per_doc = ASK_MAX_PER_DOC
         gate = RERANK_MIN_SCORE
+    if request.min_score is not None:
+        gate = request.min_score
 
     started = time.monotonic()
     try:

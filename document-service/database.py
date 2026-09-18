@@ -37,6 +37,14 @@ COLUMNS = (
     # When set, the PDF is referenced in place at INGEST_ROOT/source_path
     # instead of being copied into DOCUMENTS_DIR (browser folder imports).
     "source_path",
+    # "book" | "paper" | "document", guessed from the extracted text at index
+    # time (see doc_kind.py); `kind_override` is the reader's correction.
+    "kind",
+    "kind_override",
+    # Reader-set: 1/0 whether they own a copy (books only), NULL = not said.
+    "owned",
+    # When the reader marked it read; NULL = unread.
+    "read_at",
 )
 UPDATABLE_COLUMNS = frozenset(COLUMNS) - {"document_id"}
 
@@ -70,7 +78,11 @@ CREATE TABLE IF NOT EXISTS documents (
     pipeline_version      INTEGER NOT NULL DEFAULT 0,
     index_schema_version  INTEGER NOT NULL DEFAULT 0,
     extraction_notes      TEXT,
-    source_path           TEXT
+    source_path           TEXT,
+    kind                  TEXT,
+    kind_override         TEXT,
+    owned                 INTEGER,
+    read_at               TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_documents_content_sha256 ON documents (content_sha256);
 CREATE INDEX IF NOT EXISTS idx_documents_uploaded_at ON documents (uploaded_at DESC);
@@ -109,7 +121,14 @@ class MetadataStore:
         existing = {
             row["name"] for row in self._conn.execute("PRAGMA table_info(documents)")
         }
-        for column, ddl in (("extraction_notes", "TEXT"), ("source_path", "TEXT")):
+        for column, ddl in (
+            ("extraction_notes", "TEXT"),
+            ("source_path", "TEXT"),
+            ("kind", "TEXT"),
+            ("kind_override", "TEXT"),
+            ("owned", "INTEGER"),
+            ("read_at", "TEXT"),
+        ):
             if column not in existing:
                 self._conn.execute(
                     f"ALTER TABLE documents ADD COLUMN {column} {ddl}"
