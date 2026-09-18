@@ -29,10 +29,10 @@ from pydantic import BaseModel, Field
 from starlette.datastructures import Headers, MutableHeaders
 
 import generation
-from doc_kind import detect_kind
 from chunking import build_semantic_groups, normalize_for_embedding, parse_typed_blocks
 from conversations import ConversationStore
 from database import MetadataStore
+from doc_kind import detect_kind
 from embeddings import DEFAULT_MODEL as EMBEDDING_MODEL, embed_texts
 from extraction import (
     assess_scanned,
