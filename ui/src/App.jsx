@@ -1,10 +1,24 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
-import AskPanel from "./AskPanel.jsx";
-import LibraryBrowser from "./LibraryBrowser.jsx";
-import ResultCard from "./ResultCard.jsx";
+import AskThread, { AskRail } from "./AskThread.jsx";
+import Console from "./Console.jsx";
+import BookRow, { SHELF_SIZE } from "./BookRow.jsx";
+import Notebook from "./Notebook.jsx";
+import SearchResults from "./SearchResults.jsx";
 import Settings from "./Settings.jsx";
+import SourceViewer from "./SourceViewer.jsx";
+import Stacks from "./Stacks.jsx";
+import {
+  clearInquiries,
+  loadInquiries,
+  loadRecents,
+  loadStored,
+  recordInquiry,
+  recordOpen,
+  saveStored,
+  shelfItems,
+} from "./storage.js";
+import useAsk from "./useAsk.js";
 
 // `??`, not `||`: the production Docker build sets VITE_API_BASE="" on purpose
 // (document-service serves the UI and the API from the same origin, so no
@@ -14,36 +28,21 @@ import Settings from "./Settings.jsx";
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 const TERMINAL_JOB_STATES = new Set(["done", "partial", "error", "interrupted"]);
 const THEME_KEY = "ai-librarian.theme";
-const SIDEBAR_KEY = "ai-librarian.sidebar-collapsed";
 const ACTIVE_CHAT_KEY = "ai-librarian.ask.active";
 const KEYS_KEY = "ai-librarian.ask.keys";
 const OLLAMA_KEY = "ai-librarian.ask.ollama-models";
+const MODE_KEY = "ai-librarian.mode";
+const SEARCH_PARAMS_KEY = "ai-librarian.search.params";
+const ASK_PARAMS_KEY = "ai-librarian.ask.params";
+const LEGACY_THOROUGH_KEY = "ai-librarian.ask.thorough";
+
+// Server defaults until /config says otherwise (RERANK_MIN_SCORE and
+// ASK_THOROUGH_MIN_SCORE).
+const DEFAULT_FLOORS = { search: -2, thorough: -5 };
 
 function currentTheme() {
   const stored = document.documentElement.dataset.theme;
   return stored === "light" || stored === "dark" ? stored : null;
-}
-
-function systemPrefersDark() {
-  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
-}
-
-function loadStored(key, fallback, parse = false) {
-  try {
-    const raw = window.localStorage.getItem(key);
-    if (raw != null) return parse ? JSON.parse(raw) : raw;
-  } catch (_error) {
-    // corrupt or unavailable storage
-  }
-  return fallback;
-}
-
-function saveStored(key, value) {
-  try {
-    window.localStorage.setItem(key, typeof value === "string" ? value : JSON.stringify(value));
-  } catch (_error) {
-    // best effort
-  }
 }
 
 async function parseResponse(response) {
@@ -55,249 +54,80 @@ async function parseResponse(response) {
   return data;
 }
 
-// A lightbox over a server-rendered page image with the matched passage
-// highlighted, plus a link out to the raw PDF at the same page.
-function SourceViewer({ source, onClose }) {
-  const { documentId, documentName, page: startPage, matched, snippet } = source;
-  const [page, setPage] = useState(startPage);
-  const [pageCount, setPageCount] = useState(null);
-  const [status, setStatus] = useState("loading");
+function loadSearchParams() {
+  const stored = loadStored(SEARCH_PARAMS_KEY, null, true) || {};
+  return {
+    topK: Number.isInteger(stored.topK) ? stored.topK : 10,
+    minScore: typeof stored.minScore === "number" ? stored.minScore : null, // null until /config resolves the default
+    perDoc: [0, 1, 3].includes(stored.perDoc) ? stored.perDoc : 0,
+  };
+}
 
-  useEffect(() => {
-    let cancelled = false;
-    fetch(`${API_BASE}/documents/${documentId}`)
-      .then((response) => (response.ok ? response.json() : null))
-      .then((meta) => {
-        if (!cancelled && meta && meta.pages) setPageCount(meta.pages);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [documentId]);
+function loadAskParams() {
+  const stored = loadStored(ASK_PARAMS_KEY, null, true) || {};
+  const legacyThorough = loadStored(LEGACY_THOROUGH_KEY, "") === "1";
+  return {
+    mode: stored.mode === "thorough" || stored.mode === "quick" ? stored.mode : legacyThorough ? "thorough" : "quick",
+    topK: Number.isInteger(stored.topK) ? stored.topK : 10,
+    minScore: typeof stored.minScore === "number" ? stored.minScore : null, // null = server default for the depth
+  };
+}
 
-  const step = useCallback(
-    (delta) =>
-      setPage((current) => {
-        const next = current + delta;
-        if (next < 1) return current;
-        if (pageCount && next > pageCount) return current;
-        return next;
-      }),
-    [pageCount],
-  );
-
-  useEffect(() => {
-    const onKey = (event) => {
-      if (event.key === "Escape") onClose();
-      else if (event.key === "ArrowLeft") step(-1);
-      else if (event.key === "ArrowRight") step(1);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, step]);
-
-  const highlight = (matched || snippet || "").slice(0, 600);
-  const imageSrc = `${API_BASE}/documents/${documentId}/page/${page}?highlight=${encodeURIComponent(highlight)}`;
-
-  useEffect(() => {
-    setStatus("loading");
-  }, [imageSrc]);
-
-  // Rendered through a portal straight onto <body>: any ancestor with its own
-  // filter/transform/backdrop-filter turns `position: fixed` into "fixed to
-  // that ancestor" instead of the viewport, which would silently
-  // shrink/misposition this overlay if it were ever nested inside such a
-  // panel. A portal sidesteps that regardless of what the panels do.
-  return createPortal(
-    <div className="source-overlay" onClick={onClose}>
-      <div className="source-panel" onClick={(event) => event.stopPropagation()}>
-        <div className="source-bar">
-          <strong className="source-title" title={documentName}>
-            {documentName}
-          </strong>
-          <div className="source-nav">
-            <button type="button" onClick={() => step(-1)} disabled={page <= 1} aria-label="Previous page">
-              ‹
-            </button>
-            <span>
-              page {page}
-              {pageCount ? ` / ${pageCount}` : ""}
-            </span>
-            <button
-              type="button"
-              onClick={() => step(1)}
-              disabled={pageCount ? page >= pageCount : false}
-              aria-label="Next page"
-            >
-              ›
-            </button>
-          </div>
-          <a
-            className="source-open"
-            href={`${API_BASE}/documents/${documentId}/file#page=${page}`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Open PDF ↗
-          </a>
-          <button type="button" className="source-close" onClick={onClose} aria-label="Close">
-            ×
-          </button>
-        </div>
-        <div className="source-view">
-          {status === "loading" && <div className="source-status">Rendering page…</div>}
-          {status === "error" && <div className="source-status error">Could not render this page.</div>}
-          <img
-            key={imageSrc}
-            src={imageSrc}
-            alt={`${documentName}, page ${page}`}
-            onLoad={() => setStatus("ready")}
-            onError={() => setStatus("error")}
-            style={status === "error" ? { display: "none" } : undefined}
-          />
-        </div>
-      </div>
-    </div>,
-    document.body,
+function GearIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7zm8.94-3.5c0-.61-.06-1.2-.16-1.78l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.6 7.6 0 0 0-1.54-.89l-.36-2.54a.5.5 0 0 0-.5-.43h-3.84a.5.5 0 0 0-.5.43l-.36 2.54c-.55.23-1.07.53-1.54.89l-2.39-.96a.5.5 0 0 0-.6.22L2.57 7.99a.5.5 0 0 0 .12.64l2.03 1.58c-.1.58-.16 1.17-.16 1.78s.06 1.2.16 1.78l-2.03 1.6a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.31.6.22l2.39-.97c.47.37.99.67 1.54.9l.36 2.54c.05.24.26.43.5.43h3.84c.24 0 .45-.19.5-.43l.36-2.54c.55-.23 1.07-.53 1.54-.9l2.39.97c.22.09.48 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.6c.1-.58.16-1.17.16-1.78z"
+      />
+    </svg>
   );
 }
 
-// One row in the Indexed tab. Its indexing error (a real failure) or
-// extraction notes (an FYI, e.g. pages skipped for a corrupt text layer)
-// stay collapsed behind a toggle instead of always taking up space, since
-// most documents have neither and the ones that do are the exception.
-function DocumentCard({ document, selected, onToggleSelect, onRetry, onRemove, reindexing }) {
-  const [notesOpen, setNotesOpen] = useState(false);
-  const hasError = Boolean(document.indexing_error);
-  const hasNotes = Boolean(document.extraction_notes);
-
+function LibraryIcon() {
   return (
-    <article className={`document-card${selected ? " selected" : ""}`}>
-      <div className="document-card-head">
-        <input type="checkbox" checked={selected} onChange={onToggleSelect} aria-label={`Select ${document.filename}`} />
-        <div className="document-name" title={document.filename}>{document.filename}</div>
-      </div>
-      <div className="document-meta">
-        <span className={`badge ${document.indexing_status}`}>{document.indexing_status}</span>
-        <span>{document.pages} pages</span>
-        <span>{document.chunks} chunks</span>
-      </div>
-      {document.source_path && (
-        <div className="document-meta"><span title={document.source_path}>↪ {document.source_path}</span></div>
-      )}
-      {(hasError || hasNotes) && (
-        <button
-          type="button"
-          className={`document-notice-toggle${hasError ? " error" : ""}`}
-          onClick={() => setNotesOpen((open) => !open)}
-          aria-expanded={notesOpen}
-        >
-          {hasError ? "Error found" : "Notes"} {notesOpen ? "▴" : "▾"}
-        </button>
-      )}
-      {notesOpen && hasError && <div className="status-message error">{document.indexing_error}</div>}
-      {notesOpen && hasNotes && <div className="status-message">{document.extraction_notes}</div>}
-      <div className="document-actions">
-        {document.indexing_status === "error" && (
-          <button className="secondary" type="button" disabled={reindexing} onClick={onRetry}>Retry</button>
-        )}
-        <button className="danger" type="button" onClick={onRemove}>Remove</button>
-      </div>
-    </article>
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6">
+      <path d="M4 4h4v16H4zM10 4h4v16h-4zM16.5 4.5l3.8 1-3.9 14.6-3.8-1" />
+    </svg>
   );
 }
 
-// The sidebar's "Chats" tab: a full conversation list (switch/create/delete),
-// replacing what used to be a cramped <select> inside the Ask panel itself.
-function ChatList({ chats, activeId, onSelect, onNew, onDelete }) {
-  const [filter, setFilter] = useState("");
-  const query = filter.trim().toLowerCase();
-  const visible = query ? chats.filter((chat) => (chat.title || "Untitled").toLowerCase().includes(query)) : chats;
-  // No chat selected means exactly this: a new, not-yet-saved conversation
-  // is the current one (that's what "+ New chat" sets activeId to). Show it
-  // immediately rather than only once its first answer finishes and it gets
-  // a real id — the row appearing on click is the point.
-  const showDraft = activeId === null && !query;
-
+function NotebookIcon() {
   return (
-    <div className="chat-list">
-      <button type="button" className="primary chat-list-new" onClick={onNew}>
-        + New chat
-      </button>
-      {chats.length > 0 && (
-        <div className="chat-list-search">
-          <input
-            type="search"
-            value={filter}
-            onChange={(event) => setFilter(event.target.value)}
-            placeholder="Search chats…"
-            aria-label="Search chats"
-          />
-        </div>
-      )}
-      {chats.length === 0 && !showDraft && <p className="chat-list-empty">No conversations yet — ask a question to start one.</p>}
-      {chats.length > 0 && visible.length === 0 && !showDraft && <p className="chat-list-empty">No chats match “{filter}”.</p>}
-      {showDraft && (
-        <div className="chat-list-item active">
-          <span className="chat-list-title chat-list-draft">Untitled</span>
-        </div>
-      )}
-      {visible.map((chat) => (
-        <div className={`chat-list-item${chat.id === activeId ? " active" : ""}`} key={chat.id}>
-          <button type="button" className="chat-list-title" onClick={() => onSelect(chat.id)}>
-            {chat.title || "Untitled"}
-          </button>
-          <button
-            type="button"
-            className="chat-list-delete"
-            aria-label="Delete conversation"
-            title="Delete conversation"
-            onClick={() => onDelete(chat.id)}
-          >
-            ×
-          </button>
-        </div>
-      ))}
-    </div>
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
+      <rect x="5" y="3" width="14" height="18" rx="1.5" />
+      <path d="M9 3v18M12 8h4M12 12h4" />
+    </svg>
   );
 }
 
 export default function App() {
   const [health, setHealth] = useState(null);
   const [documents, setDocuments] = useState([]);
-  const [libraryTab, setLibraryTab] = useState("browse");
-  const [sidebarSection, setSidebarSection] = useState("library");
+  const [askEnabled, setAskEnabled] = useState(false);
+  const [floors, setFloors] = useState(DEFAULT_FLOORS);
+  const [theme, setTheme] = useState(() => currentTheme() || "light");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [notebookOpen, setNotebookOpen] = useState(false);
+
+  // Collection maintenance: uploads, rescans, folder-import jobs, reindexing.
   const [job, setJob] = useState(null);
-  const [notice, setNotice] = useState("");
-  const [noticeTone, setNoticeTone] = useState("neutral");
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState([]);
-  const [lowConfidence, setLowConfidence] = useState(false);
-  const [searched, setSearched] = useState(false);
-  const [searching, setSearching] = useState(false);
+  const [notice, setNotice] = useState({ text: "", tone: "neutral" });
   const [uploading, setUploading] = useState(false);
   const [attaching, setAttaching] = useState(false);
-  const [selectedDocs, setSelectedDocs] = useState(() => new Set());
   const [reindexing, setReindexing] = useState(false);
-  const [source, setSource] = useState(null);
-  const [askEnabled, setAskEnabled] = useState(false);
-  const [view, setView] = useState("search");
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => loadStored(SIDEBAR_KEY, "") === "1");
   const [dragActive, setDragActive] = useState(false);
   const dragCounter = useRef(0);
-  const [theme, setTheme] = useState(() => currentTheme() || (systemPrefersDark() ? "dark" : "light"));
-  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Library root (which folder auto-ingest scans) — set from Settings, but
-  // also readable/settable from the Browse tree's "Set as library" shortcut.
+  // also from the Shelves' "Set as library" shortcut.
   const [libraryRoot, setLibraryRoot] = useState(null); // null = not yet resolved
   const [hostPath, setHostPath] = useState("");
   const [settingRoot, setSettingRoot] = useState(false);
   const [rootNotice, setRootNotice] = useState("");
   const [rootError, setRootError] = useState("");
 
-  // Cloud API keys — edited from Settings, consumed by AskPanel.
+  // Cloud API keys — edited from Settings, consumed by Ask.
   const [apiKeys, setApiKeys] = useState(() => loadStored(KEYS_KEY, {}, true) || {});
   // Ollama models the reader has pulled on their own server but that this
   // app doesn't already know about — typed in from Settings, not fetched.
@@ -307,31 +137,41 @@ export default function App() {
     saveStored(OLLAMA_KEY, models);
   }, []);
 
-  // Chat history — the list lives in the sidebar; AskPanel just renders
-  // whichever conversation `activeChatId` points at.
+  // Conversation history — listed in the notebook; Ask renders whichever
+  // conversation `activeChatId` points at.
   const [chats, setChats] = useState([]);
   const [activeChatId, setActiveChatIdState] = useState(() => loadStored(ACTIVE_CHAT_KEY, "") || null);
 
-  const api = useCallback(
-    async (path, options = {}) => {
-      const response = await fetch(`${API_BASE}${path}`, options);
-      return parseResponse(response);
-    },
-    [],
-  );
+  // The research console.
+  const [mode, setModeState] = useState(() => (loadStored(MODE_KEY, "search") === "ask" ? "ask" : "search"));
+  const [query, setQuery] = useState("");
+  const [scope, setScope] = useState(null); // { documentId, documentName } or null for the whole library
+  const [searchParams, setSearchParams] = useState(loadSearchParams);
+  const [askParams, setAskParams] = useState(loadAskParams);
+  const [searchRun, setSearchRun] = useState(null);
+  const consoleInput = useRef(null);
+  const stacksRef = useRef(null);
+  const heroRef = useRef(null);
+
+  const [recents, setRecents] = useState(loadRecents);
+  const [inquiries, setInquiries] = useState(loadInquiries);
+  const [source, setSource] = useState(null);
+
+  const api = useCallback(async (path, options = {}) => {
+    const response = await fetch(`${API_BASE}${path}`, options);
+    return parseResponse(response);
+  }, []);
+
+  const say = useCallback((text, tone = "neutral") => setNotice({ text, tone }), []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     saveStored(THEME_KEY, theme);
   }, [theme]);
 
-  useEffect(() => {
-    saveStored(SIDEBAR_KEY, sidebarCollapsed ? "1" : "0");
-  }, [sidebarCollapsed]);
-
-  useEffect(() => {
-    saveStored(KEYS_KEY, apiKeys);
-  }, [apiKeys]);
+  useEffect(() => saveStored(KEYS_KEY, apiKeys), [apiKeys]);
+  useEffect(() => saveStored(SEARCH_PARAMS_KEY, searchParams), [searchParams]);
+  useEffect(() => saveStored(ASK_PARAMS_KEY, askParams), [askParams]);
 
   const setActiveChatId = useCallback((id) => {
     setActiveChatIdState(id);
@@ -351,31 +191,30 @@ export default function App() {
     refreshChatList();
   }, [refreshChatList]);
 
-  function selectChat(id) {
-    setActiveChatId(id);
-    setView("ask");
-  }
+  const clearQuery = useCallback(() => setQuery(""), []);
+  const ask = useAsk({
+    apiBase: API_BASE,
+    activeId: activeChatId,
+    onActiveIdChange: setActiveChatId,
+    onConversationsChanged: refreshChatList,
+    apiKeys,
+    ollamaModels,
+    onSwitch: clearQuery,
+  });
 
-  function newChat() {
-    setActiveChatId(null);
-    setView("ask");
-  }
+  const setMode = useCallback((next) => {
+    setModeState(next);
+    saveStored(MODE_KEY, next);
+  }, []);
 
-  async function deleteChat(id) {
-    if (!window.confirm("Delete this conversation?")) return;
-    try {
-      await api(`/conversations/${id}`, { method: "DELETE" });
-      if (id === activeChatId) setActiveChatId(null);
-      refreshChatList();
-    } catch (error) {
-      setNotice(error.message);
-      setNoticeTone("error");
-    }
-  }
+  const focusConsole = useCallback(() => {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    // After the scroll starts, so focusing doesn't fight it.
+    window.setTimeout(() => consoleInput.current?.focus(), 50);
+  }, []);
 
   // The browser's default reaction to a dropped file is to navigate to it —
-  // block that everywhere so a drop that misses the dropzone doesn't blow
-  // away the app instead of just being ignored.
+  // block that everywhere so a stray drop doesn't blow away the app.
   useEffect(() => {
     const preventDefault = (event) => event.preventDefault();
     window.addEventListener("dragover", preventDefault);
@@ -386,49 +225,44 @@ export default function App() {
     };
   }, []);
 
+  // "/" jumps to the console from anywhere that isn't already a text field.
+  useEffect(() => {
+    const onKey = (event) => {
+      if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+      event.preventDefault();
+      focusConsole();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [focusConsole]);
+
   const refreshDocuments = useCallback(async () => {
     try {
       const data = await api("/documents");
       setDocuments(data.documents || []);
-      setNoticeTone("neutral");
     } catch (error) {
-      setNotice(error.message);
-      setNoticeTone("error");
+      say(error.message, "error");
     }
-  }, [api]);
-
-  const refreshHealth = useCallback(async () => {
-    try {
-      const response = await fetch(`${API_BASE}/health/ready`);
-      const data = await response.json();
-      setHealth(data);
-    } catch (_error) {
-      setHealth({ status: "offline", qdrant: false });
-    }
-  }, []);
-
-  useEffect(() => {
-    refreshHealth();
-  }, [refreshHealth]);
+  }, [api, say]);
 
   useEffect(() => {
     let cancelled = false;
+    fetch(`${API_BASE}/health/ready`)
+      .then((response) => response.json())
+      .then((data) => !cancelled && setHealth(data))
+      .catch(() => !cancelled && setHealth({ status: "offline", qdrant: false }));
     api("/config")
       .then((config) => {
-        if (!cancelled) setAskEnabled(Boolean(config?.generation?.enabled));
+        if (cancelled) return;
+        setAskEnabled(Boolean(config?.generation?.enabled));
+        setFloors({
+          search: typeof config.rerank_min_score === "number" ? config.rerank_min_score : DEFAULT_FLOORS.search,
+          thorough: typeof config.ask_thorough_min_score === "number" ? config.ask_thorough_min_score : DEFAULT_FLOORS.thorough,
+        });
       })
       .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [api]);
-
-  useEffect(() => {
-    refreshDocuments();
-  }, [refreshDocuments]);
-
-  useEffect(() => {
-    let cancelled = false;
     fetch(`${API_BASE}/library/root`)
       .then((response) => response.json())
       .then((data) => {
@@ -436,13 +270,21 @@ export default function App() {
         setLibraryRoot(data.path || "");
         setHostPath(data.host_path || "");
       })
-      .catch(() => {
-        if (!cancelled) setLibraryRoot("");
-      });
+      .catch(() => !cancelled && setLibraryRoot(""));
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [api]);
+
+  // The search floor starts at the server's own default until the reader
+  // moves it.
+  useEffect(() => {
+    setSearchParams((params) => (params.minScore == null ? { ...params, minScore: floors.search } : params));
+  }, [floors]);
+
+  useEffect(() => {
+    refreshDocuments();
+  }, [refreshDocuments]);
 
   useEffect(() => {
     const hasPending = documents.some((document) => ["queued", "indexing"].includes(document.indexing_status));
@@ -458,17 +300,175 @@ export default function App() {
         const next = await api(`/admin/ingest-status/${job.job_id}`);
         setJob(next);
         if (TERMINAL_JOB_STATES.has(next.state)) {
-          setNotice(`Folder ingestion finished with status: ${next.state}.`);
-          setNoticeTone(next.state === "done" ? "success" : "error");
+          say(`Folder ingestion finished with status: ${next.state}.`, next.state === "done" ? "success" : "error");
           refreshDocuments();
         }
       } catch (error) {
-        setNotice(error.message);
-        setNoticeTone("error");
+        say(error.message, "error");
       }
     }, 2000);
     return () => window.clearInterval(timer);
-  }, [api, job, refreshDocuments]);
+  }, [api, job, refreshDocuments, say]);
+
+  // ---- conversations -------------------------------------------------------
+
+  // Picking the chat that's already open just shows it; anything else
+  // switches (the Ask hook loads it and drops anything still in flight for
+  // the old one).
+  function selectChat(id) {
+    if (id !== activeChatId) setActiveChatId(id);
+    setMode("ask");
+    setNotebookOpen(false);
+    window.scrollTo({ top: 0 });
+  }
+
+  function newChat() {
+    ask.newChat();
+    setMode("ask");
+    setNotebookOpen(false);
+    focusConsole();
+  }
+
+  async function deleteChat(id) {
+    if (!window.confirm("Delete this conversation?")) return;
+    try {
+      await api(`/conversations/${id}`, { method: "DELETE" });
+      if (id === activeChatId) setActiveChatId(null);
+      refreshChatList();
+    } catch (error) {
+      say(error.message, "error");
+    }
+  }
+
+  // ---- the console ---------------------------------------------------------
+
+  const runSearch = useCallback(
+    async (text, params, runScope) => {
+      const started = performance.now();
+      setSearchRun({ status: "running", query: text, params, scope: runScope });
+      try {
+        const result = await api("/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query: text,
+            top_k: params.topK,
+            rerank: true,
+            rerank_k: 20,
+            rerank_min_score: params.minScore,
+            max_per_doc: params.perDoc,
+            max_text_chars: 20000,
+            ...(runScope ? { document_id: runScope.documentId } : {}),
+          }),
+        });
+        setSearchRun({
+          status: "done",
+          query: text,
+          params,
+          scope: runScope,
+          results: result.results || [],
+          lowConfidence: Boolean(result.low_confidence),
+          elapsed: performance.now() - started,
+        });
+      } catch (error) {
+        setSearchRun({ status: "error", query: text, params, scope: runScope, error: error.message });
+      }
+    },
+    [api],
+  );
+
+  const effectiveSearchParams = { ...searchParams, minScore: searchParams.minScore ?? floors.search };
+
+  function submit() {
+    const text = query.trim();
+    if (!text) return;
+    setInquiries((list) => recordInquiry(list, text, mode === "ask" && askEnabled ? "ask" : "search"));
+    if (mode === "ask" && askEnabled) {
+      setQuery("");
+      ask.ask(text, {
+        mode: askParams.mode,
+        topK: askParams.topK,
+        minScore: askParams.minScore,
+        documentId: scope?.documentId,
+      });
+    } else {
+      runSearch(text, effectiveSearchParams, scope);
+    }
+  }
+
+  // A search from the notebook re-runs at once; a question is put back in
+  // the box instead, since sending it spends a model call and would land in
+  // whichever conversation happens to be open.
+  function runInquiry(entry) {
+    setNotebookOpen(false);
+    if (entry.mode === "ask" && askEnabled) {
+      setMode("ask");
+      setQuery(entry.q);
+      focusConsole();
+      return;
+    }
+    setMode("search");
+    setQuery(entry.q);
+    setInquiries((list) => recordInquiry(list, entry.q, "search"));
+    runSearch(entry.q, effectiveSearchParams, scope);
+    window.scrollTo({ top: 0 });
+  }
+
+  function scopeTo(documentId, documentName) {
+    setScope({ documentId, documentName });
+    setSource(null);
+    focusConsole();
+  }
+
+  const isAsk = mode === "ask" && askEnabled;
+  // The conversation Ask is writing into: shown in the top bar so it's never
+  // ambiguous which chat a question will land in.
+  const activeChatTitle = activeChatId
+    ? chats.find((chat) => chat.id === activeChatId)?.title || "Untitled"
+    : "New chat";
+  // A chat that's still loading keeps the workspace up, so switching chats
+  // doesn't flash the home screen in between.
+  const workspaceActive = isAsk ? ask.conversation.length > 0 || ask.loading : searchRun !== null;
+  const busy = isAsk ? ask.busy : searchRun?.status === "running";
+
+  const indexedCount = documents.filter((document) => document.indexing_status === "indexed").length;
+  const passageCount = documents.reduce((sum, doc) => sum + (doc.indexing_status === "indexed" ? doc.chunks || 0 : 0), 0);
+  const healthReady = health?.status === "ready";
+  const blockedReason = !health
+    ? ""
+    : !healthReady
+      ? "The search index is offline — check that Qdrant is running."
+      : indexedCount === 0
+        ? "Nothing is indexed yet — add PDFs below to start."
+        : "";
+
+  // The docked console's height, as --dock-h, so the sticky rail and the
+  // scroll-to-question offset clear it whatever its controls wrap to. A
+  // layout effect so it's set before the thread's own (passive) effect
+  // scrolls the newest question into view.
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    const el = heroRef.current;
+    if (!workspaceActive || !el || typeof ResizeObserver === "undefined") {
+      root.style.setProperty("--dock-h", "0px");
+      return undefined;
+    }
+    const observer = new ResizeObserver(() => root.style.setProperty("--dock-h", `${el.offsetHeight}px`));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [workspaceActive]);
+
+  // ---- documents -----------------------------------------------------------
+
+  const openDocument = useCallback((doc, page) => {
+    setSource({ documentId: doc.document_id, documentName: doc.filename, page: page || 1 });
+  }, []);
+
+  const notePage = useCallback((documentId, page) => {
+    setRecents((list) => recordOpen(list, documentId, page));
+  }, []);
+
+  const shelf = useMemo(() => shelfItems(recents, documents, SHELF_SIZE), [recents, documents]);
 
   async function uploadFiles(fileList) {
     const files = Array.from(fileList || []);
@@ -477,18 +477,16 @@ export default function App() {
     let completed = 0;
     try {
       for (const file of files) {
-        setNotice(`Uploading ${file.name}… (${completed + 1}/${files.length})`);
-        setNoticeTone("neutral");
+        say(`Uploading ${file.name}… (${completed + 1}/${files.length})`);
         const form = new FormData();
         form.append("file", file, file.name);
         const result = await api("/documents", { method: "POST", body: form });
         completed += 1;
-        setNotice(result.deduplicated ? `${file.name} was already in the library.` : `${file.name} is queued for indexing.`);
+        say(result.deduplicated ? `${file.name} was already in the library.` : `${file.name} is queued for indexing.`);
       }
       await refreshDocuments();
     } catch (error) {
-      setNotice(error.message);
-      setNoticeTone("error");
+      say(error.message, "error");
     } finally {
       setUploading(false);
     }
@@ -496,18 +494,17 @@ export default function App() {
 
   // Counted rather than toggled on enter/leave: dragging over a child
   // element fires leave-then-enter on the parent, which would otherwise flip
-  // drag-active off and back on and make the dropzone flicker.
+  // drag-active off and back on and make the overlay flicker. Only file
+  // drags count — dragging text or a cover around shouldn't raise it.
   function handleDragEnter(event) {
+    if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
     event.preventDefault();
     dragCounter.current += 1;
     setDragActive(true);
   }
 
-  function handleDragOver(event) {
-    event.preventDefault();
-  }
-
   function handleDragLeave(event) {
+    if (!dragActive) return;
     event.preventDefault();
     dragCounter.current = Math.max(0, dragCounter.current - 1);
     if (dragCounter.current === 0) setDragActive(false);
@@ -521,12 +518,18 @@ export default function App() {
     // Unlike the file picker's `accept`, a drop isn't filtered by the
     // browser — anything from the desktop can land here.
     const dropped = Array.from(event.dataTransfer.files || []);
+    if (!dropped.length) return;
     const pdfs = dropped.filter((file) => file.type === "application/pdf" || /\.pdf$/i.test(file.name));
     if (pdfs.length < dropped.length) {
-      setNotice(dropped.length === 1 ? "Only PDF files can be added." : `Skipped ${dropped.length - pdfs.length} non-PDF file(s).`);
-      setNoticeTone(pdfs.length === 0 ? "error" : "neutral");
+      say(
+        dropped.length === 1 ? "Only PDF files can be added." : `Skipped ${dropped.length - pdfs.length} non-PDF file(s).`,
+        pdfs.length === 0 ? "error" : "neutral",
+      );
     }
-    if (pdfs.length) uploadFiles(pdfs);
+    if (pdfs.length) {
+      stacksRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      uploadFiles(pdfs);
+    }
   }
 
   // A convenience only: auto-ingest already scans `libraryRoot` on its own
@@ -534,8 +537,7 @@ export default function App() {
   // This just forces that scan to happen right now instead of waiting.
   async function rescanLibraryFolder() {
     setAttaching(true);
-    setNotice("Rescanning the library folder…");
-    setNoticeTone("neutral");
+    say("Rescanning the library folder…");
     try {
       const result = await api("/library/import", {
         method: "POST",
@@ -543,19 +545,18 @@ export default function App() {
         body: JSON.stringify({ path: libraryRoot || "." }),
       });
       setJob(result);
-      setNotice(`Rescan job ${result.job_id} is queued.`);
+      say(`Rescan job ${result.job_id} is queued.`);
     } catch (error) {
-      setNotice(error.message);
-      setNoticeTone("error");
+      say(error.message, "error");
     } finally {
       setAttaching(false);
     }
   }
 
-  // Shared by Settings (typing a path) and the Browse tree's "Set as
-  // library" shortcut. Uses raw fetch (not the `api()` helper) so it can
-  // give a specific, actionable message for the two failure modes that
-  // actually happen here — outside the mount, or simply not found.
+  // Shared by Settings (typing a path) and the Shelves' "Set as library"
+  // shortcut. Uses raw fetch (not the `api()` helper) so it can give a
+  // specific, actionable message for the two failure modes that actually
+  // happen here — outside the mount, or simply not found.
   async function setLibraryFolder(targetPath) {
     setSettingRoot(true);
     setRootNotice("");
@@ -599,21 +600,18 @@ export default function App() {
     }
   }
 
-  // Handles both the single-document "Retry" button and the bulk
-  // "Reindex selected/all" actions. `/retry` already rebuilds from the
-  // source PDF whenever a document's pipeline_version is behind the
-  // server's current one — exactly what picking up an extraction fix
-  // needs — so this needed no new backend endpoint, just a way to call the
-  // existing one for more than one document without one failure stopping
-  // the rest of the batch.
+  // Handles the single-document "Retry" and the bulk "Reindex selected/all"
+  // actions. `/retry` already rebuilds from the source PDF whenever a
+  // document's pipeline_version is behind the server's current one — exactly
+  // what picking up an extraction fix needs — so this just calls it for each
+  // document without one failure stopping the rest of the batch.
   async function reindexDocuments(ids) {
     if (!ids.length || reindexing) return;
     setReindexing(true);
     let succeeded = 0;
     let failed = 0;
     for (const id of ids) {
-      setNotice(`Reindexing… (${succeeded + failed + 1}/${ids.length})`);
-      setNoticeTone("neutral");
+      say(`Reindexing… (${succeeded + failed + 1}/${ids.length})`);
       try {
         await api(`/documents/${id}/retry`, { method: "POST" });
         succeeded += 1;
@@ -621,414 +619,282 @@ export default function App() {
         failed += 1;
       }
     }
-    setNotice(
+    say(
       failed
         ? `Reindexed ${succeeded} document${succeeded === 1 ? "" : "s"}; ${failed} failed.`
         : `Queued ${succeeded} document${succeeded === 1 ? "" : "s"} for reindexing.`,
+      failed ? "error" : "success",
     );
-    setNoticeTone(failed ? "error" : "success");
-    setSelectedDocs(new Set());
     setReindexing(false);
     refreshDocuments();
   }
 
-  function toggleDocSelected(id) {
-    setSelectedDocs((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  // The reader's marks (read, owned, type). Applied locally at once so the
+  // toggle feels instant, then confirmed — or rolled back — by the server.
+  async function patchDocument(id, changes) {
+    const before = documents.find((doc) => doc.document_id === id);
+    if (!before) return;
+    const optimistic = { ...before };
+    if ("read" in changes) optimistic.read_at = changes.read ? new Date().toISOString() : null;
+    if ("owned" in changes) optimistic.owned = changes.owned == null ? null : Number(changes.owned);
+    if ("kind" in changes) optimistic.kind_override = changes.kind === "auto" ? null : changes.kind;
+    const replace = (doc) => setDocuments((list) => list.map((d) => (d.document_id === id ? doc : d)));
+    replace(optimistic);
+    try {
+      replace(
+        await api(`/documents/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(changes),
+        }),
+      );
+    } catch (error) {
+      replace(before);
+      say(error.message, "error");
+    }
   }
 
   async function removeDocument(document) {
     if (!window.confirm(`Remove “${document.filename}” from the library?`)) return;
     try {
       await api(`/documents/${document.document_id}`, { method: "DELETE" });
-      setNotice(`${document.filename} was removed.`);
-      setNoticeTone("neutral");
+      say(`${document.filename} was removed.`);
+      if (scope?.documentId === document.document_id) setScope(null);
       refreshDocuments();
     } catch (error) {
-      setNotice(error.message);
-      setNoticeTone("error");
+      say(error.message, "error");
     }
   }
 
-  async function searchLibrary(event) {
-    event.preventDefault();
-    const cleanQuery = query.trim();
-    if (!cleanQuery || searching) return;
-    setSearching(true);
-    try {
-      const result = await api("/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: cleanQuery, top_k: 10, rerank: true, rerank_k: 20, max_text_chars: 20000 }),
-      });
-      setResults(result.results || []);
-      setLowConfidence(Boolean(result.low_confidence));
-      setSearched(true);
-      setNotice(`Found ${result.results?.length || 0} relevant passages.`);
-      setNoticeTone("neutral");
-    } catch (error) {
-      setResults([]);
-      setLowConfidence(false);
-      setSearched(true);
-      setNotice(error.message);
-      setNoticeTone("error");
-    } finally {
-      setSearching(false);
-    }
-  }
-
-  const indexedCount = documents.filter((document) => document.indexing_status === "indexed").length;
-  const healthReady = health?.status === "ready";
-  const showSearchIntro = results.length === 0 && !searching && !searched;
+  // ---- render --------------------------------------------------------------
 
   return (
-    <div className="app-root">
-      <aside className={`sidebar${sidebarCollapsed ? " collapsed" : ""}`}>
-        <button
-          type="button"
-          className="sidebar-toggle"
-          onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
-          aria-label={sidebarCollapsed ? "Expand library panel" : "Collapse library panel"}
-          title={sidebarCollapsed ? "Expand library panel" : "Collapse library panel"}
-        >
-          {sidebarCollapsed ? "»" : "«"}
-        </button>
-
-        <div className="sidebar-body">
+    <div className="app" onDragEnter={handleDragEnter} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+      <header className="masthead">
+        <div className="masthead-left">
+          <button type="button" className="brand" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>
+            <span className="brand-mark" aria-hidden="true" />
+            <span className="brand-name">AI Librarian</span>
+          </button>
           {askEnabled && (
-            <div className="panel-tabs sidebar-section-tabs" role="tablist">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={sidebarSection === "library"}
-                className={sidebarSection === "library" ? "active" : ""}
-                onClick={() => setSidebarSection("library")}
-              >
-                Library
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={sidebarSection === "chats"}
-                className={sidebarSection === "chats" ? "active" : ""}
-                onClick={() => setSidebarSection("chats")}
-              >
-                Chats{chats.length ? ` (${chats.length})` : ""}
-              </button>
-            </div>
-          )}
-
-          {sidebarSection === "chats" && askEnabled ? (
-            <ChatList
-              chats={chats}
-              activeId={activeChatId}
-              onSelect={selectChat}
-              onNew={newChat}
-              onDelete={deleteChat}
-            />
-          ) : (
-            <>
-              <div className="panel-title">
-                <h2>Library</h2>
-                <span className="muted">{indexedCount} ready · {documents.length} total</span>
-              </div>
-
-              <div className="panel-tabs library-tabs" role="tablist">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={libraryTab === "browse"}
-                  className={libraryTab === "browse" ? "active" : ""}
-                  onClick={() => setLibraryTab("browse")}
-                >
-                  Browse
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={libraryTab === "indexed"}
-                  className={libraryTab === "indexed" ? "active" : ""}
-                  onClick={() => setLibraryTab("indexed")}
-                >
-                  Indexed{documents.length ? ` (${documents.length})` : ""}
-                </button>
-              </div>
-
-              {libraryTab === "browse" ? (
-                <>
-                  <label
-                    className={`dropzone${dragActive ? " drag-active" : ""}${uploading ? " busy" : ""}`}
-                    onDragEnter={handleDragEnter}
-                    onDragOver={handleDragOver}
-                    onDragLeave={handleDragLeave}
-                    onDrop={handleDrop}
-                  >
-                    <input
-                      type="file"
-                      multiple
-                      accept="application/pdf,.pdf"
-                      disabled={uploading}
-                      onChange={(event) => {
-                        uploadFiles(event.target.files);
-                        event.target.value = "";
-                      }}
-                    />
-                    <span className="dropzone-icon" aria-hidden="true">⇪</span>
-                    <span>
-                      {uploading ? "Uploading…" : dragActive ? "Drop to upload" : (
-                        <>Drop PDFs here, or <strong>browse</strong></>
-                      )}
-                    </span>
-                  </label>
-
-                  <button
-                    type="button"
-                    className="link rescan-link"
-                    disabled={attaching}
-                    onClick={rescanLibraryFolder}
-                    title="Auto-ingest already scans the library folder on its own — this just forces it now instead of waiting."
-                  >
-                    {attaching ? "Rescanning…" : "↻ Rescan library folder now"}
-                  </button>
-
-                  <LibraryBrowser
-                    apiBase={API_BASE}
-                    onImported={refreshDocuments}
-                    onJob={setJob}
-                    libraryRoot={libraryRoot}
-                    settingRoot={settingRoot}
-                    onSetLibraryFolder={setLibraryFolder}
-                  />
-                </>
-              ) : (
-                <div className="document-list">
-                  {documents.length === 0 && <p className="muted">Nothing indexed yet. Import a PDF from the Browse tab.</p>}
-                  {documents.length > 0 && (
-                    <div className="document-list-actions">
-                      <label className="document-select-all">
-                        <input
-                          type="checkbox"
-                          ref={(el) => {
-                            if (el) el.indeterminate = selectedDocs.size > 0 && selectedDocs.size < documents.length;
-                          }}
-                          checked={documents.length > 0 && selectedDocs.size === documents.length}
-                          onChange={(event) =>
-                            setSelectedDocs(event.target.checked ? new Set(documents.map((d) => d.document_id)) : new Set())
-                          }
-                        />
-                        <span>{selectedDocs.size ? `${selectedDocs.size} selected` : "Select all"}</span>
-                      </label>
-                      <button
-                        type="button"
-                        className="link"
-                        disabled={reindexing || selectedDocs.size === 0}
-                        onClick={() => reindexDocuments([...selectedDocs])}
-                      >
-                        Reindex selected
-                      </button>
-                      <button
-                        type="button"
-                        className="link"
-                        disabled={reindexing}
-                        onClick={() => reindexDocuments(documents.map((d) => d.document_id))}
-                        title="Re-extracts and re-chunks every document from its source PDF — worth doing after an extraction-quality fix."
-                      >
-                        Reindex all
-                      </button>
-                    </div>
-                  )}
-                  {documents.map((document) => (
-                    <DocumentCard
-                      key={document.document_id}
-                      document={document}
-                      selected={selectedDocs.has(document.document_id)}
-                      onToggleSelect={() => toggleDocSelected(document.document_id)}
-                      onRetry={() => reindexDocuments([document.document_id])}
-                      onRemove={() => removeDocument(document)}
-                      reindexing={reindexing}
-                    />
-                  ))}
-                </div>
-              )}
-
-              {notice && <div className={`status-message ${noticeTone !== "neutral" ? noticeTone : ""}`}>{notice}</div>}
-
-              {job?.files?.length > 0 && !TERMINAL_JOB_STATES.has(job.state) && (() => {
-                const done = job.files.filter((file) => ["indexed", "duplicate"].includes(file.status)).length;
-                const percent = Math.round((done / job.files.length) * 100);
-                return (
-                  <div className="status-message job-progress">
-                    <div className="job-progress-label">
-                      <span>{done}/{job.files.length} files ready</span>
-                      <span>{percent}%</span>
-                    </div>
-                    <div className="job-progress-bar">
-                      <div className="job-progress-fill" style={{ width: `${percent}%` }} />
-                    </div>
-                  </div>
-                );
-              })()}
-            </>
+            <button
+              type="button"
+              className={`chat-crumb${isAsk ? " current" : ""}`}
+              onClick={() => setNotebookOpen(true)}
+              title="Switch conversation"
+            >
+              <span className="chat-crumb-sep" aria-hidden="true">/</span>
+              <span className="chat-crumb-label">Chat</span>
+              <span className="chat-crumb-title">{activeChatTitle}</span>
+              <span className="chat-crumb-caret" aria-hidden="true">▾</span>
+            </button>
           )}
         </div>
-      </aside>
-
-      <div className="main-area">
-        <header className="topbar">
-          <div className="brand">
-            <h1>AI Librarian</h1>
-            <p>Your private, searchable reading room.</p>
+        <nav className="masthead-nav">
+          <button type="button" className="nav-button" onClick={() => setNotebookOpen(true)} aria-expanded={notebookOpen}>
+            <NotebookIcon />
+            <span className="nav-label">History</span>
+          </button>
+          <button type="button" className="nav-button" onClick={() => stacksRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+            <LibraryIcon />
+            <span className="nav-label">Library</span>
+          </button>
+          <span className="health" title={`Index: ${health?.qdrant ? "ready" : "offline"}`}>
+            <span className={`health-dot${healthReady ? " ready" : health ? " down" : ""}`} />
+            <span className="nav-label">{healthReady ? "Ready" : health?.status || "Connecting"}</span>
+          </span>
+          <div className="settings-anchor">
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => setSettingsOpen((open) => !open)}
+              aria-label="Settings"
+              aria-expanded={settingsOpen}
+              title="Settings"
+            >
+              <GearIcon />
+            </button>
+            {settingsOpen && (
+              <Settings
+                theme={theme}
+                onThemeChange={setTheme}
+                apiKeys={apiKeys}
+                setApiKeys={setApiKeys}
+                ollamaModels={ollamaModels}
+                setOllamaModels={setOllamaModels}
+                libraryRoot={libraryRoot}
+                hostPath={hostPath}
+                settingRoot={settingRoot}
+                rootNotice={rootNotice}
+                rootError={rootError}
+                onSetLibraryFolder={setLibraryFolder}
+                documentCount={documents.length}
+                reindexing={reindexing}
+                onReindexAll={() => reindexDocuments(documents.map((d) => d.document_id))}
+                onClose={() => setSettingsOpen(false)}
+              />
+            )}
           </div>
-          <div className="topbar-status">
-            <div className="health" title={`Qdrant: ${health?.qdrant ? "ready" : "offline"}`}>
-              <span className={`health-dot ${healthReady ? "ready" : ""}`} />
-              {healthReady ? "Library ready" : health?.status || "Connecting"}
-            </div>
-            <div className="settings-anchor">
-              <button
-                type="button"
-                className="settings-trigger"
-                onClick={() => setSettingsOpen((open) => !open)}
-                aria-label="Settings"
-                aria-expanded={settingsOpen}
-                title="Settings"
-              >
-                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
-                  <path
-                    fill="currentColor"
-                    d="M12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7zm8.94-3.5c0-.61-.06-1.2-.16-1.78l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.6 7.6 0 0 0-1.54-.89l-.36-2.54a.5.5 0 0 0-.5-.43h-3.84a.5.5 0 0 0-.5.43l-.36 2.54c-.55.23-1.07.53-1.54.89l-2.39-.96a.5.5 0 0 0-.6.22L2.57 7.99a.5.5 0 0 0 .12.64l2.03 1.58c-.1.58-.16 1.17-.16 1.78s.06 1.2.16 1.78l-2.03 1.6a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.31.6.22l2.39-.97c.47.37.99.67 1.54.9l.36 2.54c.05.24.26.43.5.43h3.84c.24 0 .45-.19.5-.43l.36-2.54c.55-.23 1.07-.53 1.54-.9l2.39.97c.22.09.48 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.6c.1-.58.16-1.17.16-1.78z"
-                  />
-                </svg>
-              </button>
-              {settingsOpen && (
-                <Settings
-                  theme={theme}
-                  onThemeChange={setTheme}
-                  apiKeys={apiKeys}
-                  setApiKeys={setApiKeys}
-                  ollamaModels={ollamaModels}
-                  setOllamaModels={setOllamaModels}
-                  libraryRoot={libraryRoot}
-                  hostPath={hostPath}
-                  settingRoot={settingRoot}
-                  rootNotice={rootNotice}
-                  rootError={rootError}
-                  onSetLibraryFolder={setLibraryFolder}
-                  documentCount={documents.length}
-                  reindexing={reindexing}
-                  onReindexAll={() => reindexDocuments(documents.map((d) => d.document_id))}
-                  onClose={() => setSettingsOpen(false)}
-                />
-              )}
-            </div>
-          </div>
-        </header>
+        </nav>
+      </header>
 
-        <section className="panel chat-panel">
-          {askEnabled && (
-            <div className="panel-tabs" role="tablist">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={view === "search"}
-                className={view === "search" ? "active" : ""}
-                onClick={() => setView("search")}
-              >
-                Search
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={view === "ask"}
-                className={view === "ask" ? "active" : ""}
-                onClick={() => setView("ask")}
-              >
-                Ask
-              </button>
-            </div>
-          )}
-
-          {view === "ask" && askEnabled ? (
-            <AskPanel
-              apiBase={API_BASE}
-              onViewSource={setSource}
-              indexedCount={indexedCount}
-              activeId={activeChatId}
-              onActiveIdChange={setActiveChatId}
-              onConversationsChanged={refreshChatList}
-              apiKeys={apiKeys}
-              ollamaModels={ollamaModels}
-            />
-          ) : (
-            <>
-              {showSearchIntro && (
-                <div className="chat-header">
-                  <h2>Search your library</h2>
-                  <p>Semantic search finds and reranks the most relevant source passages.</p>
-                </div>
-              )}
-              <div className="messages" aria-live="polite">
-                {showSearchIntro && (
-                  <div className="empty-state">
-                    <div>
-                      <strong>What are you looking for?</strong>
-                      Add a document, wait for it to be indexed, then search across your collection.
-                    </div>
+      <main>
+        <section className={`hero${workspaceActive ? " docked" : ""}`} ref={heroRef}>
+          <div className="hero-center">
+            {!workspaceActive && (
+              <div className="hero-intro">
+                <h1>{isAsk ? "Ask the library" : "Search the library"}</h1>
+                <dl className="readout">
+                  <div>
+                    <dt>Documents</dt>
+                    <dd>{indexedCount.toLocaleString()}</dd>
                   </div>
-                )}
-                {results.length === 0 && !searching && searched && (
-                  <div className="empty-state">
-                    <div>
-                      <strong>No relevant passages found.</strong>
-                      Nothing in your library matched this closely enough. Try rephrasing, or add a
-                      document that covers the topic.
-                    </div>
+                  <div>
+                    <dt>Passages</dt>
+                    <dd>{passageCount.toLocaleString()}</dd>
                   </div>
-                )}
-                {results.length > 0 && lowConfidence && (
-                  <div className="empty-state low-confidence">
-                    <div>
-                      <strong>Low confidence.</strong>
-                      Nothing in your library scored as a clear match for this query — the
-                      passages below are the closest available, not necessarily an answer.
-                    </div>
-                  </div>
-                )}
-                {results.map((result) => (
-                  <ResultCard
-                    key={`${result.document_id}-${result.chunk_id}`}
-                    result={result}
-                    onViewSource={setSource}
-                  />
-                ))}
-                {searching && <div className="message assistant">Finding the most relevant passages…</div>}
+                </dl>
               </div>
-              <form className="question-box" onSubmit={searchLibrary}>
-                <textarea
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      event.currentTarget.form.requestSubmit();
-                    }
-                  }}
-                  placeholder="Search concepts, passages, names, or ideas…"
-                  aria-label="Search query"
-                />
-                <button className="primary" type="submit" disabled={!query.trim() || searching || indexedCount === 0}>
-                  {searching ? "Searching…" : "Search"}
-                </button>
-              </form>
-            </>
+            )}
+            <Console
+              inputRef={consoleInput}
+              docked={workspaceActive}
+              mode={mode}
+              onModeChange={setMode}
+              askEnabled={askEnabled}
+              query={query}
+              onQueryChange={setQuery}
+              onSubmit={submit}
+              busy={busy}
+              blockedReason={blockedReason}
+              scope={scope}
+              onClearScope={() => setScope(null)}
+              searchParams={effectiveSearchParams}
+              onSearchParams={setSearchParams}
+              askParams={askParams}
+              onAskParams={setAskParams}
+              ask={ask}
+              defaults={floors}
+              onReset={() => {
+                if (isAsk) newChat();
+                else setSearchRun(null);
+              }}
+            />
+            {!workspaceActive && inquiries.length > 0 && (
+              // Laid out as a grid of equal columns so the row spans exactly
+              // the search bar's width, whatever the queries' lengths.
+              <div
+                className="recent-inquiries"
+                style={{ gridTemplateColumns: `auto repeat(${Math.min(3, inquiries.length)}, minmax(0, 1fr))` }}
+              >
+                <span className="eyebrow">Recent</span>
+                {inquiries.slice(0, 3).map((entry) => (
+                  <button type="button" className="inquiry-chip" key={`${entry.mode}:${entry.q}`} onClick={() => runInquiry(entry)} title={entry.q}>
+                    <span className="inquiry-chip-glyph" aria-hidden="true">{entry.mode === "ask" ? "¶" : "§"}</span>
+                    <span className="inquiry-chip-text">{entry.q}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            {!workspaceActive && (
+              <BookRow apiBase={API_BASE} items={shelf} onOpen={(item) => openDocument(item.doc, item.page)} />
+            )}
+          </div>
+          {!workspaceActive && (
+            <button type="button" className="scroll-cue" onClick={() => stacksRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+              Library <span aria-hidden="true">↓</span>
+            </button>
           )}
-          {source && <SourceViewer source={source} onClose={() => setSource(null)} />}
         </section>
-      </div>
+
+        {workspaceActive && (
+          <section className="workspace">
+            {isAsk ? (
+              <div className="findings-layout">
+                <div className="findings">
+                  {ask.error && <div className="notice error">{ask.error}</div>}
+                  <AskThread
+                    conversation={ask.conversation}
+                    onViewSource={setSource}
+                    onToggleCitation={ask.toggleCitation}
+                    modelLabel={ask.modelLabel}
+                    noModels={ask.noModels}
+                    loading={ask.loading}
+                  />
+                </div>
+                <AskRail conversation={ask.conversation} onToggleCitation={ask.toggleCitation} />
+              </div>
+            ) : (
+              <SearchResults
+                apiBase={API_BASE}
+                run={searchRun}
+                onViewSource={setSource}
+                onScope={(result) => scopeTo(result.document_id, result.document)}
+              />
+            )}
+          </section>
+        )}
+
+        <Stacks
+          sectionRef={stacksRef}
+          apiBase={API_BASE}
+          documents={documents}
+          libraryRoot={libraryRoot}
+          settingRoot={settingRoot}
+          onSetLibraryFolder={setLibraryFolder}
+          onImported={refreshDocuments}
+          onJob={setJob}
+          onOpenDocument={(doc) => openDocument(doc)}
+          onScope={(doc) => scopeTo(doc.document_id, doc.filename)}
+          onUpload={uploadFiles}
+          uploading={uploading}
+          onRescan={rescanLibraryFolder}
+          attaching={attaching}
+          reindexing={reindexing}
+          onReindex={reindexDocuments}
+          onRemove={removeDocument}
+          onPatch={patchDocument}
+          notice={notice}
+          job={job}
+        />
+      </main>
+
+      <Notebook
+        open={notebookOpen}
+        onClose={() => setNotebookOpen(false)}
+        askEnabled={askEnabled}
+        chats={chats}
+        activeChatId={activeChatId}
+        onSelectChat={selectChat}
+        onNewChat={newChat}
+        onDeleteChat={deleteChat}
+        inquiries={inquiries}
+        onRunInquiry={runInquiry}
+        onClearInquiries={() => setInquiries(clearInquiries())}
+      />
+
+      {source && (
+        <SourceViewer
+          apiBase={API_BASE}
+          source={source}
+          doc={documents.find((doc) => doc.document_id === source.documentId)}
+          onPatch={(changes) => patchDocument(source.documentId, changes)}
+          onClose={() => setSource(null)}
+          onPage={notePage}
+          onScope={({ documentId, documentName }) => scopeTo(documentId, documentName)}
+        />
+      )}
+
+      {dragActive && (
+        <div className="drop-overlay" aria-hidden="true">
+          <div className="drop-overlay-card">
+            <span className="drop-overlay-glyph">⇪</span>
+            <strong>Drop PDFs to add them to the library</strong>
+            <span>They'll be indexed and searchable in a minute or two.</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+

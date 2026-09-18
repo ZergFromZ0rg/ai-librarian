@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 
-import { CLOUD_PROVIDERS } from "./AskPanel.jsx";
+import { CLOUD_PROVIDERS } from "./useAsk.js";
 
 // A single popover for the handful of things that are configured once and
 // then forgotten, rather than touched every session: theme, cloud API keys,
@@ -102,7 +102,7 @@ export default function Settings({
       <section className="settings-section">
         <h3>Library folder</h3>
         <p className="settings-note">
-          Which folder auto-ingest scans, and where Browse opens by default. Recursively imports
+          Which folder auto-ingest scans, and where Library → Folders opens by default. Recursively imports
           every PDF underneath, in place — nothing is copied.
         </p>
         <form
@@ -148,7 +148,7 @@ export default function Settings({
         <p className="settings-note">
           Re-extracts and re-chunks every document from its source PDF — worth doing after an
           extraction-quality fix, so already-indexed documents pick it up too. To reindex only
-          specific documents, select them from the Indexed tab in the sidebar instead.
+          specific documents, select them in Library → Index instead.
         </p>
         <button type="button" className="secondary" disabled={reindexing || !documentCount} onClick={onReindexAll}>
           {reindexing ? "Reindexing…" : `Reindex all documents${documentCount ? ` (${documentCount})` : ""}`}
