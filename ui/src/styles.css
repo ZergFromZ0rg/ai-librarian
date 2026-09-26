@@ -2093,6 +2093,127 @@ select.input {
   gap: 14px;
 }
 
+/* Named source folders turn the old single-library view into a small, calm
+   dashboard. Cards are compact on purpose: collections are a way to orient
+   the reader, not a second file manager. */
+.collection-set {
+  margin: 0 0 24px;
+  border: 1px solid var(--rule);
+  border-radius: var(--r);
+  background: var(--surface);
+  padding: 14px;
+}
+
+.collection-set-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.collection-set-head p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.collection-set-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.collection-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.collection-card {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 84px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  border: 1px solid var(--rule);
+  border-radius: var(--r);
+  background: var(--surface);
+  padding: 10px 11px;
+  text-align: left;
+}
+
+.collection-card:hover,
+.collection-card.active {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+}
+
+.collection-card-name {
+  max-width: calc(100% - 22px);
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collection-card-path,
+.collection-card-meta {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collection-card-meta {
+  margin-top: auto;
+}
+
+.collection-watch {
+  position: absolute;
+  top: 9px;
+  right: 10px;
+  color: var(--ok);
+  font-size: 12px;
+}
+
+.collection-form {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.65fr) minmax(180px, 1.35fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  border-top: 1px solid var(--rule);
+  padding-top: 12px;
+}
+
+.collection-form input:not([type="checkbox"]) {
+  width: 100%;
+  height: 30px;
+  min-width: 0;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--r);
+  background: var(--surface);
+  padding: 0 9px;
+  font-size: 13px;
+}
+
+.collection-auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .stacks-status {
   display: flex;
   flex-direction: column;
@@ -2824,6 +2945,56 @@ select.input {
   background: var(--surface-3);
   padding: 20px;
   text-align: center;
+}
+
+.viewer-text {
+  width: min(100%, 920px);
+  min-height: 100%;
+  margin: 0 auto;
+  padding: 28px 36px;
+  overflow: auto;
+  background: var(--surface);
+  box-shadow: var(--shadow-cover);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 16px;
+  line-height: 1.65;
+  text-align: left;
+}
+
+.viewer-text-plain {
+  white-space: pre-wrap;
+}
+
+.viewer-text h1,
+.viewer-text h2,
+.viewer-text h3 {
+  margin: 1.2em 0 0.4em;
+  font-family: var(--sans);
+  line-height: 1.25;
+}
+
+.viewer-text h1:first-child,
+.viewer-text h2:first-child {
+  margin-top: 0;
+}
+
+.viewer-text table {
+  border-collapse: collapse;
+  font-family: var(--sans);
+  font-size: 13px;
+}
+
+.viewer-text th,
+.viewer-text td {
+  border: 1px solid var(--rule);
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.viewer-text th {
+  background: var(--surface-3);
 }
 
 .viewer-page-area img {

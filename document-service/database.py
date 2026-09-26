@@ -37,6 +37,9 @@ COLUMNS = (
     # When set, the PDF is referenced in place at INGEST_ROOT/source_path
     # instead of being copied into DOCUMENTS_DIR (browser folder imports).
     "source_path",
+    # The named collection that discovered this in-place file (for example
+    # Books or Work). Uploads may deliberately remain unfiled.
+    "collection_id",
     # "book" | "paper" | "document", guessed from the extracted text at index
     # time (see doc_kind.py); `kind_override` is the reader's correction.
     "kind",
@@ -79,6 +82,7 @@ CREATE TABLE IF NOT EXISTS documents (
     index_schema_version  INTEGER NOT NULL DEFAULT 0,
     extraction_notes      TEXT,
     source_path           TEXT,
+    collection_id         TEXT,
     kind                  TEXT,
     kind_override         TEXT,
     owned                 INTEGER,
@@ -124,6 +128,7 @@ class MetadataStore:
         for column, ddl in (
             ("extraction_notes", "TEXT"),
             ("source_path", "TEXT"),
+            ("collection_id", "TEXT"),
             ("kind", "TEXT"),
             ("kind_override", "TEXT"),
             ("owned", "INTEGER"),
@@ -133,6 +138,11 @@ class MetadataStore:
                 self._conn.execute(
                     f"ALTER TABLE documents ADD COLUMN {column} {ddl}"
                 )
+        # Indexes on migrated columns must come after the ALTERs: in SCHEMA
+        # they would fail on a pre-existing table that lacks the column.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_documents_collection_id ON documents (collection_id)"
+        )
 
     def close(self) -> None:
         with self._lock:

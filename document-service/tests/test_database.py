@@ -126,8 +126,10 @@ def test_migration_adds_later_columns_to_an_older_database(tmp_path):
     store = MetadataStore(db_path)
     try:
         columns = {row[1] for row in store._conn.execute("PRAGMA table_info(documents)")}
-        later = {"extraction_notes", "source_path", "kind", "kind_override", "owned", "read_at"}
+        later = {"extraction_notes", "source_path", "collection_id", "kind", "kind_override", "owned", "read_at"}
         assert later <= columns
+        indexes = {row[1] for row in store._conn.execute("PRAGMA index_list(documents)")}
+        assert "idx_documents_collection_id" in indexes
         row = store.get("aaaaaaaaaaaa")
         assert all(row[column] is None for column in later)
     finally:

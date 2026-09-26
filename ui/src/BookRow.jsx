@@ -101,7 +101,7 @@ export default function BookRow({ apiBase, items, onOpen }) {
               onClick={() => onOpen(item)}
               title={doc.filename}
             >
-              <Cover apiBase={apiBase} documentId={doc.document_id} filename={doc.filename} width={480}>
+              <Cover apiBase={apiBase} documentId={doc.document_id} filename={doc.filename} fileType={doc.file_type} width={480}>
                 <CoverFlags doc={doc} />
               </Cover>
               <span className="book-title">{displayTitle(doc.filename)}</span>

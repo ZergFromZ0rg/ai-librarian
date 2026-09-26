@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import { MarkControls } from "./DocMarks.jsx";
 import { displayTitle } from "./storage.js";
@@ -12,9 +14,11 @@ import { displayTitle } from "./storage.js";
 // `onPatch(changes)` updates them.
 export default function SourceViewer({ apiBase, source, doc, onPatch, onClose, onPage, onScope }) {
   const { documentId, documentName, page: startPage, matched, snippet } = source;
+  const isPdf = !doc || doc.file_type === "pdf";
   const [page, setPage] = useState(startPage || 1);
   const [pageCount, setPageCount] = useState(null);
   const [status, setStatus] = useState("loading");
+  const [extracted, setExtracted] = useState({ text: "", format: "markdown" });
 
   useEffect(() => {
     let cancelled = false;
@@ -62,8 +66,29 @@ export default function SourceViewer({ apiBase, source, doc, onPatch, onClose, o
   }`;
 
   useEffect(() => {
+    if (isPdf) setStatus("loading");
+  }, [imageSrc, isPdf]);
+
+  useEffect(() => {
+    if (isPdf) return undefined;
+    let cancelled = false;
     setStatus("loading");
-  }, [imageSrc]);
+    fetch(`${apiBase}/documents/${documentId}/extracted-page/${page}`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Could not load extracted text.");
+        return response.json();
+      })
+      .then((data) => {
+        if (!cancelled) {
+          setExtracted({ text: data.text || "", format: data.format || "markdown" });
+          setStatus("ready");
+        }
+      })
+      .catch(() => !cancelled && setStatus("error"));
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase, documentId, isPdf, page]);
 
   // Rendered through a portal straight onto <body>: any ancestor with its own
   // filter/transform/backdrop-filter turns `position: fixed` into "fixed to
@@ -103,8 +128,8 @@ export default function SourceViewer({ apiBase, source, doc, onPatch, onClose, o
                 Search within
               </button>
             )}
-            <a className="text-button" href={`${apiBase}/documents/${documentId}/file#page=${page}`} target="_blank" rel="noreferrer">
-              Open PDF ↗
+            <a className="text-button" href={`${apiBase}/documents/${documentId}/file${isPdf ? `#page=${page}` : ""}`} target="_blank" rel="noreferrer">
+              Open original ↗
             </a>
             <button type="button" className="icon-button" onClick={onClose} aria-label="Close">
               ×
@@ -112,16 +137,30 @@ export default function SourceViewer({ apiBase, source, doc, onPatch, onClose, o
           </div>
         </div>
         <div className="viewer-page-area">
-          {status === "loading" && <div className="viewer-status">Rendering page…</div>}
-          {status === "error" && <div className="viewer-status error">Could not render this page.</div>}
-          <img
-            key={imageSrc}
-            src={imageSrc}
-            alt={`${documentName}, page ${page}`}
-            onLoad={() => setStatus("ready")}
-            onError={() => setStatus("error")}
-            style={status === "error" ? { display: "none" } : undefined}
-          />
+          {status === "loading" && <div className="viewer-status">{isPdf ? "Rendering page…" : "Loading extracted text…"}</div>}
+          {status === "error" && <div className="viewer-status error">Could not load this page.</div>}
+          {isPdf ? (
+            <img
+              key={imageSrc}
+              src={imageSrc}
+              alt={`${documentName}, page ${page}`}
+              onLoad={() => setStatus("ready")}
+              onError={() => setStatus("error")}
+              style={status === "error" ? { display: "none" } : undefined}
+            />
+          ) : status === "ready" ? (
+            // Office sheets/slides and Markdown are extracted as Markdown
+            // (tables included); OCR and plain text stay verbatim.
+            <div className={`viewer-text${extracted.format === "markdown" ? "" : " viewer-text-plain"}`}>
+              {extracted.format === "markdown" ? (
+                <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+                  {extracted.text}
+                </ReactMarkdown>
+              ) : (
+                extracted.text
+              )}
+            </div>
+          ) : null}
         </div>
       </div>
     </div>,

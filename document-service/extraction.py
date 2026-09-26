@@ -1,3 +1,4 @@
+import io
 import logging
 import re
 import unicodedata
@@ -546,3 +547,60 @@ def extract_pages(pdf_path: str) -> List[Dict]:
                 }
             )
     return pages
+
+
+def ocr_pdf_pages(pdf_path, pages: List[Dict], page_numbers: List[int], *, languages: str = "eng") -> List[Dict]:
+    """Fill image-only PDF pages with local Tesseract OCR.
+
+    OCR is intentionally targeted: born-digital pages keep the much better
+    layout-aware extraction above, and Tesseract is only started when a page
+    has no useful text layer.  It runs in the document extraction process, not
+    in the web worker, so a large scan never blocks the UI.
+
+    OCR is best-effort.  Without Tesseract (a bare local checkout) the pages
+    come back untouched, so the usual image-only-PDF check still explains the
+    problem; a page Tesseract fails on is likewise left as it was.  Nothing
+    here raises: pytesseract's exceptions do not survive the trip back from
+    the extraction process pool, and one would take the whole pool down.
+    """
+    try:
+        import pytesseract
+        from PIL import Image
+
+        pytesseract.get_tesseract_version()
+    except Exception as exc:
+        logger.warning("OCR skipped: Tesseract is unavailable (%s)", exc)
+        return pages
+
+    targets = set(page_numbers)
+    updated = []
+    with pymupdf.open(str(pdf_path)) as document:
+        for entry in pages:
+            page_number = int(entry.get("page") or 0)
+            if page_number not in targets:
+                updated.append(entry)
+                continue
+            try:
+                source_page = document[page_number - 1]
+                # 200 DPI is a practical compromise for ordinary printed pages:
+                # markedly clearer than the screen-resolution default without
+                # turning a long scan into a multi-gigabyte transient workload.
+                pixmap = source_page.get_pixmap(matrix=pymupdf.Matrix(200 / 72, 200 / 72), alpha=False)
+                with Image.open(io.BytesIO(pixmap.tobytes("png"))) as image:
+                    text = pytesseract.image_to_string(image, lang=languages, config="--psm 3").strip()
+            except Exception as exc:
+                logger.warning("OCR failed on page %d of %s: %s", page_number, pdf_path, exc)
+                text = ""
+            if not text:
+                updated.append(entry)
+                continue
+            updated.append(
+                {
+                    **entry,
+                    "text": text,
+                    "format": "text",
+                    "needs_ocr": False,
+                    "ocr": True,
+                }
+            )
+    return updated

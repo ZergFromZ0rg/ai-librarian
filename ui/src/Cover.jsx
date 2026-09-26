@@ -5,9 +5,9 @@ import { displayTitle } from "./storage.js";
 // A document's first page as a cover, or a plain labelled placeholder when there's no
 // image to show. `documentId` null means the file isn't in the library yet.
 // `children` are laid over the cover (e.g. read/owned flags).
-export default function Cover({ apiBase, documentId, filename, width = 320, className = "", children }) {
+export default function Cover({ apiBase, documentId, filename, fileType = "pdf", width = 320, className = "", children }) {
   const [failed, setFailed] = useState(false);
-  const showImage = documentId && !failed;
+  const showImage = documentId && fileType === "pdf" && !failed;
   return (
     <div className={`cover${showImage ? "" : " cover-blank"} ${className}`}>
       {showImage ? (
@@ -20,7 +20,7 @@ export default function Cover({ apiBase, documentId, filename, width = 320, clas
         />
       ) : (
         <>
-          <span className="cover-blank-kind">PDF</span>
+          <span className="cover-blank-kind">{({ word: "WORD", excel: "EXCEL", powerpoint: "SLIDES", markdown: "MD", text: "TEXT", csv: "CSV" })[fileType] || "PDF"}</span>
           <span className="cover-blank-title">{displayTitle(filename)}</span>
         </>
       )}

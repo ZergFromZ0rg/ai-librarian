@@ -27,7 +27,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # ownership of bind-mounted volumes (see docker-entrypoint.sh).
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends gosu; \
+    apt-get install -y --no-install-recommends gosu tesseract-ocr tesseract-ocr-eng; \
     rm -rf /var/lib/apt/lists/*; \
     groupadd --gid 10001 app; \
     useradd --uid 10001 --gid 10001 --create-home --home-dir /home/app app

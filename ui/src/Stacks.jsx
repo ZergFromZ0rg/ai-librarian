@@ -32,12 +32,94 @@ function StatusBadge({ status }) {
   return <span className={`badge badge-${status}`}>{status}</span>;
 }
 
+function CollectionBar({ collections, activeId, onSelect, onCreate, onUpdate, onDelete, busy }) {
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  const [path, setPath] = useState("");
+  const [autoScan, setAutoScan] = useState(true);
+  const active = collections.find((collection) => collection.id === activeId);
+
+  async function submit(event) {
+    event.preventDefault();
+    if (!name.trim() || !path.trim()) return;
+    const created = await onCreate({ name: name.trim(), path: path.trim(), autoScan });
+    if (created) {
+      onSelect(created.id);
+      setName("");
+      setPath("");
+      setAutoScan(true);
+      setAdding(false);
+    }
+  }
+
+  return (
+    <section className="collection-set" aria-label="Collections">
+      <div className="collection-set-head">
+        <div>
+          <span className="eyebrow">Collections</span>
+          <p>Keep books, work, and reference folders distinct without moving a file.</p>
+        </div>
+        <div className="collection-set-actions">
+          {active && !active.legacy && (
+            <button type="button" className="text-button danger" onClick={() => onDelete(active)} title="Stop tracking this folder; its documents stay indexed">
+              Remove “{active.name}”
+            </button>
+          )}
+          <button type="button" className="button" onClick={() => setAdding((open) => !open)}>
+            {adding ? "Close" : "+ Add collection"}
+          </button>
+        </div>
+      </div>
+      <div className="collection-cards" role="tablist" aria-label="Choose collection">
+        {collections.map((collection) => (
+          <button
+            type="button"
+            key={collection.id}
+            role="tab"
+            aria-selected={collection.id === activeId}
+            className={`collection-card${collection.id === activeId ? " active" : ""}`}
+            onClick={() => onSelect(collection.id)}
+          >
+            <span className="collection-card-name">{collection.name}</span>
+            <span className="collection-card-path">/{collection.path || ""}</span>
+            <span className="collection-card-meta">
+              {collection.document_count || 0} indexed · {collection.auto_scan ? "watching" : "paused"}
+            </span>
+            {!collection.legacy && (
+              <span
+                role="checkbox"
+                aria-checked={collection.auto_scan}
+                className="collection-watch"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onUpdate(collection, { auto_scan: !collection.auto_scan });
+                }}
+                title={collection.auto_scan ? "Pause passive scanning" : "Resume passive scanning"}
+              >
+                {collection.auto_scan ? "●" : "○"}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+      {adding && (
+        <form className="collection-form" onSubmit={submit}>
+          <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Name, e.g. Books" aria-label="Collection name" />
+          <input value={path} onChange={(event) => setPath(event.target.value)} placeholder="Folder inside the mounted library" aria-label="Collection folder" />
+          <label className="collection-auto"><input type="checkbox" checked={autoScan} onChange={(event) => setAutoScan(event.target.checked)} /> Watch passively</label>
+          <button className="button primary" type="submit" disabled={busy || !name.trim() || !path.trim()}>{busy ? "Adding…" : "Add & index"}</button>
+        </form>
+      )}
+    </section>
+  );
+}
+
 // A Finder-style walk of the mounted /library volume, shown as shelves of
 // covers. Folders and PDFs only; importing references the file in place (no
 // copy) and, for a folder, kicks off a recursive ingest job. It opens on
 // `libraryRoot` (the folder auto-ingest watches) rather than the top of a
 // possibly much broader mount.
-function Shelves({ apiBase, documents, libraryRoot, settingRoot, onSetLibraryFolder, onImported, onJob, onOpenDocument, view }) {
+function Shelves({ apiBase, documents, libraryRoot, collection, settingRoot, onSetLibraryFolder, onImported, onJob, onOpenDocument, view }) {
   const [path, setPath] = useState(null); // null = not yet resolved to the starting folder
   const [tree, setTree] = useState(null);
   const [status, setStatus] = useState("loading");
@@ -64,13 +146,15 @@ function Shelves({ apiBase, documents, libraryRoot, settingRoot, onSetLibraryFol
     [apiBase],
   );
 
-  // Only ever fires once, on the root's first resolution — a later root
-  // change (from Settings) shouldn't yank the reader back while browsing.
+  // Switching collection is intentional and should open that collection's
+  // root. A normal catalogue refresh, on the other hand, never yanks the
+  // reader out of a sub-folder.
   useEffect(() => {
-    if (openedRef.current || libraryRoot === null) return;
+    if (libraryRoot === null) return;
+    if (openedRef.current && path === libraryRoot) return;
     openedRef.current = true;
     loadTree(libraryRoot || "");
-  }, [libraryRoot, loadTree]);
+  }, [libraryRoot, collection?.id, loadTree]);
 
   // A file's "indexed" flag comes from the tree listing, which goes stale as
   // imports finish; refresh this folder quietly whenever the catalogue moves.
@@ -93,7 +177,7 @@ function Shelves({ apiBase, documents, libraryRoot, settingRoot, onSetLibraryFol
         const response = await fetch(`${apiBase}/library/import`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: entryPath }),
+          body: JSON.stringify({ path: entryPath, ...(collection?.legacy ? {} : { collection_id: collection?.id }) }),
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
@@ -109,7 +193,7 @@ function Shelves({ apiBase, documents, libraryRoot, settingRoot, onSetLibraryFol
         });
       }
     },
-    [apiBase, onImported, onJob],
+    [apiBase, collection?.id, collection?.legacy, onImported, onJob],
   );
 
   async function setAsLibrary(entryPath) {
@@ -157,7 +241,7 @@ function Shelves({ apiBase, documents, libraryRoot, settingRoot, onSetLibraryFol
 
       {error && <div className="notice error">{error}</div>}
       {status === "loading" && !tree && <p className="muted">Loading…</p>}
-      {status === "ready" && entries.length === 0 && <p className="muted">This folder has no sub-folders or PDF files.</p>}
+      {status === "ready" && entries.length === 0 && <p className="muted">This folder has no supported documents yet.</p>}
 
       {dirs.length > 0 && (
         <div className="folders">
@@ -169,7 +253,7 @@ function Shelves({ apiBase, documents, libraryRoot, settingRoot, onSetLibraryFol
                   <span className="folder-tab" aria-hidden="true" />
                   <span className="folder-name">{entry.name}</span>
                   <span className="folder-count">
-                    {entry.pdf_count == null ? "—" : `${entry.pdf_count} PDF${entry.pdf_count === 1 ? "" : "s"}`}
+                    {entry.document_count == null ? "—" : `${entry.document_count} file${entry.document_count === 1 ? "" : "s"}`}
                   </span>
                 </button>
                 <div className="folder-actions">
@@ -201,7 +285,7 @@ function Shelves({ apiBase, documents, libraryRoot, settingRoot, onSetLibraryFol
               return (
                 <div className={`cover-card${openable ? "" : " unindexed"}`} key={`file-${entry.name}`}>
                   <button type="button" className="cover-card-open" disabled={!openable} onClick={() => onOpenDocument(doc)} title={entry.name}>
-                    <Cover apiBase={apiBase} documentId={doc ? doc.document_id : null} filename={entry.name} width={320}>
+                    <Cover apiBase={apiBase} documentId={doc ? doc.document_id : null} filename={entry.name} fileType={doc?.file_type || entry.file_type} width={320}>
                       {doc && <CoverFlags doc={doc} />}
                     </Cover>
                   </button>
@@ -219,7 +303,7 @@ function Shelves({ apiBase, documents, libraryRoot, settingRoot, onSetLibraryFol
             return (
               <div className="file-row" key={`file-${entry.name}`}>
                 <button type="button" className="file-row-open" disabled={!openable} onClick={() => onOpenDocument(doc)}>
-                  <Cover apiBase={apiBase} documentId={doc ? doc.document_id : null} filename={entry.name} width={160} className="cover-mini" />
+                  <Cover apiBase={apiBase} documentId={doc ? doc.document_id : null} filename={entry.name} fileType={doc?.file_type || entry.file_type} width={160} className="cover-mini" />
                   <span className="file-row-name" title={entry.name}>{displayTitle(entry.name)}</span>
                 </button>
                 <span className="file-row-detail">{doc?.pages ? `${doc.pages} pp.` : ""}</span>
@@ -355,7 +439,7 @@ function Catalogue({ apiBase, documents, reindexing, onReindex, onRemove, onOpen
                   </td>
                   <td>
                     <button type="button" className="catalogue-title" onClick={() => onOpenDocument(doc)} title={doc.filename}>
-                      <Cover apiBase={apiBase} documentId={doc.document_id} filename={doc.filename} width={160} className="cover-mini" />
+                      <Cover apiBase={apiBase} documentId={doc.document_id} filename={doc.filename} fileType={doc.file_type} width={160} className="cover-mini" />
                       <span>
                         <span className="catalogue-name">{displayTitle(doc.filename)}</span>
                         <span className="catalogue-path">{doc.source_path ? `↪ ${doc.source_path}` : "uploaded"}</span>
@@ -419,12 +503,22 @@ function Catalogue({ apiBase, documents, reindexing, onReindex, onRemove, onOpen
 // everything already processed — plus the ways in (upload,
 // rescan, import) and the progress of whatever is being processed.
 export default function Stacks(props) {
-  const { apiBase, documents, onUpload, uploading, onRescan, attaching, notice, job, sectionRef } = props;
+  const { apiBase, documents, collections = [], onUpload, uploading, onRescan, onCreateCollection, onUpdateCollection, onDeleteCollection, attaching, notice, job, sectionRef } = props;
   const [tab, setTab] = useState("shelves");
   const [view, setView] = useState(() => (loadStored(VIEW_KEY, "grid") === "list" ? "list" : "grid"));
+  const [activeCollectionId, setActiveCollectionId] = useState("");
   const fileInput = useRef(null);
 
   useEffect(() => saveStored(VIEW_KEY, view), [view]);
+
+  useEffect(() => {
+    if (!collections.length) return;
+    if (!collections.some((collection) => collection.id === activeCollectionId)) {
+      setActiveCollectionId(collections[0].id);
+    }
+  }, [activeCollectionId, collections]);
+
+  const activeCollection = collections.find((collection) => collection.id === activeCollectionId) || collections[0] || null;
 
   const counts = useMemo(() => {
     const out = { indexed: 0, pending: 0, error: 0, passages: 0 };
@@ -461,20 +555,30 @@ export default function Stacks(props) {
             type="file"
             multiple
             hidden
-            accept="application/pdf,.pdf"
+            accept=".pdf,.docx,.xlsx,.pptx,.txt,.md,.csv"
             onChange={(event) => {
               onUpload(event.target.files);
               event.target.value = "";
             }}
           />
-          <button type="button" className="text-button" disabled={attaching} onClick={onRescan} title="Auto-ingest already scans the library folder on its own — this just forces it now.">
-            {attaching ? "Rescanning…" : "Rescan"}
+          <button type="button" className="text-button" disabled={attaching} onClick={() => onRescan(activeCollection)} title="Scan the selected collection now.">
+            {attaching ? "Scanning…" : "Scan now"}
           </button>
           <button type="button" className="button primary" disabled={uploading} onClick={() => fileInput.current?.click()}>
-            {uploading ? "Uploading…" : "Upload PDFs"}
+            {uploading ? "Uploading…" : "Upload files"}
           </button>
         </div>
       </header>
+
+      <CollectionBar
+        collections={collections}
+        activeId={activeCollection?.id || ""}
+        onSelect={setActiveCollectionId}
+        onCreate={onCreateCollection}
+        onUpdate={onUpdateCollection}
+        onDelete={onDeleteCollection}
+        busy={attaching}
+      />
 
       {(notice?.text || jobProgress) && (
         <div className="stacks-status">
@@ -514,7 +618,7 @@ export default function Stacks(props) {
         )}
       </div>
 
-      {tab === "shelves" ? <Shelves {...props} view={view} /> : <Catalogue {...props} />}
+      {tab === "shelves" ? <Shelves {...props} collection={activeCollection} libraryRoot={activeCollection?.path ?? props.libraryRoot} view={view} /> : <Catalogue {...props} />}
     </section>
   );
 }

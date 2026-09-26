@@ -506,12 +506,32 @@ def test_internal_errors_are_sanitized_and_carry_a_request_id(service):
     assert detail == f"failed to read chunks (request {response.headers['X-Request-ID']})"
 
 
-def test_upload_rejects_non_pdf_and_empty_files(service):
+def test_upload_rejects_unsupported_and_empty_files(service):
     _module, client, _indexed = service
-    non_pdf = client.post("/documents", files={"file": ("notes.txt", b"hello", "text/plain")})
-    assert non_pdf.status_code == 400
+    unsupported = client.post("/documents", files={"file": ("tool.exe", b"MZ", "application/octet-stream")})
+    assert unsupported.status_code == 400
     empty = client.post("/documents", files={"file": ("empty.pdf", b"", "application/pdf")})
     assert empty.status_code == 400
+
+
+def test_text_upload_is_indexed_and_previewable(service):
+    module, client, _indexed = service
+    upload = client.post(
+        "/documents",
+        files={"file": ("notes.md", b"# Camus\n\nThe absurd is born of freedom and confrontation.", "text/markdown")},
+    )
+    assert upload.status_code == 201
+    doc_id = upload.json()["document_id"]
+    assert upload.json()["file_type"] == "markdown"
+    wait_for_status(client, doc_id, "indexed")
+    assert (module.DOCUMENTS_DIR / f"{doc_id}.md").exists()
+
+    page = client.get(f"/documents/{doc_id}/extracted-page/1").json()
+    assert "absurd" in page["text"]
+    # Page images are a PDF-only feature; a clear 400 beats a pymupdf crash.
+    assert client.get(f"/documents/{doc_id}/page/1").status_code == 400
+    original = client.get(f"/documents/{doc_id}/file")
+    assert original.status_code == 200 and original.headers["content-type"].startswith("text/markdown")
 
 
 def test_upload_rejects_a_file_over_the_size_limit(service, monkeypatch):

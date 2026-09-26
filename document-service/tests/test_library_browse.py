@@ -15,15 +15,18 @@ def test_tree_lists_folders_first_then_pdfs(service, tmp_path):
     (root / "Physics").mkdir()
     (root / "Physics" / "feynman.pdf").write_bytes(make_pdf("Feynman on the absurd."))
     (root / "notes.pdf").write_bytes(make_pdf("Some notes about freedom."))
-    (root / "readme.txt").write_text("ignored")
+    (root / "readme.txt").write_text("a plain-text note")
+    (root / "archive.zip").write_bytes(b"PK")
     (root / ".hidden").mkdir()
 
     tree = client.get("/library/tree").json()
     assert tree["path"] == "" and tree["parent"] is None
     names = [(e["name"], e["type"]) for e in tree["entries"]]
-    assert names == [("Physics", "dir"), ("notes.pdf", "file")]  # dir first, .hidden + .txt skipped
-    assert tree["entries"][0]["pdf_count"] == 1
+    # dir first; .hidden and the unsupported .zip skipped; text files are documents now
+    assert names == [("Physics", "dir"), ("notes.pdf", "file"), ("readme.txt", "file")]
+    assert tree["entries"][0]["pdf_count"] == tree["entries"][0]["document_count"] == 1
     assert tree["entries"][1]["indexed"] is False
+    assert tree["entries"][2]["file_type"] == "text"
 
     sub = client.get("/library/tree", params={"path": "Physics"}).json()
     assert sub["path"] == "Physics" and sub["parent"] == ""
@@ -261,3 +264,54 @@ def test_tree_rejects_escaping_paths(service, tmp_path):
     assert client.get("/library/tree", params={"path": "../.."}).status_code == 403
     assert client.get("/library/tree", params={"path": "nope/missing"}).status_code == 404
     assert client.post("/library/import", json={"path": "../secrets.pdf"}).status_code in (403, 404)
+
+
+def test_collections_scan_only_their_own_folders(service, tmp_path):
+    module, client, _indexed = service
+    root = _library(tmp_path)
+    for folder, text in (("Books", "Sisyphus and the absurd."), ("Work", "Quarterly freedom report."), ("Other", "unrelated")):
+        (root / folder).mkdir()
+        (root / folder / f"{folder.lower()}.pdf").write_bytes(make_pdf(text))
+
+    # Before any collection exists, the legacy single root stands in.
+    legacy = client.get("/collections").json()["collections"]
+    assert [c["id"] for c in legacy] == ["legacy-root"]
+
+    books = client.post("/collections", json={"name": "Books", "path": "Books"})
+    assert books.status_code == 201
+    books_id = books.json()["collection"]["id"]
+    wait_for_job(client, books.json()["job"]["job_id"])
+    assert client.post("/collections", json={"name": "Again", "path": "Books"}).status_code == 409
+
+    work = client.post("/collections", json={"name": "Work", "path": "Work", "auto_scan": False}).json()
+    wait_for_job(client, work["job"]["job_id"])
+
+    listed = {c["name"]: c for c in client.get("/collections").json()["collections"]}
+    assert set(listed) == {"Books", "Work"}  # legacy fallback gone once real ones exist
+    assert listed["Books"]["document_count"] == 1 and listed["Work"]["auto_scan"] is False
+    docs = {d["source_path"]: d for d in client.get("/documents").json()["documents"]}
+    assert set(docs) == {"Books/books.pdf", "Work/work.pdf"}
+    assert docs["Books/books.pdf"]["collection_id"] == books_id
+
+    # The passive scan skips paused collections and folders outside any collection.
+    (root / "Books" / "more.pdf").write_bytes(make_pdf("More on the absurd hero."))
+    (root / "Work" / "more.pdf").write_bytes(make_pdf("More freedom reports."))
+    assert module._auto_ingest_scan() == 1
+    assert "Work/more.pdf" not in {d["source_path"] for d in client.get("/documents").json()["documents"]}
+
+    renamed = client.patch(f"/collections/{books_id}", json={"name": "Library books", "auto_scan": False})
+    assert renamed.json()["name"] == "Library books" and renamed.json()["auto_scan"] is False
+    assert client.delete(f"/collections/{books_id}").json() == {"deleted": books_id}
+    assert client.delete(f"/collections/{books_id}").status_code == 404
+
+
+def wait_for_job(client, job_id, timeout=15):
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        state = client.get(f"/admin/ingest-status/{job_id}").json()["state"]
+        if state not in {"queued", "processing"}:
+            return state
+        time.sleep(0.1)
+    raise AssertionError(f"ingest job {job_id} did not finish")

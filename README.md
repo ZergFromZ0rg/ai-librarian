@@ -60,7 +60,7 @@ Then edit `.env` and set `LIBRARY_PATH` — this only decides which host path th
 docker compose up -d --build
 ```
 
-If `LIBRARY_PATH` already points at your PDFs, they're indexed automatically within a few seconds — no upload, no manual click. If you mounted something broader, open the Library panel's **Browse** tab and type or paste your real collection's path into the **Library path** box (or navigate to it and click **Set as library folder**) — from then on that's what gets scanned (`AUTO_INGEST_INTERVAL_SECONDS`, default every 60s) and where Browse opens by default, with no further `.env` editing or restart.
+If `LIBRARY_PATH` already points at your PDFs, they're indexed automatically within a few seconds — no upload, no manual click. If you mounted something broader, open the Library panel's **Browse** tab and type or paste your real collection's path into the **Library path** box (or navigate to it and click **Set as library folder**) — from then on that's what gets scanned (`AUTO_INGEST_INTERVAL_SECONDS`, default every 15 minutes) and where Browse opens by default, with no further `.env` editing or restart. To keep several folders apart — say *Books* and *Work* — add each as a [collection](#collections) instead.
 
 The first indexing request takes longer because the document service downloads its embedding model. The reranker is downloaded on the first reranked search. Model files are persisted under `data/models/`.
 
@@ -140,7 +140,7 @@ There are two layers, and only the first one ever needs `.env` or a restart:
 1. **The mount** (`LIBRARY_PATH` in `.env`) — an absolute host path bind-mounted read-only at `/library`. This is a Docker-level fact: the container can only ever see host paths it was handed at start, so *some* path has to be declared here once. It's fine — encouraged, even — to make this broad (your whole home directory, an external drive's mount point) rather than guessing the exact folder up front.
 2. **The library folder** — which subfolder of that mount is actually "the library": what the background scan walks and where the Browse tab opens by default. This is set **entirely from the website**, no `.env` editing or restart involved: at the top of **Browse**, type or paste the folder's path into the **Library path** box and hit **Set** — paste the exact absolute path as your file manager shows it (the box's placeholder shows the expected form) or a path relative to the mount, either works. Prefer clicking instead of typing? Navigate there in Browse and click **Set as library folder** on it — same result. **Reset to whole mount** (next to the box) undoes it. Whichever way this is set, PDFs are always **referenced in place** — nothing is ever copied, moved, or renamed on disk.
 
-**This is automatic.** A background scan (`AUTO_INGEST_INTERVAL_SECONDS`, default every 60s) walks the designated library folder recursively and references any PDF it hasn't seen before — once immediately at startup (so a library already in place before the first `docker compose up` needs no UI interaction at all), then again on every interval (so a file dropped in later is picked up on its own). Set `AUTO_INGEST_INTERVAL_SECONDS=0` to disable this and rely only on manual import.
+**This is automatic.** A background scan (`AUTO_INGEST_INTERVAL_SECONDS`, default every 15 minutes — deliberately relaxed so a sleeping NAS or external drive isn't woken every minute; **Scan now** makes it immediate) walks the designated library folder recursively and references any supported document it hasn't seen before — once immediately at startup (so a library already in place before the first `docker compose up` needs no UI interaction at all), then again on every interval (so a file dropped in later is picked up on its own). Set `AUTO_INGEST_INTERVAL_SECONDS=0` to disable this and rely only on manual import.
 
 The Library panel has two tabs:
 
@@ -151,6 +151,18 @@ The small **or upload a PDF file** link (in the Browse tab) still copies a file 
 
 Absolute paths and paths outside `/library` are rejected. The folder structure you already have is preserved as-is — nested sub-folders are walked recursively, but the app does not reorganize or rename anything on disk.
 
+### Collections
+
+A collection is a named folder inside the mount — *Books*, *Work*, *Reference* — shown as a card above the shelves. **+ Add collection** takes a name and a folder path, saves it, and indexes that folder straight away. Each card shows how many documents it holds and whether it is **watching** (included in the passive scan) or **paused**; the dot on the card toggles that. **Scan now** scans the selected collection immediately. Documents imported from inside a collection's folder are tagged with it (the tightest enclosing collection wins when folders nest); uploads stay unfiled.
+
+Until the first collection is added, the single library folder above stands in as one implicit *Library* collection, so an existing installation behaves exactly as before. Once real collections exist, the passive scan walks only their folders.
+
+### Supported formats and OCR
+
+Besides PDF, the library accepts Word (`.docx`), Excel (`.xlsx`), PowerPoint (`.pptx`), plain text (`.txt`), Markdown (`.md`) and CSV. Office files have no reliable page model, so each is split into "pages" that make sense for the format — a Word section, a spreadsheet sheet, a slide — and large text files into bounded blocks. The source viewer shows these as extracted text; the page-image view, highlights and covers are PDF-only.
+
+PDF pages with no usable text layer (scans) are OCR'd locally with Tesseract, page by page, only where needed — born-digital pages keep the layout-aware extraction. The document then carries an `extraction_notes` line saying OCR was used. `OCR_MODE=off` disables it; `OCR_LANGUAGES` takes Tesseract language codes (`eng+fra`; languages beyond English need their `tesseract-ocr-*` package added to the image). Outside Docker, OCR needs the `tesseract` binary on `PATH`; without it, OCR is skipped with a logged warning and image-only PDFs are refused as before.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -159,7 +171,9 @@ Absolute paths and paths outside `/library` are rejected. The folder structure y
 | `UI_PORT` | `3100` | Browser UI port |
 | `API_PORT` | `8000` | Direct API and interactive docs port |
 | `LIBRARY_PATH` | `./library` | Host folder mounted read-only at `/library`; can be your exact PDF folder or something broader — see [Browsing and importing](#browsing-and-importing-from-a-server-folder) |
-| `AUTO_INGEST_INTERVAL_SECONDS` | `60` | How often to rescan `LIBRARY_PATH` for new PDFs to auto-import; `0` disables the scan (manual import only) |
+| `AUTO_INGEST_INTERVAL_SECONDS` | `900` | How often to rescan watched collections (or the library folder) for new documents to auto-import; `0` disables the scan (manual import only) |
+| `OCR_MODE` | `auto` | `auto` OCRs image-only PDF pages with Tesseract; `off` skips OCR |
+| `OCR_LANGUAGES` | `eng` | Tesseract language codes, `+`-joined |
 | `INDEX_EXTRACTION_WORKERS` | `2` | PDFs extracted in parallel (one OS process each) when several are queued together — a folder import, a bulk reindex, or uploads landing close together. Extraction is ~96% of indexing time, so this is the main lever on indexing throughput; raise it on a machine with CPU and RAM to spare, lower it on a constrained one |
 | `INDEX_POLL_SECONDS` | `30` | How often the index worker checks for newly queued documents when it isn't already woken by one being enqueued |
 | `MAX_UPLOAD_MB` | `100` | Per-file backend upload limit |
@@ -374,7 +388,7 @@ Interactive API documentation is available at `http://127.0.0.1:8000/docs` (also
 
 Important endpoints:
 
-- `POST /documents` — upload a PDF
+- `POST /documents` — upload a document (PDF, Word, Excel, PowerPoint, text, Markdown or CSV)
 - `GET /documents` — list documents and indexing states
 - `GET /documents/{id}` — inspect one document's state
 - `POST /documents/{id}/retry` — retry failed indexing
@@ -383,8 +397,10 @@ Important endpoints:
 - `POST /ask` — retrieve, then stream a grounded answer as Server-Sent Events (`token` chunks, `progress` in thorough mode, then one `sources` event); body: `{"question", "history": [{"role", "content"}], "model": "provider:model", "mode": "quick"|"thorough"}`. Returns 503 when no model is available. See [Ask mode](#ask-mode)
 - `GET /ask/models` — models the reader may pick, plus the current default
 - `GET|POST /conversations`, `GET|PUT|DELETE /conversations/{id}` — saved Ask conversations (server-side; the UI's **Chat** picker)
-- `GET /library/tree?path=` — one level of the mounted `/library` volume (sub-folders + PDF files, marked when indexed)
-- `POST /library/import` — import one PDF (referenced in place) or every PDF under a folder (recursive); body `{"path"}`
+- `GET /library/tree?path=` — one level of the mounted `/library` volume (sub-folders + supported files, marked when indexed)
+- `POST /library/import` — import one document (referenced in place) or every supported file under a folder (recursive); body `{"path", "collection_id"?}`
+- `GET|POST /collections`, `PATCH|DELETE /collections/{id}` — named folders; creating one queues its folder for indexing, `auto_scan` pauses/resumes the passive scan
+- `GET /documents/{id}/extracted-page/{n}` — the extracted text of one page (how non-PDF sources are previewed)
 - `GET /library/root` — the designated library folder (persisted; `""` = the whole mount) and whether it still resolves
 - `POST /library/root` — narrow (or, with `path: ""`, reset) which folder under `/library` counts as the library; what auto-ingest scans and where Browse opens by default
 - `POST /admin/ingest-folder` — recursively import a folder under `/library` (the older form of `POST /library/import` on a directory)
@@ -421,9 +437,9 @@ npm run build
 
 ## Current limitations
 
-- PDF is the only accepted document format.
-- The Browse tab sees only what is mounted at `/library` (`LIBRARY_PATH`). It is not a full filesystem browser — to reach another disk too, add it as a second bind mount. There is no in-browser PDF preview. New files are picked up automatically (`AUTO_INGEST_INTERVAL_SECONDS`), not instantly — up to one interval's delay, or use **Attach**/**Import** in Browse to skip the wait. The app never renames, moves, or otherwise reorganizes files on disk — sub-folder structure is only ever read, never written.
-- The service does not run OCR. A PDF that is mostly page-images with no text layer — a scan, or image-only typesetting — is rejected on upload with a message to OCR it first; a few full-page figure plates in an otherwise text PDF are fine.
+- Office formats are read for their text only: images, charts, speaker notes and formulas (Excel shows cached values) are not indexed. Legacy `.doc`/`.xls`/`.ppt` are not supported.
+- The Browse tab sees only what is mounted at `/library` (`LIBRARY_PATH`). It is not a full filesystem browser — to reach another disk too, add it as a second bind mount. There is no in-browser PDF preview. New files are picked up automatically (`AUTO_INGEST_INTERVAL_SECONDS`), not instantly — up to one interval's delay, or use **Scan now** to skip the wait. The app never renames, moves, or otherwise reorganizes files on disk — sub-folder structure is only ever read, never written.
+- OCR quality is Tesseract's: fine on clean printed scans, poor on handwriting, heavy math or degraded copies. With OCR off or unavailable, a PDF that is mostly page-images is rejected with a message to OCR it first.
 - When a minority of pages carry a corrupt OCR text layer, those pages are skipped and the rest of the document is indexed; the document then shows an `extraction_notes` message saying how many pages were left out. A PDF whose text layer is *mostly* corrupt is still refused whole.
 - Front and back matter — tables of contents, back-of-book indexes, bibliographies — is detected by shape and dropped before indexing, so those keyword-dense pages don't outrank real passages. Detection is conservative and skips nothing when it would flag more than 40% of a document.
 - Layout extraction can preserve mathematical symbols only when the PDF exposes usable text or glyph information. Equations stored solely as images are not recovered.

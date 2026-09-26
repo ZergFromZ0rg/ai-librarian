@@ -39,8 +39,14 @@ from extraction import (
     assess_text_layer,
     boilerplate_page_indices,
     describe_skipped_pages,
-    extract_pages,
     garbled_page_indices,
+)
+from parsers import (
+    SUPPORTED_EXTENSIONS,
+    extract_source_pages,
+    file_type_for_path,
+    is_supported_path,
+    media_type_for,
 )
 from reranker import DEFAULT_MODEL as RERANK_MODEL, model_info, rerank
 from vector_store import (
@@ -142,7 +148,15 @@ INDEX_POLL_SECONDS = float(os.environ.get("INDEX_POLL_SECONDS", "30"))
 # required. Runs once immediately at startup too, so a library populated before
 # the container's first start is indexed without any UI interaction. 0 disables
 # the scan entirely (Browse/Attach import remain manual-only).
-AUTO_INGEST_INTERVAL_SECONDS = float(os.environ.get("AUTO_INGEST_INTERVAL_SECONDS", "60"))
+# A directory walk is cheap in isolation but unnecessarily noisy on a sleeping
+# NAS or external drive every minute.  The UI has a one-click scan for the
+# moments when it matters; passive discovery is deliberately relaxed.
+AUTO_INGEST_INTERVAL_SECONDS = float(os.environ.get("AUTO_INGEST_INTERVAL_SECONDS", "900"))
+OCR_MODE = os.environ.get("OCR_MODE", "auto").strip().lower()
+if OCR_MODE not in {"auto", "off"}:
+    logger.warning("Ignoring unsupported OCR_MODE=%r; using auto", OCR_MODE)
+    OCR_MODE = "auto"
+OCR_LANGUAGES = os.environ.get("OCR_LANGUAGES", "eng").strip() or "eng"
 RERANK_MAX_WORKERS = int(os.environ.get("RERANK_MAX_WORKERS", "2"))
 # PDF extraction's per-page ML layout pass dominates indexing time (profiled at
 # ~96% of it) and pymupdf4llm serializes every call to it within a process via
@@ -203,7 +217,7 @@ CHUNK_SOFT_MAX_TOKENS = int(os.environ.get("CHUNK_SOFT_MAX_TOKENS", "220"))
 CHUNK_HARD_MAX_TOKENS = int(os.environ.get("CHUNK_HARD_MAX_TOKENS", "240"))
 CHUNK_OVERLAP_TOKENS = int(os.environ.get("CHUNK_OVERLAP_TOKENS", "32"))
 DOC_ID_PATTERN = re.compile(r"^[a-f0-9]{12}$")
-PIPELINE_VERSION = 10  # cross-page splice marker (chunking.py) + fuzzy-match dropped-line detection (layout.py)
+PIPELINE_VERSION = 11  # multi-format sources + targeted OCR for image-only PDF pages
 
 for directory in (
     DOCUMENTS_DIR, METADATA_DIR, EXTRACTED_DIR, CHUNKS_DIR, JOBS_DIR, LOGS_DIR, INGEST_ROOT
@@ -502,6 +516,7 @@ def read_json(path: Path):
 SETTINGS_PATH = DATA_DIR / "settings.json"
 SETTINGS_LOCK = threading.RLock()
 _SETTINGS_CACHE: Optional[dict] = None
+COLLECTION_ID_PATTERN = re.compile(r"^[a-f0-9]{12}$")
 
 
 def _load_settings() -> dict:
@@ -542,6 +557,62 @@ def library_root_path() -> Path:
     if not resolved.is_dir():
         return INGEST_ROOT
     return resolved
+
+
+def configured_collections() -> List[dict]:
+    """Return the saved named folders, with a read-only legacy fallback.
+
+    A pre-collections installation keeps its existing single library root and
+    auto-ingest behaviour.  New installations can instead choose any number
+    of clearly named, independently pausable collections.
+    """
+    stored = _load_settings().get("collections")
+    valid = []
+    if isinstance(stored, list):
+        for item in stored:
+            if not isinstance(item, dict):
+                continue
+            collection_id = str(item.get("id") or "")
+            path = str(item.get("path") or "").strip().strip("/")
+            name = str(item.get("name") or "").strip()
+            if not COLLECTION_ID_PATTERN.fullmatch(collection_id) or not name:
+                continue
+            try:
+                folder = resolve_ingest_folder(path)
+            except HTTPException:
+                continue
+            valid.append(
+                {
+                    "id": collection_id,
+                    "name": name[:80],
+                    "path": "" if folder == INGEST_ROOT else str(folder.relative_to(INGEST_ROOT)),
+                    "auto_scan": bool(item.get("auto_scan", True)),
+                }
+            )
+    if valid:
+        return sorted(valid, key=lambda item: (item["name"].lower(), item["id"]))
+    legacy = library_root_path()
+    return [
+        {
+            "id": "legacy-root",
+            "name": "Library",
+            "path": "" if legacy == INGEST_ROOT else str(legacy.relative_to(INGEST_ROOT)),
+            "auto_scan": True,
+            "legacy": True,
+        }
+    ]
+
+
+def collection_for_source_path(source_path: str, collections: Optional[List[dict]] = None) -> Optional[str]:
+    """The tightest collection containing a source path, if any."""
+    candidates = []
+    for collection in collections or configured_collections():
+        root = collection.get("path") or ""
+        if not root or source_path == root or source_path.startswith(root + "/"):
+            candidates.append(collection)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: len(item.get("path") or ""))["id"]
 
 
 def validate_doc_id(doc_id: str) -> str:
@@ -867,7 +938,7 @@ def hash_file(path: Path) -> str:
 
 
 def pdf_path(metadata: dict) -> Path:
-    """Where this document's PDF actually lives.
+    """Where this document's source actually lives.
 
     Browser folder imports reference the original file in place under
     ``INGEST_ROOT``; uploads are copied into ``DOCUMENTS_DIR``.
@@ -881,39 +952,48 @@ def pdf_path(metadata: dict) -> Path:
 def build_document_artifacts(
     stored_path: Path, filename: str, doc_id: str
 ) -> tuple[int, List[dict], int, Optional[str]]:
-    pages = extract_pages(stored_path)
+    file_type = file_type_for_path(stored_path)
+    pages, used_ocr = extract_source_pages(
+        stored_path, ocr_mode=OCR_MODE, ocr_languages=OCR_LANGUAGES
+    )
     if not any(page.get("text", "").strip() for page in pages):
-        raise ValueError("the PDF contains no extractable text; scanned PDFs require OCR")
-    fatal_reason = assess_scanned(pages) or assess_text_layer(pages)
-    if fatal_reason:
-        raise ValueError(fatal_reason)
+        raise ValueError("the document contains no extractable text")
+    # PDF-specific quality checks do not make sense for a spreadsheet sheet or
+    # a slide deck.  OCR runs first, so a scan that was successfully read does
+    # not get rejected as an image-only PDF afterwards.
+    if file_type == "pdf":
+        fatal_reason = assess_scanned(pages) or assess_text_layer(pages)
+        if fatal_reason:
+            raise ValueError(fatal_reason)
 
     total_pages = len(pages)
     garbled = set(garbled_page_indices(pages))
-    extraction_notes = None
+    extraction_notes = "OCR was used for image-only PDF pages." if used_ocr else None
     if garbled:
         # A minority of the pages are OCR garbage. Drop just those and index
         # the rest rather than refusing the whole document. Page numbers must
         # be read off before filtering — `garbled` indexes the original list.
         skipped_page_numbers = sorted(pages[index]["page"] for index in garbled)
         pages = [page for index, page in enumerate(pages) if index not in garbled]
-        extraction_notes = describe_skipped_pages(skipped_page_numbers, total_pages)
+        skipped_note = describe_skipped_pages(skipped_page_numbers, total_pages)
+        extraction_notes = " ".join(part for part in (extraction_notes, skipped_note) if part)
         logger.info("Skipped corrupt page(s) %s of %s", skipped_page_numbers, filename)
 
     # Contents / index / bibliography pages: keyword-dense, no retrievable prose.
-    boilerplate = set(boilerplate_page_indices(pages))
-    if boilerplate and len(boilerplate) <= len(pages) * 0.4:
-        pages = [page for index, page in enumerate(pages) if index not in boilerplate]
-        logger.info(
-            "Skipped %d front/back-matter page(s) of %s", len(boilerplate), filename
-        )
-    elif boilerplate:
-        logger.warning(
-            "Boilerplate detection flagged %d/%d pages of %s; ignoring as unreliable",
-            len(boilerplate),
-            len(pages),
-            filename,
-        )
+    if file_type == "pdf":
+        boilerplate = set(boilerplate_page_indices(pages))
+        if boilerplate and len(boilerplate) <= len(pages) * 0.4:
+            pages = [page for index, page in enumerate(pages) if index not in boilerplate]
+            logger.info(
+                "Skipped %d front/back-matter page(s) of %s", len(boilerplate), filename
+            )
+        elif boilerplate:
+            logger.warning(
+                "Boilerplate detection flagged %d/%d pages of %s; ignoring as unreliable",
+                len(boilerplate),
+                len(pages),
+                filename,
+            )
 
     blocks = parse_typed_blocks(pages)
     groups = build_semantic_groups(
@@ -973,6 +1053,7 @@ def create_document(
     *,
     doc_id: Optional[str] = None,
     source_path: Optional[str] = None,
+    collection_id: Optional[str] = None,
 ) -> dict:
     """Record one document and queue it for extraction + indexing in the
     background. ``source_path`` (relative to ``INGEST_ROOT``) means the PDF
@@ -993,11 +1074,12 @@ def create_document(
     metadata = {
         "document_id": doc_id,
         "filename": filename,
-        "file_type": "pdf",
+        "file_type": file_type_for_path(filename) or "document",
         "title": title_from_filename(filename),
         "stored_filename": stored_path.name,
         "content_sha256": content_sha256,
         "source_path": source_path,
+        "collection_id": collection_id,
         "uploaded_at": now,
         "updated_at": now,
         "pages": 0,
@@ -1033,19 +1115,25 @@ def create_document(
 _IMPORT_LOCK = threading.Lock()
 
 
-def import_library_file(rel_path: str) -> tuple[dict, bool]:
-    """Reference a PDF sitting under INGEST_ROOT (no copy). Returns
+def import_library_file(rel_path: str, collection_id: Optional[str] = None) -> tuple[dict, bool]:
+    """Reference a supported file sitting under INGEST_ROOT (no copy). Returns
     ``(metadata, deduplicated)``."""
     source = resolve_library_path(rel_path)
-    if not source.is_file() or source.suffix.lower() != ".pdf":
-        raise HTTPException(status_code=400, detail="not a PDF file inside the library")
+    if not source.is_file() or not is_supported_path(source):
+        raise HTTPException(status_code=400, detail="unsupported file type inside the library")
     content_sha256 = hash_file(source)  # outside the lock: hashing is the slow part
     with _IMPORT_LOCK:
         duplicate = find_duplicate(content_sha256)
         if duplicate:
             return duplicate, True
         rel = str(source.relative_to(INGEST_ROOT))
-        return create_document(source, source.name, content_sha256, source_path=rel), False
+        return create_document(
+            source,
+            source.name,
+            content_sha256,
+            source_path=rel,
+            collection_id=collection_id or collection_for_source_path(rel),
+        ), False
 
 
 def resolve_library_path(requested: Optional[str]) -> Path:
@@ -1078,14 +1166,14 @@ def resolve_ingest_folder(requested: Optional[str]) -> Path:
 
 
 def _library_pdfs(folder: Path) -> List[Path]:
-    """Every ``.pdf`` under ``folder``, recursively, skipping dot-files and
+    """Every supported file under ``folder``, recursively, skipping dot-files and
     anything inside a dot-directory. Sorted for stable job ordering."""
     out = []
-    for path in folder.rglob("*.pdf"):
+    for path in folder.rglob("*"):
         rel_parts = path.relative_to(folder).parts
         if any(part.startswith(".") for part in rel_parts):
             continue
-        if path.is_file():
+        if path.is_file() and is_supported_path(path):
             out.append(path)
     return sorted(out)
 
@@ -1096,7 +1184,7 @@ def ingest_worker() -> None:
         try:
             if item is None:
                 return
-            job_id, folder = item
+            job_id, folder, collection_id = item
             with JOB_STATUS_LOCK:
                 job = JOB_STATUS[job_id]
                 job["state"] = "processing"
@@ -1111,7 +1199,7 @@ def ingest_worker() -> None:
                     job["files"].append({"file": rel, "status": "processing"})
                     save_job(job)
                 try:
-                    metadata, duplicate = import_library_file(rel)
+                    metadata, duplicate = import_library_file(rel, collection_id)
                     with JOB_STATUS_LOCK:
                         entry = JOB_STATUS[job_id]["files"][file_index]
                         entry["document_id"] = metadata["document_id"]
@@ -1143,9 +1231,7 @@ def ingest_worker() -> None:
 
 
 def _auto_ingest_scan() -> int:
-    """Reference-import every PDF under the effective library root (the
-    persisted ``library_root`` setting, or all of INGEST_ROOT if unset) that
-    isn't indexed yet.
+    """Reference-import new files from each active named collection.
 
     Cheap on a re-run: only files whose relative path isn't already a
     ``source_path`` in the metadata store are hashed at all, so a large,
@@ -1154,20 +1240,29 @@ def _auto_ingest_scan() -> int:
     """
     known = {doc["source_path"] for doc in list_metadata() if doc.get("source_path")}
     imported = 0
-    for pdf in _library_pdfs(library_root_path()):
-        rel = str(pdf.relative_to(INGEST_ROOT))
-        if rel in known:
+    seen_paths = set()
+    for collection in configured_collections():
+        if not collection.get("auto_scan"):
             continue
         try:
-            metadata, duplicate = import_library_file(rel)
-        except Exception:
-            logger.exception("Automatic library scan could not import %s", rel)
+            folder = resolve_ingest_folder(collection.get("path") or "")
+        except HTTPException:
             continue
-        if not duplicate:
-            enqueue_index(IndexTask(metadata["document_id"]))
-            imported += 1
+        for source in _library_pdfs(folder):
+            rel = str(source.relative_to(INGEST_ROOT))
+            if rel in known or rel in seen_paths:
+                continue
+            seen_paths.add(rel)
+            try:
+                metadata, duplicate = import_library_file(rel, collection["id"])
+            except Exception:
+                logger.exception("Automatic library scan could not import %s", rel)
+                continue
+            if not duplicate:
+                enqueue_index(IndexTask(metadata["document_id"]))
+                imported += 1
     if imported:
-        logger.info("Automatic library scan imported %d new PDF(s)", imported)
+        logger.info("Automatic library scan imported %d new document(s)", imported)
     return imported
 
 
@@ -1647,6 +1742,9 @@ async def config():
         "generation": await generation.backend_info(),
         "pipeline_version": PIPELINE_VERSION,
         "index_schema_version": INDEX_SCHEMA_VERSION,
+        "supported_file_types": sorted(SUPPORTED_EXTENSIONS),
+        "passive_scan_seconds": AUTO_INGEST_INTERVAL_SECONDS,
+        "ocr": {"mode": OCR_MODE, "languages": OCR_LANGUAGES},
         "fusion": FUSION_METHOD,
         "chunking": {
             "target_tokens": CHUNK_TARGET_TOKENS,
@@ -1666,11 +1764,15 @@ async def get_documents():
 async def upload_document(file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(status_code=400, detail="missing filename")
-    if Path(file.filename).suffix.lower() != ".pdf":
-        raise HTTPException(status_code=400, detail="only PDF files are supported")
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="supported files are PDF, Word, Excel, PowerPoint, text, Markdown, and CSV",
+        )
 
     doc_id = generate_id()
-    stored_path = DOCUMENTS_DIR / f"{doc_id}.pdf"
+    stored_path = DOCUMENTS_DIR / f"{doc_id}{suffix}"
     temporary_path = DOCUMENTS_DIR / f".{doc_id}.uploading"
     digest = hashlib.sha256()
     total = 0
@@ -1733,12 +1835,39 @@ async def get_chunks(doc_id: str):
         raise _sanitized_http_error(500, "failed to read chunks", exc, log_context=doc_id) from exc
 
 
-def _stored_pdf_path(doc_id: str) -> Path:
+@app.get("/documents/{doc_id}/extracted-page/{page}")
+async def get_extracted_page(doc_id: str, page: int):
+    """Text preview for Office and text documents (and an accessible PDF fallback)."""
+    validate_doc_id(doc_id)
+    if page < 1:
+        raise HTTPException(status_code=404, detail="page out of range")
+    extracted_file = EXTRACTED_DIR / f"{doc_id}.json"
+    if not extracted_file.exists():
+        raise HTTPException(status_code=404, detail="extracted text not found")
+
+    def read_page() -> dict:
+        extracted = read_json(extracted_file)
+        for item in extracted.get("pages") or []:
+            if int(item.get("page") or 0) == page:
+                return {"page": page, "text": item.get("text") or "", "format": item.get("format") or "markdown"}
+        raise HTTPException(status_code=404, detail="page out of range")
+
+    return await asyncio.to_thread(read_page)
+
+
+def _stored_file_path(doc_id: str) -> Path:
     metadata = read_metadata(doc_id)
     stored = pdf_path(metadata)
     if not stored.exists():
-        raise HTTPException(status_code=404, detail="the source PDF is missing")
+        raise HTTPException(status_code=404, detail="the source document is missing")
     return stored
+
+
+def _stored_pdf_path(doc_id: str) -> Path:
+    metadata = read_metadata(doc_id)
+    if metadata.get("file_type") != "pdf":
+        raise HTTPException(status_code=400, detail="page rendering is only available for PDF files")
+    return _stored_file_path(doc_id)
 
 
 def _highlight_quads(page, phrase: str):
@@ -1774,13 +1903,13 @@ def _highlight_quads(page, phrase: str):
 
 @app.get("/documents/{doc_id}/file")
 async def get_document_file(doc_id: str):
-    stored = await asyncio.to_thread(_stored_pdf_path, doc_id)
+    stored = await asyncio.to_thread(_stored_file_path, doc_id)
     metadata = await asyncio.to_thread(read_metadata, doc_id)
     return FileResponse(
         stored,
-        media_type="application/pdf",
+        media_type=media_type_for(metadata.get("file_type") or ""),
         content_disposition_type="inline",
-        filename=metadata.get("filename") or f"{doc_id}.pdf",
+        filename=metadata.get("filename") or stored.name,
     )
 
 
@@ -2281,7 +2410,7 @@ async def ingest_status(job_id: str):
     return status
 
 
-def _start_folder_ingest(folder: Path) -> dict:
+def _start_folder_ingest(folder: Path, collection_id: Optional[str] = None) -> dict:
     """Register and enqueue a recursive ingest job for `folder`."""
     job_id = generate_id()
     now = utc_now()
@@ -2289,6 +2418,7 @@ def _start_folder_ingest(folder: Path) -> dict:
         "job_id": job_id,
         "state": "queued",
         "folder": str(folder.relative_to(INGEST_ROOT)) if folder != INGEST_ROOT else ".",
+        "collection_id": collection_id,
         "files": [],
         "created_at": now,
         "updated_at": now,
@@ -2298,7 +2428,7 @@ def _start_folder_ingest(folder: Path) -> dict:
         save_job(job)
     _prune_old_jobs()
     try:
-        INGEST_QUEUE.put((job_id, str(folder)), timeout=2)
+        INGEST_QUEUE.put((job_id, str(folder), collection_id), timeout=2)
     except queue.Full as exc:
         with JOB_STATUS_LOCK:
             job["state"] = "error"
@@ -2316,8 +2446,8 @@ async def ingest_folder(request: IngestFolderRequest):
 
 @app.get("/library/tree")
 async def library_tree(path: str = Query("", max_length=1024)):
-    """One level of the mounted library: sub-folders (with a direct PDF count)
-    and PDF files (marked when already indexed). Everything is relative to
+    """One level of the mounted library: sub-folders and supported documents
+    (marked when already indexed). Everything is relative to
     INGEST_ROOT; `path=""` is the root."""
 
     def build() -> dict:
@@ -2334,23 +2464,26 @@ async def library_tree(path: str = Query("", max_length=1024)):
                     continue
                 if entry.is_dir(follow_symlinks=False):
                     try:
-                        pdf_count = sum(
+                        document_count = sum(
                             1
                             for child in os.scandir(entry.path)
                             if not child.name.startswith(".")
                             and child.is_file()
-                            and child.name.lower().endswith(".pdf")
+                            and is_supported_path(child.name)
                         )
                     except OSError:
-                        pdf_count = None
-                    dirs.append({"name": entry.name, "type": "dir", "pdf_count": pdf_count})
-                elif entry.is_file() and entry.name.lower().endswith(".pdf"):
+                        document_count = None
+                    # `pdf_count` remains for older browsers; it now means
+                    # supported document count, not just literal PDFs.
+                    dirs.append({"name": entry.name, "type": "dir", "pdf_count": document_count, "document_count": document_count})
+                elif entry.is_file() and is_supported_path(entry.name):
                     rel = str(Path(entry.path).resolve().relative_to(INGEST_ROOT))
                     doc = by_source.get(rel)
                     files.append({
                         "name": entry.name,
                         "type": "file",
                         "size": entry.stat().st_size,
+                        "file_type": file_type_for_path(entry.name),
                         "indexed": doc is not None,
                         "document_id": doc["document_id"] if doc else None,
                     })
@@ -2368,19 +2501,23 @@ async def library_tree(path: str = Query("", max_length=1024)):
 
 class LibraryImportRequest(BaseModel):
     path: str = Field(min_length=1, max_length=1024)
+    collection_id: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{12}$")
 
 
 @app.post("/library/import")
 async def library_import(request: LibraryImportRequest):
-    """Import one PDF (referenced in place) or every PDF under a folder."""
+    """Import one document (referenced in place) or every supported file under a folder."""
     target = resolve_library_path(request.path)
+    collection_id = request.collection_id or collection_for_source_path(
+        str(target.relative_to(INGEST_ROOT))
+    )
     if target.is_dir():
         return JSONResponse(
-            {**_start_folder_ingest(target), "state": "queued"}, status_code=202
+            {**_start_folder_ingest(target, collection_id), "state": "queued"}, status_code=202
         )
     try:
         metadata, deduplicated = await asyncio.to_thread(
-            import_library_file, str(target.relative_to(INGEST_ROOT))
+            import_library_file, str(target.relative_to(INGEST_ROOT)), collection_id
         )
     except HTTPException:
         raise
@@ -2393,6 +2530,99 @@ async def library_import(request: LibraryImportRequest):
         return JSONResponse({**metadata, "deduplicated": True}, status_code=200)
     enqueue_index(IndexTask(metadata["document_id"]))
     return JSONResponse(metadata, status_code=201)
+
+
+class CollectionRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    path: str = Field(min_length=1, max_length=1024)
+    auto_scan: bool = True
+
+
+class CollectionPatch(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    auto_scan: Optional[bool] = None
+
+
+def _collection_response() -> List[dict]:
+    counts = collections.Counter(doc.get("collection_id") for doc in list_metadata())
+    result = []
+    for collection in configured_collections():
+        result.append({**collection, "document_count": counts.get(collection["id"], 0)})
+    return result
+
+
+@app.get("/collections")
+async def get_collections():
+    return {"collections": await asyncio.to_thread(_collection_response)}
+
+
+@app.post("/collections")
+async def create_collection(request: CollectionRequest):
+    """Save a named folder and immediately queue its current supported files.
+
+    The scan stays lazy afterwards (and can be paused per collection), but a
+    newly-added Books or Work folder should feel ready without waiting for the
+    passive timer.
+    """
+    def create() -> dict:
+        folder = resolve_ingest_folder(request.path)
+        path = "" if folder == INGEST_ROOT else str(folder.relative_to(INGEST_ROOT))
+        name = request.name.strip()
+        current = _load_settings()
+        items = list(current.get("collections") or [])
+        if any(str(item.get("path") or "").strip("/") == path for item in items if isinstance(item, dict)):
+            raise HTTPException(status_code=409, detail="that folder already has a collection")
+        collection = {
+            "id": generate_id(),
+            "name": name,
+            "path": path,
+            "auto_scan": request.auto_scan,
+        }
+        _save_settings({"collections": [*items, collection]})
+        job = _start_folder_ingest(folder, collection["id"])
+        return {"collection": collection, "job": job}
+
+    return JSONResponse(await asyncio.to_thread(create), status_code=201)
+
+
+@app.patch("/collections/{collection_id}")
+async def patch_collection(collection_id: str, request: CollectionPatch):
+    if not COLLECTION_ID_PATTERN.fullmatch(collection_id):
+        raise HTTPException(status_code=404, detail="collection not found")
+
+    def patch() -> dict:
+        current = _load_settings()
+        items = list(current.get("collections") or [])
+        for index, item in enumerate(items):
+            if isinstance(item, dict) and item.get("id") == collection_id:
+                next_item = dict(item)
+                if request.name is not None:
+                    next_item["name"] = request.name.strip()
+                if request.auto_scan is not None:
+                    next_item["auto_scan"] = request.auto_scan
+                items[index] = next_item
+                _save_settings({"collections": items})
+                return next_item
+        raise HTTPException(status_code=404, detail="collection not found")
+
+    return await asyncio.to_thread(patch)
+
+
+@app.delete("/collections/{collection_id}")
+async def delete_collection(collection_id: str):
+    if not COLLECTION_ID_PATTERN.fullmatch(collection_id):
+        raise HTTPException(status_code=404, detail="collection not found")
+
+    def delete() -> dict:
+        current = _load_settings()
+        items = list(current.get("collections") or [])
+        kept = [item for item in items if not isinstance(item, dict) or item.get("id") != collection_id]
+        if len(kept) == len(items):
+            raise HTTPException(status_code=404, detail="collection not found")
+        _save_settings({"collections": kept})
+        return {"deleted": collection_id}
+
+    return await asyncio.to_thread(delete)
 
 
 class LibraryRootRequest(BaseModel):

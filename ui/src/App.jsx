@@ -119,10 +119,11 @@ export default function App() {
   const [dragActive, setDragActive] = useState(false);
   const dragCounter = useRef(0);
 
-  // Library root (which folder auto-ingest scans) — set from Settings, but
-  // also from the Shelves' "Set as library" shortcut.
+  // A legacy default root is retained for existing installations. Newer
+  // installations work with a set of named collections (Books, Work, etc.).
   const [libraryRoot, setLibraryRoot] = useState(null); // null = not yet resolved
   const [hostPath, setHostPath] = useState("");
+  const [collections, setCollections] = useState([]);
   const [settingRoot, setSettingRoot] = useState(false);
   const [rootNotice, setRootNotice] = useState("");
   const [rootError, setRootError] = useState("");
@@ -247,6 +248,15 @@ export default function App() {
     }
   }, [api, say]);
 
+  const refreshCollections = useCallback(async () => {
+    try {
+      const data = await api("/collections");
+      setCollections(data.collections || []);
+    } catch (error) {
+      say(error.message, "error");
+    }
+  }, [api, say]);
+
   useEffect(() => {
     let cancelled = false;
     fetch(`${API_BASE}/health/ready`)
@@ -271,6 +281,9 @@ export default function App() {
         setHostPath(data.host_path || "");
       })
       .catch(() => !cancelled && setLibraryRoot(""));
+    api("/collections")
+      .then((data) => !cancelled && setCollections(data.collections || []))
+      .catch(() => !cancelled && setCollections([]));
     return () => {
       cancelled = true;
     };
@@ -302,13 +315,14 @@ export default function App() {
         if (TERMINAL_JOB_STATES.has(next.state)) {
           say(`Folder ingestion finished with status: ${next.state}.`, next.state === "done" ? "success" : "error");
           refreshDocuments();
+          refreshCollections();
         }
       } catch (error) {
         say(error.message, "error");
       }
     }, 2000);
     return () => window.clearInterval(timer);
-  }, [api, job, refreshDocuments, say]);
+  }, [api, job, refreshCollections, refreshDocuments, say]);
 
   // ---- conversations -------------------------------------------------------
 
@@ -519,37 +533,87 @@ export default function App() {
     // browser — anything from the desktop can land here.
     const dropped = Array.from(event.dataTransfer.files || []);
     if (!dropped.length) return;
-    const pdfs = dropped.filter((file) => file.type === "application/pdf" || /\.pdf$/i.test(file.name));
-    if (pdfs.length < dropped.length) {
+    const supported = dropped.filter((file) => /\.(pdf|docx|xlsx|pptx|txt|md|csv)$/i.test(file.name));
+    if (supported.length < dropped.length) {
       say(
-        dropped.length === 1 ? "Only PDF files can be added." : `Skipped ${dropped.length - pdfs.length} non-PDF file(s).`,
-        pdfs.length === 0 ? "error" : "neutral",
+        dropped.length === 1 ? "That file type is not supported." : `Skipped ${dropped.length - supported.length} unsupported file(s).`,
+        supported.length === 0 ? "error" : "neutral",
       );
     }
-    if (pdfs.length) {
+    if (supported.length) {
       stacksRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-      uploadFiles(pdfs);
+      uploadFiles(supported);
     }
   }
 
-  // A convenience only: auto-ingest already scans `libraryRoot` on its own
-  // (default every 60s), and setting a new root already triggers an import.
-  // This just forces that scan to happen right now instead of waiting.
-  async function rescanLibraryFolder() {
+  // Passive discovery is deliberately slow while the machine is idle. This
+  // action makes a chosen collection current immediately.
+  async function rescanLibraryFolder(collection) {
     setAttaching(true);
-    say("Rescanning the library folder…");
+    say(`Scanning ${collection?.name || "the library"}…`);
     try {
       const result = await api("/library/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: libraryRoot || "." }),
+        body: JSON.stringify({ path: collection?.path || libraryRoot || ".", ...(collection?.legacy ? {} : { collection_id: collection?.id }) }),
       });
       setJob(result);
-      say(`Rescan job ${result.job_id} is queued.`);
+      say(`Scan job ${result.job_id} is queued.`);
     } catch (error) {
       say(error.message, "error");
     } finally {
       setAttaching(false);
+    }
+  }
+
+  async function createCollection({ name, path, autoScan }) {
+    setAttaching(true);
+    try {
+      const result = await api("/collections", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, path, auto_scan: autoScan }),
+      });
+      setJob(result.job || null);
+      await refreshCollections();
+      say(`“${result.collection.name}” was added and is being indexed.`, "success");
+      return result.collection;
+    } catch (error) {
+      say(error.message, "error");
+      return null;
+    } finally {
+      setAttaching(false);
+    }
+  }
+
+  async function updateCollection(collection, changes) {
+    try {
+      const updated = await api(`/collections/${collection.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(changes),
+      });
+      setCollections((items) => items.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)));
+    } catch (error) {
+      say(error.message, "error");
+    }
+  }
+
+  // Forgets the named folder only: its documents stay indexed (and searchable)
+  // and nothing on disk is touched.
+  async function deleteCollection(collection) {
+    if (
+      !window.confirm(
+        `Remove the “${collection.name}” collection? Its ${collection.document_count || 0} indexed document(s) stay in the library; the folder just stops being tracked.`,
+      )
+    )
+      return;
+    try {
+      await api(`/collections/${collection.id}`, { method: "DELETE" });
+      await refreshCollections();
+      say(`“${collection.name}” was removed.`, "success");
+    } catch (error) {
+      say(error.message, "error");
     }
   }
 
@@ -839,6 +903,7 @@ export default function App() {
           sectionRef={stacksRef}
           apiBase={API_BASE}
           documents={documents}
+          collections={collections}
           libraryRoot={libraryRoot}
           settingRoot={settingRoot}
           onSetLibraryFolder={setLibraryFolder}
@@ -849,6 +914,9 @@ export default function App() {
           onUpload={uploadFiles}
           uploading={uploading}
           onRescan={rescanLibraryFolder}
+          onCreateCollection={createCollection}
+          onUpdateCollection={updateCollection}
+          onDeleteCollection={deleteCollection}
           attaching={attaching}
           reindexing={reindexing}
           onReindex={reindexDocuments}
@@ -897,4 +965,3 @@ export default function App() {
     </div>
   );
 }
-
