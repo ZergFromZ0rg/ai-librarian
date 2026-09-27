@@ -117,24 +117,48 @@ def _regex_token_spans(text: str) -> List[tuple[int, int]]:
     return spans
 
 
+# WordPiece emits a whole word longer than its per-word limit (100 chars for
+# BERT-style vocabularies) as one [UNK] token spanning all of it, so a base64
+# blob, long URL or run of damaged glyphs would count as a single token and
+# never be split. Treat any token span wider than this as a run of
+# _UNBROKEN_PIECE_CHARS-character pieces instead; no real vocabulary entry is
+# anywhere near this wide, so ordinary prose is unaffected.
+_MAX_TOKEN_CHARS = 50
+_UNBROKEN_PIECE_CHARS = 8
+
+
+def _model_token_spans(tokenizer, text: str) -> tuple[List[tuple[int, int]], int]:
+    """The model's token spans with oversized ones sub-split, plus the token
+    count that sub-splitting implies."""
+    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+    spans: List[tuple[int, int]] = []
+    extra = 0
+    for start, end in encoding["offset_mapping"]:
+        if end - start > _MAX_TOKEN_CHARS:
+            pieces = range(start, end, _UNBROKEN_PIECE_CHARS)
+            spans.extend((piece, min(piece + _UNBROKEN_PIECE_CHARS, end)) for piece in pieces)
+            extra += len(pieces) - 1
+        elif end > start:
+            spans.append((start, end))
+    return spans, len(encoding["input_ids"]) + extra
+
+
 def _token_spans(text: str) -> List[tuple[int, int]]:
     """Character spans of the model's tokens, for splitting text on a token
     boundary. Exact when the tokenizer is available, estimated otherwise."""
     tokenizer = _get_tokenizer()
     if tokenizer is None:
         return _regex_token_spans(text)
-    offsets = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)[
-        "offset_mapping"
-    ]
-    return [(start, end) for start, end in offsets if end > start]
+    return _model_token_spans(tokenizer, text)[0]
 
 
 def count_tokens(text: str) -> int:
-    """The number of tokens the embedding model will see for `text`."""
+    """The number of tokens the embedding model will see for `text`, counting
+    an oversized unbroken run by its pieces so budgets still bound it."""
     tokenizer = _get_tokenizer()
     if tokenizer is None:
         return len(_regex_token_spans(text))
-    return len(tokenizer(text, add_special_tokens=False)["input_ids"])
+    return _model_token_spans(tokenizer, text)[1]
 
 
 def normalize_for_embedding(markdown: str) -> str:
