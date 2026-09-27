@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { katexPlugin, prepareMath, remarkPlugins } from "./markdown.js";
 
 import ResultCard from "./ResultCard.jsx";
 import { displayTitle } from "./storage.js";
@@ -76,8 +76,8 @@ function AssistantTurn({ turn, index, onViewSource, onToggleCitation, modelLabel
       {turn.content && (
         <div className="answer prose">
           <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            rehypePlugins={[citationRehype]}
+            remarkPlugins={remarkPlugins}
+            rehypePlugins={[citationRehype, katexPlugin]}
             skipHtml
             components={{
               sup: ({ node, children }) => {
@@ -96,7 +96,7 @@ function AssistantTurn({ turn, index, onViewSource, onToggleCitation, modelLabel
               },
             }}
           >
-            {turn.content}
+            {prepareMath(turn.content)}
           </ReactMarkdown>
         </div>
       )}
@@ -165,7 +165,7 @@ export function AskRail({ conversation, onToggleCitation }) {
               >
                 <span className="citation-tag">[{i + 1}]</span>
                 <span className="rail-citation-name">{displayTitle(source.document)}</span>
-                <span className="rail-citation-page">p. {source.page}</span>
+                <span className="rail-citation-page">{source.location || `p. ${source.page}`}</span>
               </button>
             </li>
           ))}

@@ -247,7 +247,8 @@ export default function useAsk({ apiBase, activeId, onActiveIdChange, onConversa
   );
 
   // `options`: { mode: "quick"|"thorough", topK, minScore (null = server
-  // default for the mode), documentId (scope to one document) }.
+  // default for the mode), documentId (scope to one document), collectionId
+  // (scope to one library) }.
   const ask = useCallback(
     async (question, options = {}) => {
       const clean = question.trim();
@@ -282,6 +283,7 @@ export default function useAsk({ apiBase, activeId, onActiveIdChange, onConversa
             ...(options.topK ? { top_k: options.topK } : {}),
             ...(typeof options.minScore === "number" ? { min_score: options.minScore } : {}),
             ...(options.documentId ? { document_id: options.documentId } : {}),
+            ...(options.collectionId ? { collection_id: options.collectionId } : {}),
             ...(Object.keys(providerKeys).length ? { provider_keys: providerKeys } : {}),
           },
           {

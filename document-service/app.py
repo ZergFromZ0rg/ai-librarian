@@ -29,7 +29,12 @@ from pydantic import BaseModel, Field
 from starlette.datastructures import Headers, MutableHeaders
 
 import generation
-from chunking import build_semantic_groups, normalize_for_embedding, parse_typed_blocks
+from chunking import (
+    build_semantic_groups,
+    collapse_blank_lines,
+    normalize_for_embedding,
+    parse_typed_blocks,
+)
 from conversations import ConversationStore
 from database import MetadataStore
 from doc_kind import detect_kind
@@ -41,11 +46,14 @@ from extraction import (
     describe_skipped_pages,
     garbled_page_indices,
 )
+from ocr import estimate_seconds as estimate_ocr_seconds
 from parsers import (
+    OCR_APPROVAL_MARKER,
     SUPPORTED_EXTENSIONS,
     extract_source_pages,
     file_type_for_path,
     is_supported_path,
+    location_label,
     media_type_for,
 )
 from reranker import DEFAULT_MODEL as RERANK_MODEL, model_info, rerank
@@ -157,6 +165,15 @@ if OCR_MODE not in {"auto", "off"}:
     logger.warning("Ignoring unsupported OCR_MODE=%r; using auto", OCR_MODE)
     OCR_MODE = "auto"
 OCR_LANGUAGES = os.environ.get("OCR_LANGUAGES", "eng").strip() or "eng"
+# "auto" = Tesseract plus the equation-aware Nougat model (best page wins),
+# "math" = Nougat only, "tesseract" = fast text-only OCR.
+OCR_ENGINE = os.environ.get("OCR_ENGINE", "auto").strip().lower()
+if OCR_ENGINE not in {"auto", "math", "tesseract"}:
+    logger.warning("Ignoring unsupported OCR_ENGINE=%r; using auto", OCR_ENGINE)
+    OCR_ENGINE = "auto"
+# A scan needing OCR on more pages than this is not processed until the reader
+# approves it (equation OCR can take tens of seconds a page on CPU). 0 = never ask.
+OCR_APPROVAL_PAGES = int(os.environ.get("OCR_APPROVAL_PAGES", "20"))
 RERANK_MAX_WORKERS = int(os.environ.get("RERANK_MAX_WORKERS", "2"))
 # PDF extraction's per-page ML layout pass dominates indexing time (profiled at
 # ~96% of it) and pymupdf4llm serializes every call to it within a process via
@@ -217,7 +234,7 @@ CHUNK_SOFT_MAX_TOKENS = int(os.environ.get("CHUNK_SOFT_MAX_TOKENS", "220"))
 CHUNK_HARD_MAX_TOKENS = int(os.environ.get("CHUNK_HARD_MAX_TOKENS", "240"))
 CHUNK_OVERLAP_TOKENS = int(os.environ.get("CHUNK_OVERLAP_TOKENS", "32"))
 DOC_ID_PATTERN = re.compile(r"^[a-f0-9]{12}$")
-PIPELINE_VERSION = 11  # multi-format sources + targeted OCR for image-only PDF pages
+PIPELINE_VERSION = 12  # equation OCR (Nougat), markup/blank-line tidy, tight lists, heading-bound tables
 
 for directory in (
     DOCUMENTS_DIR, METADATA_DIR, EXTRACTED_DIR, CHUNKS_DIR, JOBS_DIR, LOGS_DIR, INGEST_ROOT
@@ -292,6 +309,7 @@ def record_search(
             for key, value in {
                 "document_id": request.document_id,
                 "filename": request.filename,
+                "collection_id": request.collection_id,
             }.items()
             if value
         }
@@ -341,6 +359,7 @@ def record_ask(
                 for key, value in {
                     "document_id": request.document_id,
                     "filename": request.filename,
+                    "collection_id": request.collection_id,
                 }.items()
                 if value
             }
@@ -370,6 +389,9 @@ class SearchRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=50)
     document_id: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{12}$")
     filename: Optional[str] = Field(default=None, max_length=255)
+    # Restrict to one library (a named collection); "legacy-root" is the
+    # implicit single library of an installation without collections.
+    collection_id: Optional[str] = Field(default=None, pattern=r"^(?:[a-f0-9]{12}|legacy-root)$")
     rerank: bool = False
     # A floor on how many fused candidates the cross-encoder scores; the server's
     # RERANK_CANDIDATES applies on top of it. Left at the default, the pool is
@@ -422,6 +444,9 @@ class AskRequest(BaseModel):
     history: List[AskTurn] = Field(default_factory=list, max_length=20)
     document_id: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{12}$")
     filename: Optional[str] = Field(default=None, max_length=255)
+    # Restrict to one library (a named collection); "legacy-root" is the
+    # implicit single library of an installation without collections.
+    collection_id: Optional[str] = Field(default=None, pattern=r"^(?:[a-f0-9]{12}|legacy-root)$")
     top_k: int = Field(default=10, ge=1, le=20)
     # "provider:model" from GET /ask/models; unknown or absent -> the server default.
     model: Optional[str] = Field(default=None, max_length=120)
@@ -615,6 +640,33 @@ def collection_for_source_path(source_path: str, collections: Optional[List[dict
     return max(candidates, key=lambda item: len(item.get("path") or ""))["id"]
 
 
+def collection_document_ids(collection_id: Optional[str]) -> Optional[List[str]]:
+    """Every document belonging to one library, for scoping search and Ask.
+
+    ``None`` means "no restriction". Membership is the recorded
+    ``collection_id`` or, for files imported before the collection existed,
+    a ``source_path`` inside the collection's folder.
+    """
+    if not collection_id:
+        return None
+    collection = next(
+        (item for item in configured_collections() if item["id"] == collection_id), None
+    )
+    if collection is None:
+        raise HTTPException(status_code=404, detail="library not found")
+    root = collection.get("path") or ""
+    if collection.get("legacy") and not root:
+        return None  # the implicit library is the whole mount: no filter
+    ids = []
+    for doc in list_metadata():
+        source = doc.get("source_path") or ""
+        if doc.get("collection_id") == collection_id or (
+            source and (not root or source == root or source.startswith(root + "/"))
+        ):
+            ids.append(doc["document_id"])
+    return ids
+
+
 def validate_doc_id(doc_id: str) -> str:
     if not DOC_ID_PATTERN.fullmatch(doc_id):
         raise HTTPException(status_code=404, detail="document not found")
@@ -769,6 +821,29 @@ def _fail_indexing(doc_id: str, message: str) -> None:
     update_ingest_entry(doc_id, "error", message)
 
 
+def _describe_duration(seconds: int) -> str:
+    minutes = max(1, round(seconds / 60))
+    if minutes < 90:
+        return f"about {minutes} minute{'s' if minutes != 1 else ''}"
+    return f"about {round(minutes / 60)} hours"
+
+
+def _request_ocr_approval(doc_id: str, page_count: int) -> None:
+    """Park a large scan until the reader approves OCR for it."""
+    message = (
+        f"This is a scanned document: {page_count} pages need OCR, which will take "
+        f"{_describe_duration(estimate_ocr_seconds(page_count, OCR_ENGINE))}. "
+        "Approve OCR to index it."
+    )
+    # Recorded before the status flips, so no reader ever sees the error
+    # without the page count its Approve button needs.
+    try:
+        STORE.update(doc_id, {"ocr_pages": page_count})
+    except KeyError:
+        return
+    _fail_indexing(doc_id, message)
+
+
 def _detect_document_kind(doc_id: str, page_count: int) -> Optional[str]:
     """Book / paper / document, from the text extraction already wrote.
     Best effort: a missing or unreadable extraction just leaves it unset."""
@@ -876,7 +951,11 @@ def index_worker() -> None:
                     continue
                 try:
                     future = EXTRACTION_EXECUTOR.submit(
-                        build_document_artifacts, stored_path, claimed["filename"], doc_id
+                        build_document_artifacts,
+                        stored_path,
+                        claimed["filename"],
+                        doc_id,
+                        bool(claimed.get("ocr_approved")),
                     )
                 except concurrent.futures.BrokenExecutor:
                     # A worker process for some earlier document crashed (segfault/OOM
@@ -891,7 +970,11 @@ def index_worker() -> None:
                     EXTRACTION_EXECUTOR = _new_extraction_executor()
                     try:
                         future = EXTRACTION_EXECUTOR.submit(
-                            build_document_artifacts, stored_path, claimed["filename"], doc_id
+                            build_document_artifacts,
+                            stored_path,
+                            claimed["filename"],
+                            doc_id,
+                            bool(claimed.get("ocr_approved")),
                         )
                     except concurrent.futures.BrokenExecutor as exc:
                         _fail_indexing(doc_id, str(exc) or exc.__class__.__name__)
@@ -910,7 +993,11 @@ def index_worker() -> None:
             try:
                 page_count, chunks, group_count, extraction_notes = future.result()
             except Exception as exc:
-                _fail_indexing(doc_id, str(exc) or exc.__class__.__name__)
+                message = str(exc) or exc.__class__.__name__
+                if message.startswith(OCR_APPROVAL_MARKER):
+                    _request_ocr_approval(doc_id, int(message[len(OCR_APPROVAL_MARKER):]))
+                else:
+                    _fail_indexing(doc_id, message)
                 continue
             try:
                 update_metadata(
@@ -950,11 +1037,16 @@ def pdf_path(metadata: dict) -> Path:
 
 
 def build_document_artifacts(
-    stored_path: Path, filename: str, doc_id: str
+    stored_path: Path, filename: str, doc_id: str, ocr_approved: bool = False
 ) -> tuple[int, List[dict], int, Optional[str]]:
     file_type = file_type_for_path(stored_path)
     pages, used_ocr = extract_source_pages(
-        stored_path, ocr_mode=OCR_MODE, ocr_languages=OCR_LANGUAGES
+        stored_path,
+        ocr_mode=OCR_MODE,
+        ocr_languages=OCR_LANGUAGES,
+        ocr_engine=OCR_ENGINE,
+        ocr_approved=ocr_approved,
+        ocr_approval_pages=OCR_APPROVAL_PAGES,
     )
     if not any(page.get("text", "").strip() for page in pages):
         raise ValueError("the document contains no extractable text")
@@ -968,7 +1060,14 @@ def build_document_artifacts(
 
     total_pages = len(pages)
     garbled = set(garbled_page_indices(pages))
-    extraction_notes = "OCR was used for image-only PDF pages." if used_ocr else None
+    extraction_notes = None
+    if used_ocr:
+        read_by = collections.Counter(page["ocr"] for page in pages if page.get("ocr"))
+        extraction_notes = (
+            f"{sum(read_by.values())} scanned page(s) were read with OCR"
+            + (f", {read_by['nougat']} with equation recognition" if read_by.get("nougat") else "")
+            + "."
+        )
     if garbled:
         # A minority of the pages are OCR garbage. Drop just those and index
         # the rest rather than refusing the whole document. Page numbers must
@@ -1032,7 +1131,7 @@ def build_document_artifacts(
                 }
             )
     if not chunks:
-        raise ValueError("the PDF produced no searchable text chunks")
+        raise ValueError("the document produced no searchable text chunks")
 
     atomic_write_json(
         EXTRACTED_DIR / f"{doc_id}.json",
@@ -1642,11 +1741,22 @@ async def retrieve(
     rerank_passage: Optional[str] = None,
     max_per_doc: int = 0,
     dedup_jaccard: float = 1.0,
+    document_ids: Optional[List[str]] = None,
 ) -> tuple[List[dict], int, int, int]:
+    """``document_ids`` (a library's documents) narrows the search to those;
+    an empty list means the library has nothing indexed, so nothing matches."""
+    if document_ids is not None:
+        if document_id:
+            document_ids = [document_id] if document_id in document_ids else []
+        if not document_ids:
+            return [], 0, 0, 0
     query_vector = await asyncio.to_thread(lambda: embed_texts([query], kind="query")[0])
     filters = {
         key: value
-        for key, value in {"document_id": document_id, "filename": filename}.items()
+        for key, value in {
+            "document_id": document_ids if document_ids is not None else document_id,
+            "filename": filename,
+        }.items()
         if value
     }
     rerank_pool = max(rerank_k, RERANK_CANDIDATES) if rerank_enabled else 0
@@ -1687,39 +1797,66 @@ async def retrieve(
 _TERMINAL_PUNCTUATION = tuple(".!?\"')”’»…")
 
 
+def _runs_on(text: str, filename: str) -> bool:
+    """Whether a passage visibly stops mid-sentence.
+
+    Only prose can: a slide, a sheet, a table row, a heading or an equation
+    legitimately ends without punctuation, and an ellipsis there would
+    suggest text is missing.
+    """
+    if not text or text.endswith(_TERMINAL_PUNCTUATION):
+        return False
+    if (file_type_for_path(filename) or "pdf") not in {"pdf", "word", "text", "markdown"}:
+        return False
+    last_line = text.rstrip().rsplit("\n", 1)[-1].strip()
+    return not (
+        last_line.startswith(("#", "|", "$$", "\\]", "- ", "* "))
+        or last_line.endswith(("$$", "\\]", "|"))
+        or re.match(r"^\d+[.)]\s", last_line)
+    )
+
+
 def format_hits(hits: List[dict], max_text_chars: int = 20_000) -> List[dict]:
     formatted = []
     for hit in hits:
         payload = hit.get("payload") or {}
-        text = (payload.get("text") or "").strip()
+        # Tidied at display time as well as at ingest, so passages indexed
+        # before the ingest-side cleanup never render with blank gaps.
+        group_text = collapse_blank_lines(payload.get("text") or "")
+        text = group_text
         truncated = len(text) > max_text_chars
         if truncated:
             text = text[: max_text_chars - 1].rstrip() + "…"
-        elif text and not text.endswith(_TERMINAL_PUNCTUATION):
+        elif _runs_on(text, payload.get("filename") or ""):
             # The passage ends mid-sentence because the paragraph runs into the
             # next group; signal that rather than implying it stops here.
             text = f"{text} …"
 
         # The sub-passage that actually won retrieval, for the UI to highlight.
         # Empty when the whole group matched (nothing more specific to mark).
-        matched = (payload.get("retrieval_text") or "").strip()
-        group_text = (payload.get("text") or "").strip()
+        matched = collapse_blank_lines(payload.get("retrieval_text") or "")
         if not matched or matched == group_text or len(matched) >= len(group_text) * 0.9:
             matched = ""
 
+        filename = payload.get("filename") or ""
+        file_type = file_type_for_path(filename) or "pdf"
+        page = payload.get("page")
+        page_end = payload.get("page_end") or page
         formatted.append(
             {
                 "chunk_id": payload.get("chunk_id"),
                 "group_id": payload.get("group_id"),
                 "document_id": payload.get("document_id"),
-                "document": payload.get("filename") or payload.get("document_id"),
-                "page": payload.get("page"),
-                "page_end": payload.get("page_end") or payload.get("page"),
+                "document": filename or payload.get("document_id"),
+                "file_type": file_type,
+                "page": page,
+                "page_end": page_end,
+                "location": location_label(file_type, page, page_end),
                 "block_types": payload.get("block_types") or [],
                 "protected_type": payload.get("protected_type"),
                 "score": hit.get("score"),
                 "rerank_score": hit.get("rerank_score"),
-                "lead_in": (payload.get("lead_in") or "").strip(),
+                "lead_in": collapse_blank_lines(payload.get("lead_in") or ""),
                 "matched": matched,
                 "text": text,
             }
@@ -1744,7 +1881,12 @@ async def config():
         "index_schema_version": INDEX_SCHEMA_VERSION,
         "supported_file_types": sorted(SUPPORTED_EXTENSIONS),
         "passive_scan_seconds": AUTO_INGEST_INTERVAL_SECONDS,
-        "ocr": {"mode": OCR_MODE, "languages": OCR_LANGUAGES},
+        "ocr": {
+            "mode": OCR_MODE,
+            "languages": OCR_LANGUAGES,
+            "engine": OCR_ENGINE,
+            "approval_pages": OCR_APPROVAL_PAGES,
+        },
         "fusion": FUSION_METHOD,
         "chunking": {
             "target_tokens": CHUNK_TARGET_TOKENS,
@@ -1849,7 +1991,11 @@ async def get_extracted_page(doc_id: str, page: int):
         extracted = read_json(extracted_file)
         for item in extracted.get("pages") or []:
             if int(item.get("page") or 0) == page:
-                return {"page": page, "text": item.get("text") or "", "format": item.get("format") or "markdown"}
+                return {
+                    "page": page,
+                    "text": collapse_blank_lines(item.get("text") or ""),
+                    "format": item.get("format") or "markdown",
+                }
         raise HTTPException(status_code=404, detail="page out of range")
 
     return await asyncio.to_thread(read_page)
@@ -2031,6 +2177,28 @@ async def retry_document(doc_id: str):
     return await asyncio.to_thread(read_metadata, doc_id)
 
 
+@app.post("/documents/{doc_id}/approve-ocr")
+async def approve_ocr(doc_id: str):
+    """The reader's go-ahead for a large scan's OCR: record it and re-queue."""
+    metadata = await asyncio.to_thread(read_metadata, doc_id)
+    if metadata.get("indexing_status") in {"queued", "indexing"}:
+        raise HTTPException(status_code=409, detail="document is already queued for indexing")
+    waiting = (
+        metadata.get("indexing_status") == "error"
+        and metadata.get("ocr_pages")
+        and not metadata.get("ocr_approved")
+    )
+    if not waiting:
+        raise HTTPException(status_code=409, detail="this document is not waiting for OCR approval")
+    if not await asyncio.to_thread(lambda: pdf_path(metadata).exists()):
+        raise HTTPException(status_code=404, detail="the source document is missing")
+    await asyncio.to_thread(
+        STORE.update, doc_id, {"ocr_approved": 1, "pipeline_version": 0}
+    )
+    enqueue_index(IndexTask(doc_id))
+    return await asyncio.to_thread(read_metadata, doc_id)
+
+
 @app.patch("/documents/{doc_id}")
 async def patch_document(doc_id: str, patch: DocumentPatch):
     """The reader's own marks on a document: owned (for books), read, and a
@@ -2094,7 +2262,10 @@ async def search(request: SearchRequest):
             dense_weight=request.dense_weight,
             rerank_passage=request.rerank_passage,
             max_per_doc=request.max_per_doc,
+            document_ids=await asyncio.to_thread(collection_document_ids, request.collection_id),
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise _sanitized_http_error(503, "search failed", exc) from exc
     record_search(
@@ -2238,7 +2409,10 @@ async def ask(request: AskRequest):
             gate,
             max_per_doc=max_per_doc,
             dedup_jaccard=ASK_DEDUP_JACCARD,
+            document_ids=await asyncio.to_thread(collection_document_ids, request.collection_id),
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise _sanitized_http_error(503, "retrieval failed", exc) from exc
 

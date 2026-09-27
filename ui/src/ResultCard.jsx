@@ -1,8 +1,8 @@
 import React from "react";
 import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 
 import { makeMatchHighlighter } from "./highlight.js";
+import { katexPlugin, prepareMath, remarkPlugins } from "./markdown.js";
 import { displayTitle, relevancePercent } from "./storage.js";
 
 // The shape SourceViewer expects, built from a /search or /ask result.
@@ -24,8 +24,10 @@ export function sourceFromResult(result) {
 // numbered citation in an Ask answer; `ordinal` numbers a search finding.
 export default function ResultCard({ result, index, ordinal, onViewSource, onScope }) {
   const highlighter = makeMatchHighlighter(result.matched);
+  // `location` is file-type aware ("slide 3", "sheet 2"); older servers only send pages.
   const pages =
-    result.page_end && result.page_end !== result.page ? `pp. ${result.page}–${result.page_end}` : `p. ${result.page}`;
+    result.location ||
+    (result.page_end && result.page_end !== result.page ? `pp. ${result.page}–${result.page_end}` : `p. ${result.page}`);
   const score = result.rerank_score ?? result.score;
   const percent = result.rerank_score != null ? relevancePercent(result.rerank_score) : null;
 
@@ -56,13 +58,13 @@ export default function ResultCard({ result, index, ordinal, onViewSource, onSco
       </header>
       {result.lead_in && <p className="finding-leadin">…{result.lead_in}</p>}
       <div className="finding-text prose">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={highlighter ? [highlighter] : []} skipHtml>
-          {result.text}
+        <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={highlighter ? [highlighter, katexPlugin] : [katexPlugin]} skipHtml>
+          {prepareMath(result.text)}
         </ReactMarkdown>
       </div>
       <footer className="finding-actions">
         <button type="button" className="text-button" onClick={() => onViewSource(sourceFromResult(result))}>
-          View page ↗
+          {!result.file_type || result.file_type === "pdf" ? "View page ↗" : "View source ↗"}
         </button>
         {onScope && (
           <button type="button" className="text-button" onClick={() => onScope(result)}>

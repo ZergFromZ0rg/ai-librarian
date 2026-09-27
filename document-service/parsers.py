@@ -9,10 +9,17 @@ normal chunker can then treat every format consistently.
 from __future__ import annotations
 
 import csv
+import re
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from extraction import extract_pages, ocr_pdf_pages
+from extraction import extract_pages
+from ocr import ocr_pages
+
+# Raised (as a plain ValueError, so it survives the extraction process pool)
+# when a scan needs more OCR than may run without the reader's go-ahead. The
+# page count follows the marker.
+OCR_APPROVAL_MARKER = "ocr-approval-required:"
 
 SUPPORTED_EXTENSIONS = frozenset({".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md", ".csv"})
 
@@ -47,6 +54,30 @@ def is_supported_path(path: str | Path) -> bool:
 
 def media_type_for(file_type: str) -> str:
     return MEDIA_TYPES.get(file_type, "application/octet-stream")
+
+
+# What a "page" is for each source type, as shown to readers and the LLM.
+_LOCATION_UNITS = {
+    "pdf": ("p.", "pp."),
+    "powerpoint": ("slide", "slides"),
+    "excel": ("sheet", "sheets"),
+    "word": ("section", "sections"),
+    "text": ("section", "sections"),
+    "markdown": ("section", "sections"),
+    "csv": ("table", "table"),
+}
+
+
+def location_label(file_type: str | None, page, page_end=None) -> str:
+    """ "p. 12", "pp. 12–13", "slide 4", "sheet 2"… for a passage's position."""
+    if page is None:
+        return "location unknown"
+    if file_type == "csv":
+        return "table"
+    single, plural = _LOCATION_UNITS.get(file_type or "pdf", _LOCATION_UNITS["pdf"])
+    if page_end and page_end != page:
+        return f"{plural} {page}–{page_end}"
+    return f"{single} {page}"
 
 
 def _clean(value) -> str:
@@ -145,7 +176,7 @@ def _extract_excel(path: Path) -> List[Dict]:
             width = max(len(row) for row in rows)
             normalized = [row + [""] * (width - len(row)) for row in rows]
             header = normalized[0]
-            text = [f"# Sheet: {sheet.title}", "", "| " + " | ".join(header) + " |", "| " + " | ".join("---" for _ in header) + " |"]
+            text = [f"## {sheet.title}", "", "| " + " | ".join(header) + " |", "| " + " | ".join("---" for _ in header) + " |"]
             text.extend("| " + " | ".join(row) + " |" for row in normalized[1:])
             pages.append({"page": index, "text": "\n".join(text), "format": "markdown", "needs_ocr": False})
     finally:
@@ -162,8 +193,14 @@ def _extract_powerpoint(path: Path) -> List[Dict]:
     presentation = Presentation(str(path))
     pages = []
     for index, slide in enumerate(presentation.slides, start=1):
-        lines = [f"# Slide {index}"]
+        # The slide's own title is its heading; the location label already
+        # says "slide N", so "# Slide N" would only repeat it.
+        title_shape = slide.shapes.title
+        title = _clean(title_shape.text) if title_shape is not None and title_shape.has_text_frame else ""
+        lines = [f"# {title}" if title else f"# Slide {index}"]
         for shape in slide.shapes:
+            if title_shape is not None and shape.shape_id == title_shape.shape_id:
+                continue
             if getattr(shape, "has_text_frame", False):
                 text = _clean(shape.text)
                 if text:
@@ -193,18 +230,70 @@ def _extract_csv(path: Path) -> List[Dict]:
     return [{"page": 1, "text": "\n".join(lines), "format": "markdown", "needs_ocr": False}]
 
 
-def extract_source_pages(path: str | Path, *, ocr_mode: str = "auto", ocr_languages: str = "eng") -> Tuple[List[Dict], bool]:
-    """Return normalised page dictionaries and whether OCR supplied any text."""
+def _tidy_tesseract(text: str) -> str:
+    """Re-join words Tesseract leaves hyphenated across line ends."""
+    return re.sub(r"(\w)-\n(\w)", r"\1\2", text)
+
+
+def _apply_ocr(source: Path, pages: List[Dict], *, languages: str, engine: str, approved: bool, approval_pages: int) -> Tuple[List[Dict], bool]:
+    targets = [page["page"] for page in pages if page.get("needs_ocr")]
+    if not targets:
+        return pages, False
+    if approval_pages and len(targets) > approval_pages and not approved:
+        raise ValueError(f"{OCR_APPROVAL_MARKER}{len(targets)}")
+    results = ocr_pages(source, targets, languages=languages, engine=engine)
+    updated = []
+    for page in pages:
+        result = results.get(page["page"])
+        if not result:
+            updated.append(page)
+            continue
+        from_math = result["engine"] == "nougat"
+        updated.append(
+            {
+                **page,
+                "text": result["text"] if from_math else _tidy_tesseract(result["text"]),
+                "format": "markdown" if from_math else "text",
+                "needs_ocr": False,
+                "ocr": result["engine"],
+            }
+        )
+    return updated, bool(results)
+
+
+def extract_source_pages(
+    path: str | Path,
+    *,
+    ocr_mode: str = "auto",
+    ocr_languages: str = "eng",
+    ocr_engine: str = "auto",
+    ocr_approved: bool = False,
+    ocr_approval_pages: int = 0,
+) -> Tuple[List[Dict], bool]:
+    """Return normalised page dictionaries and whether OCR supplied any text.
+
+    Scanned PDF pages are OCR'd (``ocr_engine``: "auto" = Tesseract plus the
+    equation-aware model, "math" or "tesseract"). When more than
+    ``ocr_approval_pages`` pages need it and ``ocr_approved`` is false, this
+    raises ``ValueError(OCR_APPROVAL_MARKER + count)`` instead of starting a
+    potentially hours-long job unasked. 0 disables the approval gate.
+    """
     source = Path(path)
     kind = file_type_for_path(source)
     if kind is None:
         raise ValueError(f"unsupported document type: {source.suffix or 'unknown'}")
     if kind == "pdf":
         pages = extract_pages(str(source))
-        targets = [page["page"] for page in pages if page.get("needs_ocr")]
-        if targets and ocr_mode != "off":
-            pages = ocr_pdf_pages(source, pages, targets, languages=ocr_languages)
-        return pages, any(page.get("ocr") for page in pages)
+        if ocr_mode == "off":
+            return pages, False
+        return _apply_ocr(
+            source,
+            pages,
+            languages=ocr_languages,
+            engine=ocr_engine,
+            approved=ocr_approved,
+            approval_pages=ocr_approval_pages,
+        )
     if kind == "word":
         return _extract_word(source), False
     if kind == "excel":

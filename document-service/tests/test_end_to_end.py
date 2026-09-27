@@ -303,8 +303,13 @@ def test_pdf_with_a_corrupt_ocr_text_layer_is_rejected(service):
     assert "corrupted" in metadata["indexing_error"]
 
 
-def test_a_scanned_image_only_pdf_is_rejected_with_an_ocr_message(service):
+def test_a_scanned_image_only_pdf_is_rejected_with_an_ocr_message(service, monkeypatch):
+    import ocr
+
     _module, client, _indexed = service
+    # No OCR engine can read it (the extraction worker is forked after this).
+    monkeypatch.setattr(ocr, "ocr_pages", lambda *a, **k: {})
+    monkeypatch.setattr("parsers.ocr_pages", lambda *a, **k: {})
     upload = client.post(
         "/documents",
         files={"file": ("scan.pdf", make_scanned_pdf(image_pages=8, text_pages=2), "application/pdf")},
@@ -313,6 +318,38 @@ def test_a_scanned_image_only_pdf_is_rejected_with_an_ocr_message(service):
     doc_id = upload.json()["document_id"]
     metadata = wait_for_status(client, doc_id, "error")
     assert "OCR" in metadata["indexing_error"]
+
+
+def test_a_large_scan_waits_for_ocr_approval_then_indexes(service, monkeypatch):
+    module, client, _indexed = service
+    monkeypatch.setattr(module, "OCR_APPROVAL_PAGES", 3)
+    ocr_calls = []
+
+    def fake_ocr(_path, targets, languages, engine):
+        ocr_calls.append(targets)
+        return {
+            number: {"text": f"Scanned page {number}: the absurd and freedom, \\(x^2\\).", "engine": "nougat"}
+            for number in targets
+        }
+
+    monkeypatch.setattr("parsers.ocr_pages", fake_ocr)
+    upload = client.post(
+        "/documents",
+        files={"file": ("scan.pdf", make_scanned_pdf(image_pages=6), "application/pdf")},
+    )
+    doc_id = upload.json()["document_id"]
+    parked = wait_for_status(client, doc_id, "error")
+    assert parked["ocr_pages"] == 6
+    assert "Approve OCR" in parked["indexing_error"]
+    assert ocr_calls == []  # nothing ran without the reader's go-ahead
+
+    approved = client.post(f"/documents/{doc_id}/approve-ocr")
+    assert approved.status_code == 200
+    metadata = wait_for_status(client, doc_id, "indexed", timeout=20)
+    assert metadata["ocr_approved"] == 1
+    assert "6 scanned page(s) were read with OCR, 6 with equation recognition" in metadata["extraction_notes"]
+    # A document that isn't waiting can't be "approved".
+    assert client.post(f"/documents/{doc_id}/approve-ocr").status_code == 409
 
 
 def test_document_with_a_few_corrupt_pages_indexes_the_rest_with_a_note(service):

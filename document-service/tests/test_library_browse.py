@@ -305,6 +305,47 @@ def test_collections_scan_only_their_own_folders(service, tmp_path):
     assert client.delete(f"/collections/{books_id}").status_code == 404
 
 
+def test_search_and_ask_can_be_scoped_to_one_library(service, tmp_path, monkeypatch):
+    module, client, _indexed = service
+    root = _library(tmp_path)
+    (root / "Books").mkdir()
+    (root / "Work").mkdir()
+    (root / "Books" / "camus.pdf").write_bytes(make_pdf("The absurd hero and his freedom."))
+    (root / "Work" / "memo.pdf").write_bytes(make_pdf("Absurd freedom in the quarterly memo."))
+    books = client.post("/collections", json={"name": "Books", "path": "Books"}).json()
+    wait_for_job(client, books["job"]["job_id"])
+    work = client.post("/collections", json={"name": "Work", "path": "Work"}).json()
+    wait_for_job(client, work["job"]["job_id"])
+    for doc in client.get("/documents").json()["documents"]:
+        wait_for_status(client, doc["document_id"], "indexed")
+
+    def documents_found(**scope):
+        body = {"query": "absurd freedom", "top_k": 10, **scope}
+        return {hit["document"] for hit in client.post("/search", json=body).json()["results"]}
+
+    assert documents_found() == {"camus.pdf", "memo.pdf"}
+    assert documents_found(collection_id=books["collection"]["id"]) == {"camus.pdf"}
+    assert documents_found(collection_id=work["collection"]["id"]) == {"memo.pdf"}
+    assert client.post("/search", json={"query": "x", "collection_id": "aaaaaaaaaaaa"}).status_code == 404
+
+    # Ask retrieves through the same path.
+    captured = {}
+
+    async def fake_retrieve(*args, **kwargs):
+        captured.update(kwargs)
+        return [], 0, 0, 0
+
+    monkeypatch.setattr(module, "retrieve", fake_retrieve)
+    monkeypatch.setattr(module, "_resolve_ask_model", lambda *a: _async("ollama:test"))
+    client.post("/ask", json={"question": "why?", "collection_id": work["collection"]["id"]})
+    work_ids = [d["document_id"] for d in client.get("/documents").json()["documents"] if d["filename"] == "memo.pdf"]
+    assert captured["document_ids"] == work_ids
+
+
+async def _async(value):
+    return value
+
+
 def wait_for_job(client, job_id, timeout=15):
     import time
 

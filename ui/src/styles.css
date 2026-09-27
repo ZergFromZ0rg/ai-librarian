@@ -277,6 +277,11 @@ button.link:disabled {
   color: var(--danger);
 }
 
+.text-button.accent {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .icon-button {
   display: inline-grid;
   place-items: center;
@@ -405,6 +410,12 @@ select.input {
 
 .badge-indexing::before {
   animation: pulse 1.2s ease-in-out infinite;
+}
+
+.badge-awaiting {
+  border-color: var(--warn);
+  background: var(--warn-tint);
+  color: var(--warn);
 }
 
 .badge-error {
@@ -1166,6 +1177,45 @@ select.input {
   color: var(--accent);
 }
 
+/* Which library the console searches: quiet when "All", tinted when narrowed. */
+.library-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  border: 1px solid var(--rule);
+  border-radius: var(--r);
+  padding: 0 2px 0 8px;
+  font-size: 12px;
+}
+
+.library-picker.active {
+  border-color: var(--accent-ring);
+  background: var(--accent-tint);
+}
+
+.library-picker-label {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+}
+
+.library-picker select {
+  max-width: 160px;
+  height: 22px;
+  border: 0;
+  background: transparent;
+  font-size: 12.5px;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.library-picker select:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  border-radius: 2px;
+}
+
 .scope-chip {
   display: inline-flex;
   align-items: center;
@@ -1718,11 +1768,21 @@ select.input {
   overflow-wrap: anywhere;
 }
 
-/* Keep the passage's own spacing inside each block (formulas, aligned text),
-   but not the newlines markdown leaves *between* blocks, which pre-wrap on
-   the container would render as empty lines. */
-.finding-text > * {
+/* Keep the passage's own line breaks inside text blocks (formulas, aligned
+   text) — but only on leaf text blocks. On a list or quote *container*,
+   pre-wrap also preserves the newlines markdown puts between <li>/<p>
+   elements, rendering each list item with blank lines around it. */
+.finding-text :is(p, h1, h2, h3, h4, h5, h6, td, th) {
   white-space: pre-wrap;
+}
+
+.finding-text :is(ul, ol) {
+  margin: 0.4em 0;
+  padding-left: 1.4em;
+}
+
+.finding-text li > p {
+  margin: 0;
 }
 
 .finding-leadin + .finding-text {

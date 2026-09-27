@@ -40,6 +40,10 @@ COLUMNS = (
     # The named collection that discovered this in-place file (for example
     # Books or Work). Uploads may deliberately remain unfiled.
     "collection_id",
+    # Pages of a scan that need OCR, recorded when that exceeds what may run
+    # unasked; the reader approves it with `ocr_approved`.
+    "ocr_pages",
+    "ocr_approved",
     # "book" | "paper" | "document", guessed from the extracted text at index
     # time (see doc_kind.py); `kind_override` is the reader's correction.
     "kind",
@@ -83,6 +87,8 @@ CREATE TABLE IF NOT EXISTS documents (
     extraction_notes      TEXT,
     source_path           TEXT,
     collection_id         TEXT,
+    ocr_pages             INTEGER,
+    ocr_approved          INTEGER,
     kind                  TEXT,
     kind_override         TEXT,
     owned                 INTEGER,
@@ -129,6 +135,8 @@ class MetadataStore:
             ("extraction_notes", "TEXT"),
             ("source_path", "TEXT"),
             ("collection_id", "TEXT"),
+            ("ocr_pages", "INTEGER"),
+            ("ocr_approved", "INTEGER"),
             ("kind", "TEXT"),
             ("kind_override", "TEXT"),
             ("owned", "INTEGER"),

@@ -11,6 +11,7 @@ from qdrant_client.models import (
     FilterSelector,
     Fusion,
     FusionQuery,
+    MatchAny,
     MatchValue,
     Modifier,
     PointStruct,
@@ -195,7 +196,8 @@ def search_vectors(
 ):
     """Return fused semantic and exact-symbol matches.
 
-    `filters` can be a dict like {"document_id": "<id>", "filename": "name.pdf"}.
+    `filters` can be a dict like {"document_id": "<id>", "filename": "name.pdf"};
+    a list value matches any of its items.
     `fusion` / `dense_weight` override FUSION_METHOD / FUSION_DENSE_WEIGHT.
     """
     if not client.collection_exists(COLLECTION):
@@ -210,7 +212,9 @@ def search_vectors(
         for k, v in filters.items():
             if v is None:
                 continue
-            must.append(FieldCondition(key=k, match=MatchValue(value=v)))
+            # A list means "any of these" (a library's documents, say).
+            match = MatchAny(any=list(v)) if isinstance(v, (list, tuple, set)) else MatchValue(value=v)
+            must.append(FieldCondition(key=k, match=match))
         if must:
             query_filter = Filter(must=must)
 

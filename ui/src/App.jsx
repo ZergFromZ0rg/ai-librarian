@@ -34,6 +34,7 @@ const OLLAMA_KEY = "ai-librarian.ask.ollama-models";
 const MODE_KEY = "ai-librarian.mode";
 const SEARCH_PARAMS_KEY = "ai-librarian.search.params";
 const ASK_PARAMS_KEY = "ai-librarian.ask.params";
+const LIBRARY_KEY = "ai-librarian.library";
 const LEGACY_THOROUGH_KEY = "ai-librarian.ask.thorough";
 
 // Server defaults until /config says otherwise (RERANK_MIN_SCORE and
@@ -124,6 +125,8 @@ export default function App() {
   const [libraryRoot, setLibraryRoot] = useState(null); // null = not yet resolved
   const [hostPath, setHostPath] = useState("");
   const [collections, setCollections] = useState([]);
+  // Which library Search and Ask look in ("" = all of them). Remembered per browser.
+  const [libraryId, setLibraryId] = useState(() => loadStored(LIBRARY_KEY, ""));
   const [settingRoot, setSettingRoot] = useState(false);
   const [rootNotice, setRootNotice] = useState("");
   const [rootError, setRootError] = useState("");
@@ -247,6 +250,12 @@ export default function App() {
       say(error.message, "error");
     }
   }, [api, say]);
+
+  useEffect(() => saveStored(LIBRARY_KEY, libraryId), [libraryId]);
+  // A removed library (or one from another server) falls back to "all".
+  useEffect(() => {
+    if (libraryId && collections.length && !collections.some((item) => item.id === libraryId)) setLibraryId("");
+  }, [collections, libraryId]);
 
   const refreshCollections = useCallback(async () => {
     try {
@@ -372,6 +381,7 @@ export default function App() {
             rerank_min_score: params.minScore,
             max_per_doc: params.perDoc,
             max_text_chars: 20000,
+            ...(params.library ? { collection_id: params.library } : {}),
             ...(runScope ? { document_id: runScope.documentId } : {}),
           }),
         });
@@ -391,7 +401,15 @@ export default function App() {
     [api],
   );
 
-  const effectiveSearchParams = { ...searchParams, minScore: searchParams.minScore ?? floors.search };
+  // Only real, named libraries are worth a picker; the implicit single
+  // library of an installation without collections is just "everything".
+  const libraries = collections.filter((item) => !item.legacy);
+  const activeLibraryId = libraries.some((item) => item.id === libraryId) ? libraryId : "";
+  const effectiveSearchParams = {
+    ...searchParams,
+    minScore: searchParams.minScore ?? floors.search,
+    library: activeLibraryId || undefined,
+  };
 
   function submit() {
     const text = query.trim();
@@ -404,6 +422,7 @@ export default function App() {
         topK: askParams.topK,
         minScore: askParams.minScore,
         documentId: scope?.documentId,
+        collectionId: activeLibraryId || undefined,
       });
     } else {
       runSearch(text, effectiveSearchParams, scope);
@@ -693,6 +712,19 @@ export default function App() {
     refreshDocuments();
   }
 
+  // The reader's go-ahead for a large scan's OCR run (the server parks any
+  // scan over OCR_APPROVAL_PAGES pages until then).
+  async function approveOcr(doc) {
+    if (!window.confirm(`${doc.indexing_error}\n\nStart OCR for “${doc.filename}” now?`)) return;
+    try {
+      await api(`/documents/${doc.document_id}/approve-ocr`, { method: "POST" });
+      say(`OCR approved — “${doc.filename}” is queued.`, "success");
+    } catch (error) {
+      say(error.message, "error");
+    }
+    refreshDocuments();
+  }
+
   // The reader's marks (read, owned, type). Applied locally at once so the
   // toggle feels instant, then confirmed — or rolled back — by the server.
   async function patchDocument(id, changes) {
@@ -833,6 +865,9 @@ export default function App() {
               blockedReason={blockedReason}
               scope={scope}
               onClearScope={() => setScope(null)}
+              libraries={libraries}
+              libraryId={activeLibraryId}
+              onLibraryChange={setLibraryId}
               searchParams={effectiveSearchParams}
               onSearchParams={setSearchParams}
               askParams={askParams}
@@ -892,6 +927,7 @@ export default function App() {
               <SearchResults
                 apiBase={API_BASE}
                 run={searchRun}
+                libraries={libraries}
                 onViewSource={setSource}
                 onScope={(result) => scopeTo(result.document_id, result.document)}
               />
@@ -917,6 +953,7 @@ export default function App() {
           onCreateCollection={createCollection}
           onUpdateCollection={updateCollection}
           onDeleteCollection={deleteCollection}
+          onApproveOcr={approveOcr}
           attaching={attaching}
           reindexing={reindexing}
           onReindex={reindexDocuments}

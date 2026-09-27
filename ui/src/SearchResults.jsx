@@ -7,7 +7,8 @@ import { displayTitle } from "./storage.js";
 // Search findings: the ranked passages, plus a side rail that shows which
 // documents they came from (and filters to one) and a record of the query as
 // it was run — so a result set can be read, and reproduced, as evidence.
-export default function SearchResults({ apiBase, run, onViewSource, onScope }) {
+export default function SearchResults({ apiBase, run, libraries = [], onViewSource, onScope }) {
+  const library = libraries.find((item) => item.id === run?.params?.library);
   const [onlyDoc, setOnlyDoc] = useState(null);
 
   useEffect(() => setOnlyDoc(null), [run]);
@@ -15,7 +16,7 @@ export default function SearchResults({ apiBase, run, onViewSource, onScope }) {
   const sources = useMemo(() => {
     const byDoc = new Map();
     for (const result of run?.results || []) {
-      const entry = byDoc.get(result.document_id) || { id: result.document_id, name: result.document, count: 0, best: -Infinity };
+      const entry = byDoc.get(result.document_id) || { id: result.document_id, name: result.document, fileType: result.file_type, count: 0, best: -Infinity };
       entry.count += 1;
       entry.best = Math.max(entry.best, result.rerank_score ?? -Infinity);
       byDoc.set(result.document_id, entry);
@@ -106,7 +107,7 @@ export default function SearchResults({ apiBase, run, onViewSource, onScope }) {
                     onClick={() => setOnlyDoc(onlyDoc === source.id ? null : source.id)}
                     title={source.name}
                   >
-                    <Cover apiBase={apiBase} documentId={source.id} filename={source.name} width={160} className="cover-mini" />
+                    <Cover apiBase={apiBase} documentId={source.id} filename={source.name} fileType={source.fileType} width={160} className="cover-mini" />
                     <span className="rail-source-name">{displayTitle(source.name)}</span>
                     <span className="rail-source-count">{source.count}</span>
                   </button>
@@ -119,7 +120,9 @@ export default function SearchResults({ apiBase, run, onViewSource, onScope }) {
           <h3 className="eyebrow">Query</h3>
           <dl className="record">
             <dt>Scope</dt>
-            <dd>{run.scope ? displayTitle(run.scope.documentName) : "Whole library"}</dd>
+            <dd>
+              {run.scope ? displayTitle(run.scope.documentName) : library ? library.name : "Whole library"}
+            </dd>
             <dt>Passages</dt>
             <dd>{params.topK} requested</dd>
             <dt>Floor</dt>

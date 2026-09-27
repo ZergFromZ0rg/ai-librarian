@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 
 import { MarkControls } from "./DocMarks.jsx";
+import { katexPlugin, prepareMath, remarkPlugins } from "./markdown.js";
 import { displayTitle } from "./storage.js";
 
 // A lightbox over a server-rendered page image with the matched passage
@@ -153,8 +153,8 @@ export default function SourceViewer({ apiBase, source, doc, onPatch, onClose, o
             // (tables included); OCR and plain text stay verbatim.
             <div className={`viewer-text${extracted.format === "markdown" ? "" : " viewer-text-plain"}`}>
               {extracted.format === "markdown" ? (
-                <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
-                  {extracted.text}
+                <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={[katexPlugin]} skipHtml>
+                  {prepareMath(extracted.text)}
                 </ReactMarkdown>
               ) : (
                 extracted.text

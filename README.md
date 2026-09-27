@@ -161,7 +161,26 @@ Until the first collection is added, the single library folder above stands in a
 
 Besides PDF, the library accepts Word (`.docx`), Excel (`.xlsx`), PowerPoint (`.pptx`), plain text (`.txt`), Markdown (`.md`) and CSV. Office files have no reliable page model, so each is split into "pages" that make sense for the format — a Word section, a spreadsheet sheet, a slide — and large text files into bounded blocks. The source viewer shows these as extracted text; the page-image view, highlights and covers are PDF-only.
 
-PDF pages with no usable text layer (scans) are OCR'd locally with Tesseract, page by page, only where needed — born-digital pages keep the layout-aware extraction. The document then carries an `extraction_notes` line saying OCR was used. `OCR_MODE=off` disables it; `OCR_LANGUAGES` takes Tesseract language codes (`eng+fra`; languages beyond English need their `tesseract-ocr-*` package added to the image). Outside Docker, OCR needs the `tesseract` binary on `PATH`; without it, OCR is skipped with a logged warning and image-only PDFs are refused as before.
+Every format is searchable and askable the same way: search results, Ask citations and the local model's context all label a passage by what it is — "p. 12" for a PDF, "slide 3", "sheet 2", "section 1" for Word and text files.
+
+**OCR.** PDF pages with no usable text layer (scans) are OCR'd locally, page by page and only where needed — born-digital pages keep the layout-aware extraction. Two engines run on each scanned page:
+
+- **Tesseract** — fast (about a second a page) and dependable on ordinary text, but it reads equations as symbol soup.
+- **Nougat** (`facebook/nougat-small`, ~1 GB, downloaded on first use or by `warm_models.py`) — a vision model trained on scientific papers that transcribes the whole page to Markdown with **equations as LaTeX**, which the UI typesets. It is slow: roughly 15–20 s a page on an Apple-silicon GPU and 30–60 s on CPU.
+
+Nougat's transcription is kept unless it recovered clearly fewer words than Tesseract (a sign it skipped part of the page), in which case Tesseract's text is used for that page. Nougat runs in a separate process, so a crash or out-of-memory there only costs that page its equations. The document's notes say how many pages were OCR'd and how many with equation recognition.
+
+**Large scans need your approval.** A scan with more than `OCR_APPROVAL_PAGES` (default 20) pages to OCR is not processed automatically: it shows as **needs OCR** in the Index tab with an estimate of how long it will take, and starts only when you click **Approve OCR**.
+
+`OCR_MODE=off` disables OCR (image-only PDFs are then refused, as before); `OCR_ENGINE=tesseract` skips the equation model; `OCR_LANGUAGES` takes Tesseract language codes (`eng+fra`; languages beyond English need their `tesseract-ocr-*` package added to the image). Outside Docker, text OCR needs the `tesseract` binary on `PATH` and equation OCR needs `torch` + `transformers`; whatever is missing is skipped with a logged warning.
+
+### Libraries in search and Ask
+
+With collections defined, the console shows a library picker (**in: All libraries / Books / Documents …**) next to the Search/Ask switch. Search and Ask then only draw on that library's documents; the choice is remembered per browser. A library's documents are those tagged with it when imported plus any file inside its folder.
+
+### Result formatting
+
+Passages are cleaned at index time and again when served (so an index built before a cleanup still displays cleanly): runs of blank lines are collapsed to one, whitespace-only lines and invisible characters removed, the `<br>` and figure-label debris PDF extraction leaves behind stripped, consecutive bullet items kept as one tight list, and a heading directly above a table kept with it. Equations written as LaTeX are typeset with KaTeX; the plain-Unicode equations the PDF layout pass recovers are shown as text.
 
 ## Configuration
 
@@ -172,7 +191,9 @@ PDF pages with no usable text layer (scans) are OCR'd locally with Tesseract, pa
 | `API_PORT` | `8000` | Direct API and interactive docs port |
 | `LIBRARY_PATH` | `./library` | Host folder mounted read-only at `/library`; can be your exact PDF folder or something broader — see [Browsing and importing](#browsing-and-importing-from-a-server-folder) |
 | `AUTO_INGEST_INTERVAL_SECONDS` | `900` | How often to rescan watched collections (or the library folder) for new documents to auto-import; `0` disables the scan (manual import only) |
-| `OCR_MODE` | `auto` | `auto` OCRs image-only PDF pages with Tesseract; `off` skips OCR |
+| `OCR_MODE` | `auto` | `auto` OCRs image-only PDF pages; `off` skips OCR |
+| `OCR_ENGINE` | `auto` | `auto` = Tesseract plus the equation-aware Nougat model (best page wins); `math` = Nougat only; `tesseract` = text only |
+| `OCR_APPROVAL_PAGES` | `20` | Scans needing OCR on more pages than this wait for **Approve OCR** in the Index tab; `0` never asks |
 | `OCR_LANGUAGES` | `eng` | Tesseract language codes, `+`-joined |
 | `INDEX_EXTRACTION_WORKERS` | `2` | PDFs extracted in parallel (one OS process each) when several are queued together — a folder import, a bulk reindex, or uploads landing close together. Extraction is ~96% of indexing time, so this is the main lever on indexing throughput; raise it on a machine with CPU and RAM to spare, lower it on a constrained one |
 | `INDEX_POLL_SECONDS` | `30` | How often the index worker checks for newly queued documents when it isn't already woken by one being enqueued |
@@ -393,14 +414,15 @@ Important endpoints:
 - `GET /documents/{id}` — inspect one document's state
 - `POST /documents/{id}/retry` — retry failed indexing
 - `DELETE /documents/{id}` — delete stored files and vectors
-- `POST /search` — semantic retrieval (set `rerank: true` to reorder and relevance-gate; `rerank_min_score`, `fusion`, and `dense_weight` override the server defaults per request)
-- `POST /ask` — retrieve, then stream a grounded answer as Server-Sent Events (`token` chunks, `progress` in thorough mode, then one `sources` event); body: `{"question", "history": [{"role", "content"}], "model": "provider:model", "mode": "quick"|"thorough"}`. Returns 503 when no model is available. See [Ask mode](#ask-mode)
+- `POST /search` — semantic retrieval (set `rerank: true` to reorder and relevance-gate; `rerank_min_score`, `fusion`, and `dense_weight` override the server defaults per request; `collection_id` limits it to one library). Each result carries `file_type` and a human `location` ("p. 3", "slide 2")
+- `POST /ask` — retrieve, then stream a grounded answer as Server-Sent Events (`token` chunks, `progress` in thorough mode, then one `sources` event); body: `{"question", "history": [{"role", "content"}], "model": "provider:model", "mode": "quick"|"thorough", "collection_id"?}`. Returns 503 when no model is available. See [Ask mode](#ask-mode)
 - `GET /ask/models` — models the reader may pick, plus the current default
 - `GET|POST /conversations`, `GET|PUT|DELETE /conversations/{id}` — saved Ask conversations (server-side; the UI's **Chat** picker)
 - `GET /library/tree?path=` — one level of the mounted `/library` volume (sub-folders + supported files, marked when indexed)
 - `POST /library/import` — import one document (referenced in place) or every supported file under a folder (recursive); body `{"path", "collection_id"?}`
 - `GET|POST /collections`, `PATCH|DELETE /collections/{id}` — named folders; creating one queues its folder for indexing, `auto_scan` pauses/resumes the passive scan
 - `GET /documents/{id}/extracted-page/{n}` — the extracted text of one page (how non-PDF sources are previewed)
+- `POST /documents/{id}/approve-ocr` — approve OCR for a large scan parked as **needs OCR** and queue it
 - `GET /library/root` — the designated library folder (persisted; `""` = the whole mount) and whether it still resolves
 - `POST /library/root` — narrow (or, with `path: ""`, reset) which folder under `/library` counts as the library; what auto-ingest scans and where Browse opens by default
 - `POST /admin/ingest-folder` — recursively import a folder under `/library` (the older form of `POST /library/import` on a directory)
@@ -433,13 +455,13 @@ npm test
 npm run build
 ```
 
-`npm test` runs the Vitest unit tests (the search-result match highlighter and the Ask-mode SSE stream parser).
+`npm test` runs the Vitest unit tests (the search-result match highlighter, the math preparation for KaTeX, and the Ask-mode SSE stream parser).
 
 ## Current limitations
 
 - Office formats are read for their text only: images, charts, speaker notes and formulas (Excel shows cached values) are not indexed. Legacy `.doc`/`.xls`/`.ppt` are not supported.
 - The Browse tab sees only what is mounted at `/library` (`LIBRARY_PATH`). It is not a full filesystem browser — to reach another disk too, add it as a second bind mount. There is no in-browser PDF preview. New files are picked up automatically (`AUTO_INGEST_INTERVAL_SECONDS`), not instantly — up to one interval's delay, or use **Scan now** to skip the wait. The app never renames, moves, or otherwise reorganizes files on disk — sub-folder structure is only ever read, never written.
-- OCR quality is Tesseract's: fine on clean printed scans, poor on handwriting, heavy math or degraded copies. With OCR off or unavailable, a PDF that is mostly page-images is rejected with a message to OCR it first.
+- OCR is only as good as its engines: clean printed scans read well (and Nougat gets their equations), handwriting and badly degraded copies do not. Nougat occasionally garbles a word or loops; loops are detected and cut, and a page it clearly under-read falls back to Tesseract. With OCR off or unavailable, a PDF that is mostly page-images is rejected with a message to OCR it first.
 - When a minority of pages carry a corrupt OCR text layer, those pages are skipped and the rest of the document is indexed; the document then shows an `extraction_notes` message saying how many pages were left out. A PDF whose text layer is *mostly* corrupt is still refused whole.
 - Front and back matter — tables of contents, back-of-book indexes, bibliographies — is detected by shape and dropped before indexing, so those keyword-dense pages don't outrank real passages. Detection is conservative and skips nothing when it would flag more than 40% of a document.
 - Layout extraction can preserve mathematical symbols only when the PDF exposes usable text or glyph information. Equations stored solely as images are not recovered.

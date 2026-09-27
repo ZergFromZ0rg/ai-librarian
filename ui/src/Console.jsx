@@ -137,6 +137,9 @@ export default function Console({
   blockedReason,
   scope,
   onClearScope,
+  libraries = [],
+  libraryId = "",
+  onLibraryChange,
   searchParams,
   onSearchParams,
   askParams,
@@ -196,13 +199,18 @@ export default function Console({
         BREADTH_LABELS[searchParams.perDoc],
       ].join(" · ");
   const canSubmit = query.trim() && !busy && !blockedReason && !(isAsk && ask.noModels);
+  const library = libraries.find((item) => item.id === libraryId);
   const placeholder = isAsk
     ? scope
       ? `Ask about ${displayTitle(scope.documentName)}…`
-      : "Ask a question of your library…"
+      : library
+        ? `Ask a question of ${library.name}…`
+        : "Ask a question of your library…"
     : scope
       ? `Search within ${displayTitle(scope.documentName)}…`
-      : "Search concepts, passages, names, formulas…";
+      : library
+        ? `Search ${library.name}…`
+        : "Search concepts, passages, names, formulas…";
 
   return (
     <form
@@ -236,6 +244,19 @@ export default function Console({
           </div>
         ) : (
           <span className="eyebrow">Search</span>
+        )}
+        {libraries.length > 0 && (
+          <label className={`library-picker${libraryId ? " active" : ""}`} title="Which library to search and ask">
+            <span className="library-picker-label">in</span>
+            <select value={libraryId} disabled={busy} onChange={(event) => onLibraryChange(event.target.value)} aria-label="Library">
+              <option value="">All libraries</option>
+              {libraries.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+          </label>
         )}
         {scope && (
           <span className="scope-chip" title={scope.documentName}>

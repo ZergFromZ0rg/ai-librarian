@@ -63,7 +63,7 @@ def test_excel_sheet_per_page(tmp_path):
 
     pages, _ = parsers.extract_source_pages(path)
     assert len(pages) == 1  # the empty sheet contributes nothing
-    assert pages[0]["text"].startswith("# Sheet: Reading")
+    assert pages[0]["text"].startswith("## Reading")
     assert "| The Plague | 308 |" in pages[0]["text"]
 
 
@@ -77,43 +77,65 @@ def test_powerpoint_slide_per_page(tmp_path):
     presentation.save(path)
 
     (page,), _ = parsers.extract_source_pages(path)
-    assert page["text"].startswith("# Slide 1")
+    assert page["text"].startswith("# Absurdism")  # the slide title, once
+    assert page["text"].count("Absurdism") == 1
     assert "Revolt, freedom, passion" in page["text"]
+
+
+def _mixed_pages():
+    return [
+        {"page": 1, "text": "born digital text", "format": "markdown", "needs_ocr": False},
+        {"page": 2, "text": "", "format": "markdown", "needs_ocr": True},
+        {"page": 3, "text": "", "format": "markdown", "needs_ocr": True},
+    ]
 
 
 def test_pdf_ocr_runs_only_for_pages_that_need_it(tmp_path, monkeypatch):
     path = tmp_path / "mixed.pdf"
     path.write_bytes(make_pdf("born digital text"))
-    extracted = [
-        {"page": 1, "text": "born digital text", "format": "markdown", "needs_ocr": False},
-        {"page": 2, "text": "", "format": "markdown", "needs_ocr": True},
-    ]
     calls = []
-    monkeypatch.setattr(parsers, "extract_pages", lambda _path: extracted)
-    monkeypatch.setattr(
-        parsers,
-        "ocr_pdf_pages",
-        lambda _path, pages, targets, languages: calls.append((targets, languages))
-        or [{**page, "ocr": True} if page["page"] in targets else page for page in pages],
-    )
+    monkeypatch.setattr(parsers, "extract_pages", lambda _path: _mixed_pages())
 
-    _pages, used = parsers.extract_source_pages(path, ocr_languages="eng+fra")
-    assert used and calls == [([2], "eng+fra")]
+    def fake_ocr(_path, targets, languages, engine):
+        calls.append((targets, languages, engine))
+        return {
+            2: {"text": "\\[E = mc^2\\]", "engine": "nougat"},
+            3: {"text": "hyphen-\nated words", "engine": "tesseract"},
+        }
+
+    monkeypatch.setattr(parsers, "ocr_pages", fake_ocr)
+    pages, used = parsers.extract_source_pages(path, ocr_languages="eng+fra", ocr_engine="auto")
+    assert used and calls == [([2, 3], "eng+fra", "auto")]
+    assert pages[0]["text"] == "born digital text"
+    assert pages[1]["format"] == "markdown" and pages[1]["ocr"] == "nougat"
+    assert pages[2]["text"] == "hyphenated words" and pages[2]["format"] == "text"
+    assert not any(page["needs_ocr"] for page in pages)
 
     calls.clear()
     _pages, used = parsers.extract_source_pages(path, ocr_mode="off")
     assert not used and calls == []
 
 
-def test_ocr_without_tesseract_leaves_pages_alone(tmp_path, monkeypatch):
-    pytesseract = pytest.importorskip("pytesseract")
-    import extraction
-
-    def missing():
-        raise pytesseract.TesseractNotFoundError()
-
-    monkeypatch.setattr(pytesseract, "get_tesseract_version", missing)
+def test_large_scans_wait_for_approval(tmp_path, monkeypatch):
     path = tmp_path / "scan.pdf"
     path.write_bytes(make_pdf("irrelevant"))
-    pages = [{"page": 1, "text": "", "needs_ocr": True}]
-    assert extraction.ocr_pdf_pages(path, pages, [1]) == pages
+    monkeypatch.setattr(parsers, "extract_pages", lambda _path: _mixed_pages())
+    monkeypatch.setattr(parsers, "ocr_pages", lambda *a, **k: {})
+
+    with pytest.raises(ValueError) as refused:
+        parsers.extract_source_pages(path, ocr_approval_pages=1)
+    assert str(refused.value) == f"{parsers.OCR_APPROVAL_MARKER}2"
+    # Approved, or within the limit, or with the gate off: it just runs.
+    parsers.extract_source_pages(path, ocr_approval_pages=1, ocr_approved=True)
+    parsers.extract_source_pages(path, ocr_approval_pages=2)
+    parsers.extract_source_pages(path, ocr_approval_pages=0)
+
+
+def test_location_labels_follow_the_file_type():
+    assert parsers.location_label("pdf", 3) == "p. 3"
+    assert parsers.location_label("pdf", 3, 4) == "pp. 3–4"
+    assert parsers.location_label("powerpoint", 2) == "slide 2"
+    assert parsers.location_label("excel", 1, 2) == "sheets 1–2"
+    assert parsers.location_label("word", 5) == "section 5"
+    assert parsers.location_label("csv", 1) == "table"
+    assert parsers.location_label("pdf", None) == "location unknown"

@@ -25,6 +25,15 @@ EQUATION_CLOSERS = {
     "\\begin{align": "\\end{align",
     "\\begin{gather": "\\end{gather",
 }
+LIST_ITEM_PATTERN = re.compile(r"^\s{0,3}(?:[-*+•]|\d{1,3}[.)])\s+\S")
+PICTURE_TEXT_PATTERN = re.compile(
+    r"<!--\s*Start of picture text\s*-->(.*?)<!--\s*End of picture text\s*-->",
+    re.IGNORECASE | re.DOTALL,
+)
+HTML_COMMENT_PATTERN = re.compile(r"<!--.*?-->", re.DOTALL)
+BR_PATTERN = re.compile(r"<br\s*/?>", re.IGNORECASE)
+INVISIBLE_PATTERN = re.compile(r"[\u200b\u200c\u200d\u2060\ufeff]")
+BLANK_RUN_PATTERN = re.compile(r"\n[ \t\u00a0\u3000]*(?:\n[ \t\u00a0\u3000]*)+\n")
 MATH_SYMBOL_PATTERN = re.compile(r"[=<>≤≥≠≈∑∏∫√∞±∓×÷∂∇^_{}\\]")
 TERMINAL_PATTERN = re.compile(r"[.!?][\]\)\"'”’*]*\s*$")
 
@@ -174,6 +183,53 @@ def normalize_for_embedding(markdown: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\s*\n\s*", " ", text)
     return text.strip()
+
+
+def collapse_blank_lines(text: str) -> str:
+    """At most one empty line anywhere, and no whitespace-only lines.
+
+    Cheap enough to run at display time too, so passages indexed before the
+    ingest-side tidy (below) render without gaps as well.
+    """
+    if not text:
+        return ""
+    text = INVISIBLE_PATTERN.sub("", text)
+    text = re.sub(r"[ \t\u00a0\u3000]+\n", "\n", text)
+    return BLANK_RUN_PATTERN.sub("\n\n", text).strip()
+
+
+def _picture_text(match: "re.Match") -> str:
+    """Text pymupdf4llm lifted out of a figure, as ``<br>``-separated lines.
+
+    Almost always diagram labels ("O C A", "S R") that read as noise in a
+    passage and pollute its embedding, so it is dropped — unless it is real
+    prose (a text box, a scanned quotation), which is kept as plain lines.
+    """
+    lines = [line.strip() for line in BR_PATTERN.split(match.group(1)) if line.strip()]
+    words = sum(len(re.findall(r"[^\W\d_]{2,}", line)) for line in lines)
+    if lines and words / len(lines) >= 5:
+        return "\n\n" + "\n".join(lines) + "\n\n"
+    return "\n\n"
+
+
+def tidy_markdown(text: str) -> str:
+    """Presentation cleanup applied to every page before it is chunked.
+
+    Removes the HTML debris extractors leave behind (figure-text comments,
+    ``<br>`` line breaks) and runs of blank lines — dropped equations, OCR page
+    furniture and slide/sheet spacing all leave these, and they render as big
+    empty gaps in search results.
+    """
+    if not text:
+        return ""
+    text = PICTURE_TEXT_PATTERN.sub(_picture_text, text)
+    text = HTML_COMMENT_PATTERN.sub("", text)
+    # Inside a table row a line break would split the row; elsewhere it is one.
+    text = "\n".join(
+        BR_PATTERN.sub(" " if _looks_like_table_row(line) else "\n", line)
+        for line in text.split("\n")
+    )
+    return collapse_blank_lines(text)
 
 
 def _looks_like_table_row(line: str) -> bool:
@@ -341,12 +397,29 @@ def parse_typed_blocks(pages: Sequence[Dict]) -> List[Block]:
     blocks: List[Block] = []
     for fallback_page, page in enumerate(pages, start=1):
         page_number = int(page.get("page") or fallback_page)
-        blocks.extend(_parse_page(page_number, page.get("text", "")))
+        blocks.extend(_parse_page(page_number, tidy_markdown(page.get("text", ""))))
     return _merge_cross_page_paragraphs(blocks)
 
 
 def join_blocks(blocks: Iterable[Block]) -> str:
-    return "\n\n".join(block.text.strip() for block in blocks if block.text.strip()).strip()
+    """Blocks separated by one blank line — except consecutive list items.
+
+    The page parser splits on blank lines, so every bullet arrives as its own
+    block; re-joining them with blank lines would make a "loose" Markdown list
+    whose items render with a paragraph gap between each one.
+    """
+    parts: List[str] = []
+    previous_is_item = False
+    for block in blocks:
+        text = block.text.strip()
+        if not text:
+            continue
+        is_item = bool(LIST_ITEM_PATTERN.match(text))
+        if parts:
+            parts.append("\n" if is_item and previous_is_item else "\n\n")
+        parts.append(text)
+        previous_is_item = is_item
+    return "".join(parts).strip()
 
 
 def _is_structural_anchor(block: Block) -> bool:
@@ -375,6 +448,11 @@ def bind_structural_context(blocks: Sequence[Block]) -> List[Unit]:
             member_indices.insert(0, cursor)
             cursor -= 1
         if cursor >= 0 and cursor not in consumed and blocks[cursor].type == "paragraph":
+            member_indices.insert(0, cursor)
+            cursor -= 1
+        # A heading directly above (a sheet name, "Truth table for ∧") titles
+        # the table or equation; left behind it becomes a passage of its own.
+        if cursor >= 0 and cursor not in consumed and blocks[cursor].type == "heading":
             member_indices.insert(0, cursor)
 
         cursor = anchor_index + 1

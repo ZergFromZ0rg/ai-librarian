@@ -223,6 +223,8 @@ def disabled_reason() -> str:
 
 
 def _passage_location(source: dict) -> str:
+    if source.get("location"):
+        return source["location"]  # file-type aware: "slide 3", "sheet 2", …
     page = source.get("page")
     page_end = source.get("page_end")
     if page is None:

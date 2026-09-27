@@ -8,6 +8,9 @@ requests==2.32.5
 httpx==0.28.1
 torch==2.13.0
 sentence-transformers==6.0.0
+# Pinned explicitly (it is also a sentence-transformers dependency): the
+# equation-aware OCR model (Nougat, ocr.py) is tested against this version.
+transformers==5.17.0
 qdrant-client==1.19.0
 # Local document formats and scan OCR.  These are imported only when a matching
 # file is indexed, so ordinary PDF-only use has no extra runtime work.

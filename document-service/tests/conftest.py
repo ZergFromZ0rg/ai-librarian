@@ -128,7 +128,12 @@ def service(tmp_path, monkeypatch):
         hits = []
         vector_norm = math.sqrt(sum(value * value for value in vector)) or 1
         for chunk_id, item in indexed.items():
-            if filters and any(item["payload"].get(key) != value for key, value in filters.items()):
+            if filters and any(
+                item["payload"].get(key) not in value
+                if isinstance(value, (list, tuple, set))
+                else item["payload"].get(key) != value
+                for key, value in filters.items()
+            ):
                 continue
             candidate = item["vector"]
             candidate_norm = math.sqrt(sum(value * value for value in candidate)) or 1

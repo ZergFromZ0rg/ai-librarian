@@ -63,6 +63,10 @@ services:
       AUTO_INGEST_INTERVAL_SECONDS: ${AUTO_INGEST_INTERVAL_SECONDS:-900}
       OCR_MODE: ${OCR_MODE:-auto}
       OCR_LANGUAGES: ${OCR_LANGUAGES:-eng}
+      # auto = Tesseract + the equation-aware Nougat model; tesseract = text only.
+      OCR_ENGINE: ${OCR_ENGINE:-auto}
+      # Scans needing OCR on more pages than this wait for approval in the UI.
+      OCR_APPROVAL_PAGES: ${OCR_APPROVAL_PAGES:-20}
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: vault
       APP_TOKEN: ${APP_TOKEN:-}

@@ -320,7 +320,7 @@ function Shelves({ apiBase, documents, libraryRoot, collection, settingRoot, onS
 
 // Every indexed document (uploads included, which have no folder), as a
 // table: status, size, where it came from, and the maintenance actions.
-function Catalogue({ apiBase, documents, reindexing, onReindex, onRemove, onOpenDocument, onScope, onPatch }) {
+function Catalogue({ apiBase, documents, reindexing, onReindex, onRemove, onOpenDocument, onScope, onPatch, onApproveOcr }) {
   const [filter, setFilter] = useState("");
   const [sort, setSort] = useState("recent");
   const [selected, setSelected] = useState(() => new Set());
@@ -423,6 +423,8 @@ function Catalogue({ apiBase, documents, reindexing, onReindex, onRemove, onOpen
         </thead>
         <tbody>
           {rows.map((doc) => {
+            // A large scan parked until the reader signs off on its OCR run.
+            const awaitingOcr = doc.indexing_status === "error" && doc.ocr_pages > 0 && !doc.ocr_approved;
             const hasError = Boolean(doc.indexing_error);
             const hasNotes = Boolean(doc.extraction_notes);
             const notesOpen = openNotes === doc.document_id;
@@ -447,7 +449,11 @@ function Catalogue({ apiBase, documents, reindexing, onReindex, onRemove, onOpen
                     </button>
                   </td>
                   <td>
-                    <StatusBadge status={doc.indexing_status} />
+                    {awaitingOcr ? (
+                      <span className="badge badge-awaiting" title={doc.indexing_error}>needs OCR</span>
+                    ) : (
+                      <StatusBadge status={doc.indexing_status} />
+                    )}
                     {(hasError || hasNotes) && (
                       <button
                         type="button"
@@ -455,7 +461,7 @@ function Catalogue({ apiBase, documents, reindexing, onReindex, onRemove, onOpen
                         onClick={() => setOpenNotes(notesOpen ? null : doc.document_id)}
                         aria-expanded={notesOpen}
                       >
-                        {hasError ? "error" : "notes"} {notesOpen ? "▴" : "▾"}
+                        {awaitingOcr ? "why" : hasError ? "error" : "notes"} {notesOpen ? "▴" : "▾"}
                       </button>
                     )}
                   </td>
@@ -470,10 +476,16 @@ function Catalogue({ apiBase, documents, reindexing, onReindex, onRemove, onOpen
                         Search within
                       </button>
                     )}
-                    {doc.indexing_status === "error" && (
-                      <button type="button" className="text-button" disabled={reindexing} onClick={() => onReindex([doc.document_id])}>
-                        Retry
+                    {awaitingOcr ? (
+                      <button type="button" className="text-button accent" onClick={() => onApproveOcr(doc)} title={doc.indexing_error}>
+                        Approve OCR ({doc.ocr_pages} pp.)
                       </button>
+                    ) : (
+                      doc.indexing_status === "error" && (
+                        <button type="button" className="text-button" disabled={reindexing} onClick={() => onReindex([doc.document_id])}>
+                          Retry
+                        </button>
+                      )
                     )}
                     <button type="button" className="text-button danger" onClick={() => onRemove(doc)}>
                       Remove
@@ -484,7 +496,7 @@ function Catalogue({ apiBase, documents, reindexing, onReindex, onRemove, onOpen
                   <tr className="notes-row">
                     <td />
                     <td colSpan={6}>
-                      {hasError && <div className="notice error">{doc.indexing_error}</div>}
+                      {hasError && <div className={`notice${awaitingOcr ? "" : " error"}`}>{doc.indexing_error}</div>}
                       {hasNotes && <div className="notice">{doc.extraction_notes}</div>}
                     </td>
                   </tr>
