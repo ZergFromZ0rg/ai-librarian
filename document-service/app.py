@@ -32,6 +32,7 @@ import generation
 from chunking import (
     build_semantic_groups,
     collapse_blank_lines,
+    load_tokenizer,
     normalize_for_embedding,
     parse_typed_blocks,
 )
@@ -496,6 +497,14 @@ def _new_extraction_executor() -> concurrent.futures.ProcessPoolExecutor:
     # connections (STORE, Qdrant, the embedding model) -- exactly the case
     # fork-in-a-threaded-process is safe for, since the child never needs
     # any lock it might have inherited mid-acquisition.
+    #
+    # Load the chunker's tokenizer here, before forking, so every child
+    # inherits it ready-made. Loading it inside a child both costs each worker
+    # its own copy and, on macOS, crashes it: the transformers import chain
+    # (sklearn -> pandas -> pyarrow) runs libarrow's curl initializer, and the
+    # Hub download does a proxy lookup; both call CoreFoundation, which aborts
+    # in a child forked from a multi-threaded process.
+    load_tokenizer()
     return concurrent.futures.ProcessPoolExecutor(
         max_workers=INDEX_EXTRACTION_WORKERS,
         mp_context=multiprocessing.get_context("fork"),

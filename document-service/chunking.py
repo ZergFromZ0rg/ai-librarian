@@ -108,6 +108,12 @@ def _get_tokenizer():
     return _tokenizer
 
 
+def load_tokenizer() -> None:
+    """Load the tokenizer now rather than on first use -- see
+    ``app._new_extraction_executor`` for why it must happen before a fork."""
+    _get_tokenizer()
+
+
 def _regex_token_spans(text: str) -> List[tuple[int, int]]:
     """Conservative, dependency-free token-like character spans.
 
