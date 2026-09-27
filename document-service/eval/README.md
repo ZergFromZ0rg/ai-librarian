@@ -181,9 +181,31 @@ python eval/ask_harness.py --url http://127.0.0.1:8010 --model ollama:qwen3:4b \
 The corpus exercises Word tables and bullet lists, multi-sheet workbooks
 (formulas, dates, a header-only sheet), slide text boxes and speaker notes,
 French / German / Japanese text, and a Word file ending in a 6,000-character
-base64 blob. Cases tagged `known-weak` record gaps found while building the set
-and are expected to miss until fixed: speaker notes are not extracted, and a
-question answered only by one spreadsheet detail row ranks poorly.
+base64 blob. Cases tagged `known-weak` are expected to miss: an English
+question about French or Japanese text (see
+[Multilingual libraries](#multilingual-libraries)).
+
+### Multilingual libraries
+
+Same-language search works in any language. An English question about French
+or Japanese text does not. Dense retrieval still finds the passage, but the
+English-only reranker (`ms-marco-MiniLM-L-6-v2`) scores it around -8 to -11,
+far below `RERANK_MIN_SCORE`. Swapping only the embedding model changes
+nothing. Measured offline on the Office corpus (dense top 30, then rerank):
+
+| setup | hit@1 | cross-lingual answers | top unanswerable score | rerank |
+|---|---|---|---|---|
+| bge-base-en + ms-marco (default) | 0.97 | gated out (-10.8, -8.3) | -8.0 | 2.5 s/query |
+| multilingual-e5-base + ms-marco | 0.97 | gated out (same) | -8.7 | 6.4 s/query |
+| multilingual-e5-base + `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` | 0.94 | found (+9.2, +2.5) | **-1.9** | 12.7 s/query |
+
+A library that needs cross-language search can set
+`RERANK_MODEL=cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` in `.env`. Expect:
+- reranking about 5x slower;
+- a gate that must be re-fitted with `harness.py calibrate`, since the -2.0
+  default lets an unanswerable query through;
+- run the book suite first, because its effect on English retrieval is not
+  yet measured.
 
 Ask needs a model that emits `[n]` citations; `qwen2.5:1.5b` answers correctly
 but cites nothing, so every substantive case fails the citation check with it.
