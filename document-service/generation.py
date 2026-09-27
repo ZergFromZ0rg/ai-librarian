@@ -374,7 +374,19 @@ async def generate_stream(
     providers — the browser holds its own keys. Raises :class:`GenerationError`
     on any provider failure.
     """
-    keys = keys or {}
+    produced = False
+    async for chunk in _provider_stream(model_id, system, messages, keys or {}):
+        produced = True
+        yield chunk
+    if not produced:
+        # A stream that ends cleanly but empty would otherwise reach the user as
+        # a blank answer with no error at all.
+        raise GenerationError(f"{model_id} returned an empty answer")
+
+
+async def _provider_stream(
+    model_id: str, system: str, messages: List[dict], keys: dict
+) -> AsyncIterator[str]:
     provider, model = _split_model_id(model_id)
     if provider == "ollama":
         async for chunk in _ollama_native_stream(model, system, messages):
@@ -411,6 +423,15 @@ def _delta_from_ollama_line(line: str) -> Optional[str]:
     return (obj.get("message") or {}).get("content")
 
 
+def _ollama_done_reason(line: str) -> Optional[str]:
+    """Why Ollama stopped ("stop", "length"...), from its final NDJSON line."""
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return obj.get("done_reason") if isinstance(obj, dict) and obj.get("done") else None
+
+
 async def _ollama_native_stream(
     model: str, system: str, messages: List[dict]
 ) -> AsyncIterator[str]:
@@ -438,10 +459,23 @@ async def _ollama_native_stream(
                 if response.status_code >= 400:
                     body = (await response.aread()).decode("utf-8", "replace")[:300]
                     raise GenerationError(f"{model}: Ollama {response.status_code} — {body}")
+                produced = False
+                done_reason = None
                 async for line in response.aiter_lines():
                     text = _delta_from_ollama_line(line)
                     if text:
+                        produced = True
                         yield text
+                    else:
+                        done_reason = _ollama_done_reason(line) or done_reason
+                if not produced and done_reason == "length":
+                    # Thinking models (qwen3, deepseek-r1...) stream their reasoning
+                    # separately and can spend the whole num_predict budget on it.
+                    raise GenerationError(
+                        f"{model}: hit the {GENERATION_MAX_TOKENS}-token output limit "
+                        "before answering (a thinking model spent it reasoning); raise "
+                        "GENERATION_MAX_TOKENS or pick a non-thinking model"
+                    )
     except httpx.HTTPError as exc:
         raise GenerationError(f"{model}: Ollama request failed — {exc}") from exc
 

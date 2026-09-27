@@ -100,3 +100,13 @@ def test_check_must_cite_is_any_of():
     m = ah.check(case, result)
     assert m["hard_failures"] == []
     assert m["must_cite_retrieved"] and m["must_cite_cited"]
+
+
+def test_check_flags_sources_from_outside_a_scoped_library():
+    case = {"question": "How much is the stipend?"}
+    inside = {"document": "handbook.docx", "page": 1}
+    outside = {"document": "Other.pdf", "page": 3}
+    good = ah.check(case, _result("It is 500 euros [1].", [inside]), members={"handbook.docx"})
+    assert good["hard_failures"] == []
+    leaked = ah.check(case, _result("It is 500 euros [1].", [inside, outside]), members={"handbook.docx"})
+    assert leaked["hard_failures"] == ["sources outside the library: Other.pdf"]

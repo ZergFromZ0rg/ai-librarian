@@ -233,3 +233,44 @@ def test_generate_thorough_reports_when_nothing_is_relevant(monkeypatch):
     frames = run(_collect(generation.generate_thorough("ollama:m", "q?", [{"document": "A.pdf", "page": 1, "text": "x"}])))
     text = "".join(t for k, t in frames if k == "token")
     assert "don't contain anything" in text
+
+
+def test_generate_stream_errors_instead_of_returning_a_blank_answer(monkeypatch):
+    async def empty(base_url, api_key, model, system, messages):
+        return
+        yield  # pragma: no cover -- makes this an async generator
+
+    monkeypatch.setattr(generation, "_openai_compatible_stream", empty)
+    with pytest.raises(generation.GenerationError, match="empty answer"):
+        run(_collect(generation.generate_stream("openai:gpt-5.1", "s", [], keys={"openai": "k"})))
+
+
+def _ollama_stream(monkeypatch, lines):
+    httpx = pytest.importorskip("httpx")
+    body = "\n".join(lines).encode()
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=body))
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real_client(transport=transport, **kw))
+    monkeypatch.setenv("OLLAMA_URL", "http://ollama.test")
+    return run(_collect(generation.generate_stream("ollama:qwen3:4b", "s", [{"role": "user", "content": "q"}])))
+
+
+def test_ollama_thinking_model_that_runs_out_of_tokens_reports_why(monkeypatch):
+    # What qwen3 actually streams when its reasoning eats num_predict: thinking
+    # chunks, empty content, then done_reason "length".
+    lines = [
+        '{"message":{"role":"assistant","content":"","thinking":"Okay, the user asks"},"done":false}',
+        '{"message":{"role":"assistant","content":"","thinking":" about corals..."},"done":false}',
+        '{"message":{"role":"assistant","content":""},"done":true,"done_reason":"length"}',
+    ]
+    with pytest.raises(generation.GenerationError, match="output limit before answering"):
+        _ollama_stream(monkeypatch, lines)
+
+
+def test_ollama_answer_after_thinking_streams_normally(monkeypatch):
+    lines = [
+        '{"message":{"content":"","thinking":"hmm"},"done":false}',
+        '{"message":{"content":"Warm water [1]."},"done":false}',
+        '{"message":{"content":""},"done":true,"done_reason":"stop"}',
+    ]
+    assert "".join(_ollama_stream(monkeypatch, lines)) == "Warm water [1]."

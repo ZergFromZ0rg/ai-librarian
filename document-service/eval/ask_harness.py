@@ -22,6 +22,10 @@ Deterministic checks always run (no LLM needed):
     `must_mention` / `must_not_mention` substrings, `must_cite` passages present
     and cited, and -- for `expect_refusal` cases -- that the answer declines.
 
+Optional on any case: ``collection`` (a library's name) scopes the question to
+that library -- a source from outside it is a hard failure -- and ``tags``
+(labels such as "excel") add a per-tag pass count to the report.
+
 Add ``--judge <provider:model>`` for an LLM judge that also scores faithfulness,
 relevance, citation accuracy, and `key_points` coverage. The judge talks to
 Ollama (``--judge-url http://host:11434``) or the Cloud provider API
@@ -116,10 +120,12 @@ def parse_sse(body: str) -> list[dict]:
 
 
 def ask(question: str, mode: str = "quick", model: Optional[str] = None,
-        provider_keys: Optional[dict] = None) -> dict:
+        provider_keys: Optional[dict] = None, collection_id: Optional[str] = None) -> dict:
     """POST /ask, consume the stream, return {answer, sources, documents,
     relevant_count, model, error}."""
     payload: dict = {"question": question, "mode": mode}
+    if collection_id:
+        payload["collection_id"] = collection_id
     if model:
         payload["model"] = model
     if provider_keys:
@@ -160,8 +166,31 @@ def source_matches(want: dict, source: dict) -> bool:
     return True
 
 
-def check(case: dict, result: dict) -> dict:
-    """Deterministic checks. Returns {metrics..., hard_failures: [str]}."""
+def resolve_collection(name: str) -> dict:
+    """A library by name (or id), plus the lower-cased filenames it holds --
+    membership mirrors the server: recorded collection_id, or a source_path
+    inside the library's folder."""
+    collections = json.loads(_request("GET", "/collections"))["collections"]
+    wanted = name.strip().lower()
+    collection = next((c for c in collections
+                       if c["name"].strip().lower() == wanted or c["id"] == name), None)
+    if collection is None:
+        known = ", ".join(repr(c["name"]) for c in collections) or "none"
+        raise SystemExit(f"no library named {name!r} on this server (have: {known})")
+    root = (collection.get("path") or "").strip("/")
+    members = set()
+    for doc in json.loads(_request("GET", "/documents"))["documents"]:
+        source = doc.get("source_path") or ""
+        if doc.get("collection_id") == collection["id"] or (
+            source and (not root or source == root or source.startswith(root + "/"))
+        ):
+            members.add(doc["filename"].lower())
+    return {**collection, "members": members}
+
+
+def check(case: dict, result: dict, members: Optional[set] = None) -> dict:
+    """Deterministic checks. Returns {metrics..., hard_failures: [str]}.
+    ``members`` -- the filenames of the case's library, when it is scoped."""
     answer = result["answer"]
     sources = result["sources"]
     n_sources = len(sources)
@@ -208,6 +237,12 @@ def check(case: dict, result: dict) -> dict:
         if not retrieved_ok:
             wanted = ", ".join(f"{w.get('document')} p.{w.get('page')}" for w in must_cite)
             fails.append(f"none of the must_cite passages were retrieved ({wanted})")
+
+    if members is not None:
+        outside = sorted({str(s.get("document") or "") for s in sources
+                          if str(s.get("document") or "").lower() not in members})
+        if outside:
+            fails.append(f"sources outside the library: {', '.join(outside)}")
 
     in_range_cites = {n for n in cites if 1 <= n <= n_sources}
     return {
@@ -334,19 +369,30 @@ def score(cases: list[dict], model: Optional[str], judge_spec: Optional[str],
     kp_hits = kp_total = 0
     cited_frac_sum = 0.0
     substantive = 0
+    tag_stats: dict[str, list[int]] = {}  # tag -> [passed, total]
+    libraries: dict[str, dict] = {}
 
     for case in cases:
         cid = case.get("id") or case.get("question", "?")
+        library = None
+        if case.get("collection"):
+            name = case["collection"]
+            library = libraries.get(name) or libraries.setdefault(name, resolve_collection(name))
         # LLM answers vary run to run; with --repeat, a case fails only when it
         # fails on more than half the attempts, and we report the pass rate.
         runs = []
         for _ in range(repeat):
             result = ask(case["question"], case.get("mode", "quick"),
-                         case.get("model") or model, provider_keys)
-            runs.append((result, check(case, result)))
+                         case.get("model") or model, provider_keys,
+                         library["id"] if library else None)
+            runs.append((result, check(case, result, library["members"] if library else None)))
         passed = [(r, m) for r, m in runs if not m["hard_failures"]]
         result, m = (passed[0] if passed else runs[-1])
         case_failed = len(passed) * 2 <= repeat  # majority must pass
+        for tag in case.get("tags") or []:
+            stats = tag_stats.setdefault(tag, [0, 0])
+            stats[0] += 0 if case_failed else 1
+            stats[1] += 1
 
         note = []
         if repeat > 1:
@@ -396,6 +442,8 @@ def score(cases: list[dict], model: Optional[str], judge_spec: Optional[str],
 
     print("\n" + "-" * (width + 40))
     print(f"  {len(cases)} cases, {hard_fail_cases} with hard failures")
+    if tag_stats:
+        print("  by tag:  " + "   ".join(f"{tag} {ok}/{n}" for tag, (ok, n) in sorted(tag_stats.items())))
     if substantive:
         print(f"  mean context cited:  {cited_frac_sum / substantive:.0%}  "
               f"({substantive} substantive answers)")

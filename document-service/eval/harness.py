@@ -22,6 +22,14 @@ The eval set lives in ``eval/queries.jsonl`` -- one JSON object per line:
                    "contains": "one truly serious philosophical problem"}]}
     {"id": "gate-gorilla", "query": "characteristics of a gorilla", "expect_empty": true}
 
+Optional on any case: ``collection`` (a library's name) scopes the search to
+that library, and any result from outside it is a SCOPE LEAK -- a hard failure.
+A case with ``collection`` but neither ``relevant`` nor ``expect_empty`` is a
+pure scope probe (give it ``"search": {"rerank_min_score": -100}`` so the
+relevance gate cannot hide a leak by returning nothing). ``search`` passes
+extra /search fields for one case. ``tags`` (a list of labels such as "excel" or "multilingual")
+add a per-tag hit@k breakdown to the report.
+
 ``expect_empty`` cases are unanswerable queries. ``score`` reports whether the
 RERANK_MIN_SCORE gate dropped them (informational -- the gate is a product
 choice, not a release blocker); ``calibrate`` uses them to fit the floor.
@@ -86,11 +94,54 @@ def _request(method: str, path: str, body: Optional[dict] = None) -> dict:
         ) from exc
 
 
-def search(query: str, top_k: int, rerank: bool) -> list[dict]:
+def search(query: str, top_k: int, rerank: bool, collection_id: Optional[str] = None,
+           overrides: Optional[dict] = None) -> list[dict]:
     # No rerank_k: let the server's RERANK_CANDIDATES decide the pool, so the
     # harness measures whatever a plain UI search does.
-    payload = {"query": query, "top_k": top_k, "rerank": rerank, **SEARCH_OVERRIDES}
+    payload = {"query": query, "top_k": top_k, "rerank": rerank, **SEARCH_OVERRIDES, **(overrides or {})}
+    if collection_id:
+        payload["collection_id"] = collection_id
     return _request("POST", "/search", payload)["results"]
+
+
+class Scopes:
+    """Resolves a case's ``collection`` name and knows which filenames belong
+    to it, fetched once per run. Membership mirrors the server's rule: the
+    recorded collection_id, or a source_path inside the collection's folder."""
+
+    def __init__(self) -> None:
+        self._collections: Optional[list[dict]] = None
+        self._documents: Optional[list[dict]] = None
+
+    def resolve(self, name: str) -> dict:
+        if self._collections is None:
+            self._collections = _request("GET", "/collections")["collections"]
+        wanted = name.strip().lower()
+        for collection in self._collections:
+            if collection["name"].strip().lower() == wanted or collection["id"] == name:
+                return collection
+        known = ", ".join(repr(c["name"]) for c in self._collections) or "none"
+        raise SystemExit(f"no library named {name!r} on this server (have: {known})")
+
+    def members(self, collection: dict) -> set[str]:
+        if self._documents is None:
+            self._documents = _request("GET", "/documents")["documents"]
+        return {doc["filename"].lower() for doc in self._documents
+                if in_collection(doc, collection)}
+
+
+def in_collection(doc: dict, collection: dict) -> bool:
+    if doc.get("collection_id") == collection["id"]:
+        return True
+    root = (collection.get("path") or "").strip("/")
+    source = doc.get("source_path") or ""
+    return bool(source) and (not root or source == root or source.startswith(root + "/"))
+
+
+def scope_leaks(results: list[dict], members: set[str]) -> list[str]:
+    """Filenames of results that fall outside the searched library."""
+    return sorted({str(r.get("document") or "") for r in results
+                   if str(r.get("document") or "").lower() not in members})
 
 
 def load_cases(path: Path) -> list[dict]:
@@ -152,11 +203,30 @@ def score(cases: list[dict], rerank: bool) -> int:
     probe_total = 0
     probe_gated = 0
     probe_leaks = 0
+    scope_failures = 0
+    scope_checked = 0
+    tag_stats: dict[str, dict] = {}
     rows: list[tuple[str, str]] = []
+    scopes = Scopes()
 
     for case in cases:
         case_id = case.get("id") or case.get("query", "?")
-        results = search(case["query"], top_k, rerank)
+        collection = scopes.resolve(case["collection"]) if case.get("collection") else None
+        results = search(case["query"], top_k, rerank, collection["id"] if collection else None,
+                         case.get("search"))
+        scope_note = ""
+        if collection is not None:
+            scope_checked += 1
+            leaked = scope_leaks(results, scopes.members(collection))
+            if leaked:
+                scope_failures += 1
+                scope_note = f"  SCOPE LEAK outside {collection['name']!r}: {', '.join(leaked)}"
+            elif not case.get("relevant") and not case.get("expect_empty"):
+                rows.append((case_id, f"scope OK -- {len(results)} results, all in {collection['name']!r}"))
+                continue
+        if scope_note and not case.get("relevant") and not case.get("expect_empty"):
+            rows.append((case_id, scope_note.strip()))
+            continue
 
         if case.get("expect_empty"):
             # Unanswerable queries. With the RERANK_MIN_SCORE gate on they should
@@ -165,11 +235,11 @@ def score(cases: list[dict], rerank: bool) -> int:
             probe_total += 1
             if not results:
                 probe_gated += 1
-                rows.append((case_id, "unanswerable -- gated out"))
+                rows.append((case_id, "unanswerable -- gated out" + scope_note))
             else:
                 probe_leaks += 1
                 top = max((r.get("rerank_score") or 0.0 for r in results), default=0.0)
-                rows.append((case_id, f"unanswerable -- LEAKED {len(results)} (top {top:.2f})"))
+                rows.append((case_id, f"unanswerable -- LEAKED {len(results)} (top {top:.2f})" + scope_note))
             continue
 
         judged = case.get("relevant") or []
@@ -186,10 +256,16 @@ def score(cases: list[dict], rerank: bool) -> int:
                 hit_totals[k] += 1
             found = sum(1 for r in ranks if r is not None and r <= k)
             recall_totals[k] += found / len(judged)
+        for tag in case.get("tags") or []:
+            stats = tag_stats.setdefault(tag, {"n": 0, "hit1": 0, "hit5": 0, "rr": 0.0})
+            stats["n"] += 1
+            stats["hit1"] += int(best == 1)
+            stats["hit5"] += int(best is not None and best <= 5)
+            stats["rr"] += (1.0 / best) if best else 0.0
         found_5 = sum(1 for r in ranks if r is not None and r <= 5)
         mark = "hit" if (best is not None and best <= 5) else "MISS"
         detail = f"  recall@5 {found_5}/{len(judged)}" if len(judged) > 1 else ""
-        rows.append((case_id, f"{mark}@5  first@{best or '-'}{detail}"))
+        rows.append((case_id, f"{mark}@5  first@{best or '-'}{detail}{scope_note}"))
 
     width = max((len(cid) for cid, _ in rows), default=0)
     for case_id, note in rows:
@@ -205,6 +281,17 @@ def score(cases: list[dict], rerank: bool) -> int:
         print(f"    hit rate:  {hit}")
         print(f"    recall:    {rec}")
         print(f"    MRR:       {mrr_total / scored_cases:.2f}")
+    if tag_stats:
+        print("  by tag:")
+        tag_width = max(len(tag) for tag in tag_stats)
+        for tag in sorted(tag_stats):
+            stats = tag_stats[tag]
+            n = stats["n"]
+            print(f"    {tag.ljust(tag_width)}  n={n:<3} hit@1 {stats['hit1'] / n:.2f}   "
+                  f"hit@5 {stats['hit5'] / n:.2f}   MRR {stats['rr'] / n:.2f}")
+    if scope_checked:
+        print(f"  library scoping:  {scope_checked - scope_failures}/{scope_checked} scoped queries "
+              "stayed inside their library" + (f", {scope_failures} LEAKED" if scope_failures else ""))
     if probe_total:
         print(f"  unanswerable probes:  {probe_gated}/{probe_total} gated out"
               + (f", {probe_leaks} LEAKED" if probe_leaks else ""))
@@ -212,9 +299,10 @@ def score(cases: list[dict], rerank: bool) -> int:
         print("  nothing to score yet -- add cases to eval/queries.jsonl")
         return 0
 
-    # Non-zero exit only when not a single judged query found an answer, so this
-    # can still guard a release without depending on the (now-off) gate.
-    return 1 if (scored_cases and hit_totals[CUTOFFS[0]] == 0) else 0
+    # Non-zero exit when not a single judged query found an answer, or when a
+    # library-scoped search returned anything from outside that library (a
+    # correctness bug, unlike a soft ranking miss or a gate leak).
+    return 1 if (scored_cases and hit_totals[CUTOFFS[0]] == 0) or scope_failures else 0
 
 
 def _isotonic(pairs: list[tuple[float, int]]) -> list[tuple[float, float]]:

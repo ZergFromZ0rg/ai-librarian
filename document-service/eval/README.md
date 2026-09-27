@@ -44,6 +44,9 @@ One JSON object per line. Two kinds of case:
 | `query` | the search string, exactly as a user would type it |
 | `relevant` | one or more passages, *any* of which is an acceptable answer. Each: `document` (filename), `page` (PDF position, 1-based — same number the UI shows), optional `contains` (a distinctive phrase the passage must include) |
 | `expect_empty` | `true` for a query nothing in the library should answer — asserts the rerank gate returns zero results |
+| `collection` | optional library name: the search is scoped to that library, and any result from outside it is a **SCOPE LEAK** (hard failure). With neither `relevant` nor `expect_empty` the case is a pure scope probe |
+| `search` | optional extra `/search` fields for this case only, e.g. `{"rerank_min_score": -100}` so a scope probe returns results instead of being gated to nothing |
+| `tags` | optional labels (`"excel"`, `"multilingual"`, …); the report adds hit@1 / hit@5 / MRR per tag |
 
 A `relevant` entry is counted as retrieved when the result's filename matches,
 `page` falls inside the result's `[page, page_end]` span, and `contains` (if set)
@@ -158,6 +161,33 @@ token-protected API.
 
 The script is standard-library only — run it with any `python3`, no venv needed.
 
+## The Office corpus suites
+
+`queries.jsonl` and `answers.jsonl` are judged against the 6-book home library.
+`queries_office.jsonl` and `answers_office.jsonl` are judged against a generated,
+reproducible corpus of 24 Word / Excel / PowerPoint files, so format handling,
+library scoping and multilingual text can be checked on any machine:
+
+```bash
+cd document-service
+python eval/office_corpus.py ../library/documents     # needs the service's venv
+curl -X POST http://127.0.0.1:8010/collections -H 'Content-Type: application/json' \
+  -d '{"name": "Documents", "path": "documents"}'     # or Library -> Collections in the UI
+python eval/harness.py --url http://127.0.0.1:8010 score --queries eval/queries_office.jsonl
+python eval/ask_harness.py --url http://127.0.0.1:8010 --model ollama:qwen3:4b \
+  score --answers eval/answers_office.jsonl
+```
+
+The corpus exercises Word tables and bullet lists, multi-sheet workbooks
+(formulas, dates, a header-only sheet), slide text boxes and speaker notes,
+French / German / Japanese text, and a Word file ending in a 6,000-character
+base64 blob. Cases tagged `known-weak` record gaps found while building the set
+and are expected to miss until fixed: speaker notes are not extracted, and a
+question answered only by one spreadsheet detail row ranks poorly.
+
+Ask needs a model that emits `[n]` citations; `qwen2.5:1.5b` answers correctly
+but cites nothing, so every substantive case fails the citation check with it.
+
 ---
 
 # Answer-quality harness
@@ -188,6 +218,8 @@ One JSON object per line. `#`-prefixed and blank lines are ignored.
 | `key_points` | facts a good answer covers; scored by `--judge` only |
 | `must_cite` | list of acceptable passages (`document` + `page`); **≥1 must be retrieved** (hard), and it's a soft signal whether one was actually cited `[n]` |
 | `expect_refusal` | the library can't answer — assert the answer declines and cites nothing |
+| `collection` | optional library name: the question is scoped to it, and a source from outside it is a hard failure |
+| `tags` | optional labels; the report adds a pass count per tag |
 
 ## Deterministic checks (always run, no LLM)
 
