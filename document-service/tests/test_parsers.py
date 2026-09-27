@@ -24,14 +24,14 @@ def test_plain_text_is_split_into_bounded_pseudo_pages(tmp_path):
     assert all(len(page["text"]) <= 12_000 + 2_100 for page in pages)
 
 
-def test_csv_becomes_an_escaped_markdown_table(tmp_path):
+def test_csv_rows_become_labelled_records(tmp_path):
     source = tmp_path / "table.csv"
     source.write_text("name,note\nCamus,absurd | free\nSartre\n")
     (page,), _ = parsers.extract_source_pages(source)
-    lines = page["text"].splitlines()
-    assert lines[0] == "| name | note |"
-    assert lines[2] == "| Camus | absurd \\| free |"
-    assert lines[3] == "| Sartre |  |"  # ragged rows are padded
+    assert page["text"].split("\n\n") == [
+        "name: Camus; note: absurd | free",
+        "name: Sartre",  # a ragged row just has fewer fields
+    ]
 
 
 def test_word_headings_paragraphs_and_tables(tmp_path):
@@ -63,8 +63,32 @@ def test_excel_sheet_per_page(tmp_path):
 
     pages, _ = parsers.extract_source_pages(path)
     assert len(pages) == 1  # the empty sheet contributes nothing
-    assert pages[0]["text"].startswith("## Reading")
-    assert "| The Plague | 308 |" in pages[0]["text"]
+    assert pages[0]["text"] == "## Reading\n\nTitle: The Plague; Pages: 308"
+
+
+def test_excel_rows_are_records_with_clean_dates_and_titles(tmp_path):
+    import datetime
+
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Log"
+    sheet.append(["Q3 carrier log"])  # a title row above the header
+    sheet.append(["Date", "Owner", None, "Amount"])
+    sheet.append([datetime.datetime(2026, 2, 3), "Chidi", "late twice", 406.29])
+    sheet.append([datetime.datetime(2026, 2, 4, 14, 30), None, "on time", None])
+    workbook.create_sheet("Blank").append(["Header only"])
+    path = tmp_path / "log.xlsx"
+    workbook.save(path)
+
+    log, blank = parsers.extract_source_pages(path)[0]
+    assert log["text"].split("\n\n") == [
+        "## Log",
+        "Q3 carrier log",
+        "Date: 2026-02-03; Owner: Chidi; Column 3: late twice; Amount: 406.29",
+        "Date: 2026-02-04 14:30; Column 3: on time",
+    ]
+    assert blank["text"] == "## Blank\n\nHeader only"
 
 
 def test_powerpoint_slide_per_page(tmp_path):
@@ -80,6 +104,25 @@ def test_powerpoint_slide_per_page(tmp_path):
     assert page["text"].startswith("# Absurdism")  # the slide title, once
     assert page["text"].count("Absurdism") == 1
     assert "Revolt, freedom, passion" in page["text"]
+
+
+def test_powerpoint_speaker_notes_are_indexed(tmp_path):
+    pptx = pytest.importorskip("pptx")
+    presentation = pptx.Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+    slide.shapes.title.text = "Absurdism"
+    slide.placeholders[1].text = "Revolt"
+    slide.notes_slide.notes_text_frame.text = "Mention the rock and the hill here."
+    bare = presentation.slides.add_slide(presentation.slide_layouts[5])  # title only
+    bare.shapes.title.text = "Q&A"
+    bare.notes_slide.notes_text_frame.text = "Leave ten minutes for questions."
+    path = tmp_path / "talk.pptx"
+    presentation.save(path)
+
+    pages, _ = parsers.extract_source_pages(path)
+    assert [page["page"] for page in pages] == [1, 2]
+    assert pages[0]["text"].endswith("Speaker notes: Mention the rock and the hill here.")
+    assert "Leave ten minutes for questions." in pages[1]["text"]  # notes alone keep a slide
 
 
 def _mixed_pages():

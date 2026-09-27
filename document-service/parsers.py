@@ -9,6 +9,7 @@ normal chunker can then treat every format consistently.
 from __future__ import annotations
 
 import csv
+import datetime
 import re
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -82,6 +83,50 @@ def location_label(file_type: str | None, page, page_end=None) -> str:
 
 def _clean(value) -> str:
     return " ".join(str(value or "").replace("\x00", "").split())
+
+
+def _cell_text(value) -> str:
+    """A spreadsheet cell as text; a date with no time of day drops the
+    meaningless ``00:00:00`` openpyxl gives every date cell."""
+    if isinstance(value, datetime.datetime):
+        if value.time() == datetime.time(0):
+            return value.date().isoformat()
+        return value.isoformat(sep=" ", timespec="minutes")
+    return _clean(value)
+
+
+def _records_markdown(rows: List[List[str]]) -> str:
+    """Tabular data (a sheet, a CSV) as one ``Header: value; ...`` record per
+    row, each its own paragraph.
+
+    Rendered as a Markdown grid, a row's meaning ("Owner: Chidi") only exists
+    by lining it up with a header many lines away, and the cross-encoder
+    reranker cannot do that: a single matching row buried in a sheet-sized
+    ``| a | b |`` table scored below the relevance gate where the same rows as
+    labelled records scored well above it. Records also let the chunker pack
+    a few rows per passage instead of treating the sheet as one block.
+    """
+    rows = [row for row in rows if any(cell for cell in row)]
+    title = []
+    # A lone leading cell ("Q3 expenses") is a title, not a one-column header.
+    while len(rows) > 1 and sum(1 for cell in rows[0] if cell) < 2 <= max(
+        sum(1 for cell in row if cell) for row in rows[1:]
+    ):
+        title.append(next(cell for cell in rows.pop(0) if cell))
+    if not rows:
+        return "\n\n".join(title)
+    header = [cell or f"Column {number}" for number, cell in enumerate(rows[0], start=1)]
+    records = []
+    for row in rows[1:]:
+        pairs = [
+            f"{header[i] if i < len(header) else f'Column {i + 1}'}: {cell}"
+            for i, cell in enumerate(row)
+            if cell
+        ]
+        records.append("; ".join(pairs))
+    if not records:  # a header-only sheet still says what it is for
+        records.append("; ".join(cell for cell in rows[0] if cell))
+    return "\n\n".join([*title, *records])
 
 
 def _pages_from_text(text: str, *, format_name: str = "markdown") -> List[Dict]:
@@ -161,7 +206,7 @@ def _extract_excel(path: Path) -> List[Dict]:
             rows = []
             used_cells = 0
             for row in sheet.iter_rows(values_only=True):
-                values = [_clean(value).replace("|", "\\|") for value in row]
+                values = [_cell_text(value) for value in row]
                 while values and not values[-1]:
                     values.pop()
                 if not values:
@@ -173,12 +218,8 @@ def _extract_excel(path: Path) -> List[Dict]:
                 rows.append(values)
             if not rows:
                 continue
-            width = max(len(row) for row in rows)
-            normalized = [row + [""] * (width - len(row)) for row in rows]
-            header = normalized[0]
-            text = [f"## {sheet.title}", "", "| " + " | ".join(header) + " |", "| " + " | ".join("---" for _ in header) + " |"]
-            text.extend("| " + " | ".join(row) + " |" for row in normalized[1:])
-            pages.append({"page": index, "text": "\n".join(text), "format": "markdown", "needs_ocr": False})
+            text = f"## {sheet.title}\n\n{_records_markdown(rows)}"
+            pages.append({"page": index, "text": text, "format": "markdown", "needs_ocr": False})
     finally:
         workbook.close()
     return pages
@@ -210,6 +251,11 @@ def _extract_powerpoint(path: Path) -> List[Dict]:
                     cells = [_clean(cell.text).replace("|", "\\|") for cell in row.cells]
                     if any(cells):
                         lines.append("| " + " | ".join(cells) + " |")
+        # Presenters often put the actual explanation in the notes, not on the slide.
+        notes = _clean(slide.notes_slide.notes_text_frame.text) if slide.has_notes_slide else ""
+        if notes:
+            prefix = "" if notes.lower().startswith(("speaker notes", "notes:")) else "Speaker notes: "
+            lines.append(prefix + notes)
         if len(lines) > 1:
             pages.append({"page": index, "text": "\n\n".join(lines), "format": "markdown", "needs_ocr": False})
     return pages
@@ -220,14 +266,11 @@ def _extract_csv(path: Path) -> List[Dict]:
         rows = list(csv.reader(source))
     if not rows:
         return []
-    width = max(len(row) for row in rows)
-    normalized = [row + [""] * (width - len(row)) for row in rows]
-    header = [_clean(value).replace("|", "\\|") for value in normalized[0]]
-    lines = ["| " + " | ".join(header) + " |", "| " + " | ".join("---" for _ in header) + " |"]
-    lines.extend("| " + " | ".join(_clean(value).replace("|", "\\|") for value in row) + " |" for row in normalized[1:50_001])
-    if len(normalized) > 50_001:
-        lines.append("\n[CSV truncated after 50,000 rows]")
-    return [{"page": 1, "text": "\n".join(lines), "format": "markdown", "needs_ocr": False}]
+    cleaned = [[_clean(value) for value in row] for row in rows[:50_001]]
+    text = _records_markdown([row for row in cleaned if any(row)])
+    if len(rows) > 50_001:
+        text += "\n\n[CSV truncated after 50,000 rows]"
+    return [{"page": 1, "text": text, "format": "markdown", "needs_ocr": False}] if text else []
 
 
 def _tidy_tesseract(text: str) -> str:
