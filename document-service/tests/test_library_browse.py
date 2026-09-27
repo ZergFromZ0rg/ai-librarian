@@ -356,3 +356,19 @@ def wait_for_job(client, job_id, timeout=15):
             return state
         time.sleep(0.1)
     raise AssertionError(f"ingest job {job_id} did not finish")
+
+
+def test_a_new_collection_counts_files_the_legacy_scan_imported_first(service, tmp_path):
+    module, client, _indexed = service
+    root = _library(tmp_path)
+    (root / "Docs").mkdir()
+    (root / "Docs" / "memo.pdf").write_bytes(make_pdf("A memo about absurd freedom."))
+    assert module._auto_ingest_scan() == 1  # the legacy root claims it first
+    [doc] = client.get("/documents").json()["documents"]
+    wait_for_status(client, doc["document_id"], "indexed")
+
+    created = client.post("/collections", json={"name": "Docs", "path": "Docs"}).json()
+    wait_for_job(client, created["job"]["job_id"])  # sees the file as a duplicate
+
+    [docs] = client.get("/collections").json()["collections"]
+    assert docs["document_count"] == 1

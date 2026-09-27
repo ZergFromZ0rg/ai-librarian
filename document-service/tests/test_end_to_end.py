@@ -352,6 +352,21 @@ def test_a_large_scan_waits_for_ocr_approval_then_indexes(service, monkeypatch):
     assert client.post(f"/documents/{doc_id}/approve-ocr").status_code == 409
 
 
+def test_ocr_mush_heuristic_never_drops_text_from_a_non_pdf_source(service):
+    # A short text/Office file is a single pseudo-page, so a false "garbled"
+    # verdict (here from OCR-like mush; in practice a base64 blob) used to drop
+    # the whole document. Only a PDF text layer can be bad OCR.
+    _module, client, _indexed = service
+    upload = client.post(
+        "/documents",
+        files={"file": ("notes.txt", f"{_CLEAN_PROSE}\n\n{_OCR_MUSH}".encode(), "text/plain")},
+    )
+    assert upload.status_code == 201
+    metadata = wait_for_status(client, upload.json()["document_id"], "indexed")
+    assert metadata["chunks"] > 0
+    assert not metadata["extraction_notes"]
+
+
 def test_document_with_a_few_corrupt_pages_indexes_the_rest_with_a_note(service):
     _module, client, _indexed = service
     pages = [_CLEAN_PROSE] * 10 + [_OCR_MUSH] * 2

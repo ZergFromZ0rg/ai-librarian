@@ -640,6 +640,16 @@ def collection_for_source_path(source_path: str, collections: Optional[List[dict
     return max(candidates, key=lambda item: len(item.get("path") or ""))["id"]
 
 
+def _belongs_to_collection(doc: dict, collection: dict) -> bool:
+    """Membership is the recorded ``collection_id`` or, for files imported
+    before the collection existed, a ``source_path`` inside its folder."""
+    if doc.get("collection_id") == collection["id"]:
+        return True
+    root = collection.get("path") or ""
+    source = doc.get("source_path") or ""
+    return bool(source) and (not root or source == root or source.startswith(root + "/"))
+
+
 def collection_document_ids(collection_id: Optional[str]) -> Optional[List[str]]:
     """Every document belonging to one library, for scoping search and Ask.
 
@@ -657,14 +667,7 @@ def collection_document_ids(collection_id: Optional[str]) -> Optional[List[str]]
     root = collection.get("path") or ""
     if collection.get("legacy") and not root:
         return None  # the implicit library is the whole mount: no filter
-    ids = []
-    for doc in list_metadata():
-        source = doc.get("source_path") or ""
-        if doc.get("collection_id") == collection_id or (
-            source and (not root or source == root or source.startswith(root + "/"))
-        ):
-            ids.append(doc["document_id"])
-    return ids
+    return [doc["document_id"] for doc in list_metadata() if _belongs_to_collection(doc, collection)]
 
 
 def validate_doc_id(doc_id: str) -> str:
@@ -1059,7 +1062,11 @@ def build_document_artifacts(
             raise ValueError(fatal_reason)
 
     total_pages = len(pages)
-    garbled = set(garbled_page_indices(pages))
+    # Likewise PDF-only: Office and text sources carry their text exactly as
+    # written, so an OCR-mush verdict there is a false positive (a base64
+    # blob, a table of codes) and would drop real content -- for a short file,
+    # its only pseudo-page and so the whole document.
+    garbled = set(garbled_page_indices(pages)) if file_type == "pdf" else set()
     extraction_notes = None
     if used_ocr:
         read_by = collections.Counter(page["ocr"] for page in pages if page.get("ocr"))
@@ -2718,11 +2725,11 @@ class CollectionPatch(BaseModel):
 
 
 def _collection_response() -> List[dict]:
-    counts = collections.Counter(doc.get("collection_id") for doc in list_metadata())
-    result = []
-    for collection in configured_collections():
-        result.append({**collection, "document_count": counts.get(collection["id"], 0)})
-    return result
+    docs = list_metadata()
+    return [
+        {**collection, "document_count": sum(_belongs_to_collection(doc, collection) for doc in docs)}
+        for collection in configured_collections()
+    ]
 
 
 @app.get("/collections")
