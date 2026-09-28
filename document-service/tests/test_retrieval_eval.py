@@ -33,6 +33,9 @@ def test_collection_membership_uses_recorded_id_or_folder():
     assert harness.in_collection({"source_path": "documents/a.docx", "collection_id": "legacy-root"}, DOCS)
     assert not harness.in_collection({"source_path": "documents-old/a.docx"}, DOCS)
     assert not harness.in_collection({"source_path": None}, DOCS)  # an upload
+    notes = {"id": "notes", "name": "Notes", "path": None, "builtin": True}
+    assert harness.in_collection({"collection_id": "notes"}, notes)
+    assert not harness.in_collection({"source_path": "documents/a.docx"}, notes)
     assert harness.scope_leaks(
         [{"document": "A.docx"}, {"document": "newton.pdf"}, {"document": "newton.pdf"}], {"a.docx"}
     ) == ["newton.pdf"]

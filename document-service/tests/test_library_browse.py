@@ -274,7 +274,7 @@ def test_collections_scan_only_their_own_folders(service, tmp_path):
         (root / folder / f"{folder.lower()}.pdf").write_bytes(make_pdf(text))
 
     # Before any collection exists, the legacy single root stands in.
-    legacy = client.get("/collections").json()["collections"]
+    legacy = [c for c in client.get("/collections").json()["collections"] if not c.get("builtin")]
     assert [c["id"] for c in legacy] == ["legacy-root"]
 
     books = client.post("/collections", json={"name": "Books", "path": "Books"})
@@ -286,7 +286,7 @@ def test_collections_scan_only_their_own_folders(service, tmp_path):
     work = client.post("/collections", json={"name": "Work", "path": "Work", "auto_scan": False}).json()
     wait_for_job(client, work["job"]["job_id"])
 
-    listed = {c["name"]: c for c in client.get("/collections").json()["collections"]}
+    listed = {c["name"]: c for c in client.get("/collections").json()["collections"] if not c.get("builtin")}
     assert set(listed) == {"Books", "Work"}  # legacy fallback gone once real ones exist
     assert listed["Books"]["document_count"] == 1 and listed["Work"]["auto_scan"] is False
     docs = {d["source_path"]: d for d in client.get("/documents").json()["documents"]}
@@ -370,5 +370,5 @@ def test_a_new_collection_counts_files_the_legacy_scan_imported_first(service, t
     created = client.post("/collections", json={"name": "Docs", "path": "Docs"}).json()
     wait_for_job(client, created["job"]["job_id"])  # sees the file as a duplicate
 
-    [docs] = client.get("/collections").json()["collections"]
+    [docs] = [c for c in client.get("/collections").json()["collections"] if not c.get("builtin")]
     assert docs["document_count"] == 1

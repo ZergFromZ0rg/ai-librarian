@@ -52,6 +52,14 @@ COLUMNS = (
     "owned",
     # When the reader marked it read; NULL = unread.
     "read_at",
+    # Virtual shelves (see shelves.py). `shelf_suggested` is recomputed
+    # automatically ("Books/Philosophy/Albert Camus"); `shelf` is the reader's
+    # choice and always wins. `author` / `subject` are what the suggestion
+    # was built from. Files on disk are never moved.
+    "author",
+    "subject",
+    "shelf",
+    "shelf_suggested",
 )
 UPDATABLE_COLUMNS = frozenset(COLUMNS) - {"document_id"}
 
@@ -92,7 +100,11 @@ CREATE TABLE IF NOT EXISTS documents (
     kind                  TEXT,
     kind_override         TEXT,
     owned                 INTEGER,
-    read_at               TEXT
+    read_at               TEXT,
+    author                TEXT,
+    subject               TEXT,
+    shelf                 TEXT,
+    shelf_suggested       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_documents_content_sha256 ON documents (content_sha256);
 CREATE INDEX IF NOT EXISTS idx_documents_uploaded_at ON documents (uploaded_at DESC);
@@ -141,6 +153,10 @@ class MetadataStore:
             ("kind_override", "TEXT"),
             ("owned", "INTEGER"),
             ("read_at", "TEXT"),
+            ("author", "TEXT"),
+            ("subject", "TEXT"),
+            ("shelf", "TEXT"),
+            ("shelf_suggested", "TEXT"),
         ):
             if column not in existing:
                 self._conn.execute(

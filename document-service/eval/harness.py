@@ -133,6 +133,8 @@ class Scopes:
 def in_collection(doc: dict, collection: dict) -> bool:
     if doc.get("collection_id") == collection["id"]:
         return True
+    if collection.get("builtin"):  # Notes: no folder, so membership is by id alone
+        return False
     root = (collection.get("path") or "").strip("/")
     source = doc.get("source_path") or ""
     return bool(source) and (not root or source == root or source.startswith(root + "/"))

@@ -283,6 +283,7 @@ export default function useAsk({ apiBase, activeId, onActiveIdChange, onConversa
             ...(options.topK ? { top_k: options.topK } : {}),
             ...(typeof options.minScore === "number" ? { min_score: options.minScore } : {}),
             ...(options.documentId ? { document_id: options.documentId } : {}),
+            ...(options.shelf ? { shelf: options.shelf } : {}),
             ...(options.collectionId ? { collection_id: options.collectionId } : {}),
             ...(Object.keys(providerKeys).length ? { provider_keys: providerKeys } : {}),
           },

@@ -346,3 +346,36 @@ def extract_source_pages(
     if kind == "csv":
         return _extract_csv(source), False
     return _pages_from_text(source.read_text(encoding="utf-8", errors="replace")), False
+
+
+def document_author(path: str | Path) -> str | None:
+    """The author recorded in a file's own properties (PDF info, Office core
+    properties), unvalidated -- ``shelves.normalize_author`` filters junk such
+    as the authoring tool's name. None when absent or unreadable."""
+    path = Path(path)
+    kind = file_type_for_path(path)
+    try:
+        if kind == "pdf":
+            import fitz
+
+            with fitz.open(str(path)) as document:
+                return (document.metadata or {}).get("author") or None
+        if kind == "word":
+            from docx import Document
+
+            return Document(str(path)).core_properties.author or None
+        if kind == "powerpoint":
+            from pptx import Presentation
+
+            return Presentation(str(path)).core_properties.author or None
+        if kind == "excel":
+            from openpyxl import load_workbook
+
+            workbook = load_workbook(filename=str(path), read_only=True)
+            try:
+                return workbook.properties.creator or None
+            finally:
+                workbook.close()
+    except Exception:
+        return None
+    return None

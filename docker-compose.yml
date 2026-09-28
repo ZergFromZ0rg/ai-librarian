@@ -61,6 +61,10 @@ services:
       # A lightweight passive scan; use the UI's Scan button when you want an
       # immediate update.  0 disables background discovery completely.
       AUTO_INGEST_INTERVAL_SECONDS: ${AUTO_INGEST_INTERVAL_SECONDS:-900}
+      # Background footprint: idle models unload and extraction workers exit
+      # after this many idle seconds (0 = keep loaded); extraction niceness.
+      MODEL_IDLE_UNLOAD_SECONDS: ${MODEL_IDLE_UNLOAD_SECONDS:-600}
+      EXTRACTION_NICE: ${EXTRACTION_NICE:-10}
       OCR_MODE: ${OCR_MODE:-auto}
       OCR_LANGUAGES: ${OCR_LANGUAGES:-eng}
       # auto = Tesseract + the equation-aware Nougat model; tesseract = text only.

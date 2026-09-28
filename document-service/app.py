@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from starlette.datastructures import Headers, MutableHeaders
 
 import generation
+import shelves
 from chunking import (
     build_semantic_groups,
     collapse_blank_lines,
@@ -39,7 +40,11 @@ from chunking import (
 from conversations import ConversationStore
 from database import MetadataStore
 from doc_kind import detect_kind
-from embeddings import DEFAULT_MODEL as EMBEDDING_MODEL, embed_texts
+from embeddings import (
+    DEFAULT_MODEL as EMBEDDING_MODEL,
+    embed_texts,
+    unload_if_idle as unload_embedder_if_idle,
+)
 from extraction import (
     assess_scanned,
     assess_text_layer,
@@ -51,13 +56,19 @@ from ocr import estimate_seconds as estimate_ocr_seconds
 from parsers import (
     OCR_APPROVAL_MARKER,
     SUPPORTED_EXTENSIONS,
+    document_author,
     extract_source_pages,
     file_type_for_path,
     is_supported_path,
     location_label,
     media_type_for,
 )
-from reranker import DEFAULT_MODEL as RERANK_MODEL, model_info, rerank
+from reranker import (
+    DEFAULT_MODEL as RERANK_MODEL,
+    model_info,
+    rerank,
+    unload_if_idle as unload_reranker_if_idle,
+)
 from vector_store import (
     FUSION_METHOD,
     INDEX_SCHEMA_VERSION,
@@ -182,6 +193,14 @@ RERANK_MAX_WORKERS = int(os.environ.get("RERANK_MAX_WORKERS", "2"))
 # concurrently, threads would just queue up behind that lock. Each worker
 # loads its own copy of the layout model, so keep this modest.
 INDEX_EXTRACTION_WORKERS = int(os.environ.get("INDEX_EXTRACTION_WORKERS", "2"))
+# Background footprint. After this many idle seconds the embedding and
+# reranker models are unloaded and the extraction worker processes exit,
+# giving their memory back; the next search or upload loads them again (a
+# few seconds' delay). 0 keeps everything resident.
+MODEL_IDLE_UNLOAD_SECONDS = int(os.environ.get("MODEL_IDLE_UNLOAD_SECONDS", "600"))
+# Niceness of extraction worker processes, so a big import yields the CPU to
+# whatever else the machine is doing. 0 leaves them at normal priority.
+EXTRACTION_NICE = int(os.environ.get("EXTRACTION_NICE", "10"))
 RERANK_TIMEOUT = float(os.environ.get("RERANK_TIMEOUT", "15"))
 # How many fused candidates the cross-encoder actually scores. Dense+sparse
 # fusion is only a coarse filter; the reranker is what picks the winning
@@ -392,7 +411,9 @@ class SearchRequest(BaseModel):
     filename: Optional[str] = Field(default=None, max_length=255)
     # Restrict to one library (a named collection); "legacy-root" is the
     # implicit single library of an installation without collections.
-    collection_id: Optional[str] = Field(default=None, pattern=r"^(?:[a-f0-9]{12}|legacy-root)$")
+    collection_id: Optional[str] = Field(default=None, pattern=r"^(?:[a-f0-9]{12}|legacy-root|notes)$")
+    # Narrow to one virtual shelf and its sub-shelves ("Books/Philosophy").
+    shelf: Optional[str] = Field(default=None, max_length=500)
     rerank: bool = False
     # A floor on how many fused candidates the cross-encoder scores; the server's
     # RERANK_CANDIDATES applies on top of it. Left at the default, the pool is
@@ -419,6 +440,22 @@ class DocumentPatch(BaseModel):
     owned: Optional[bool] = None
     read: Optional[bool] = None
     kind: Optional[str] = Field(default=None, pattern=r"^(book|paper|document|auto)$")
+    # "Books/Philosophy/Albert Camus"; null or "" goes back to the suggestion.
+    shelf: Optional[str] = Field(default=None, max_length=500)
+
+
+class NoteBody(BaseModel):
+    text: str = Field(min_length=1, max_length=20_000)
+
+
+class ShelfAccept(BaseModel):
+    # Omitted: accept every pending suggestion.
+    document_ids: Optional[List[str]] = Field(default=None, max_length=10_000)
+
+
+class ShelfMove(BaseModel):
+    source: str = Field(min_length=1, max_length=500)
+    target: str = Field(min_length=1, max_length=500)
 
 
 class ConversationBody(BaseModel):
@@ -447,7 +484,9 @@ class AskRequest(BaseModel):
     filename: Optional[str] = Field(default=None, max_length=255)
     # Restrict to one library (a named collection); "legacy-root" is the
     # implicit single library of an installation without collections.
-    collection_id: Optional[str] = Field(default=None, pattern=r"^(?:[a-f0-9]{12}|legacy-root)$")
+    collection_id: Optional[str] = Field(default=None, pattern=r"^(?:[a-f0-9]{12}|legacy-root|notes)$")
+    # Narrow to one virtual shelf and its sub-shelves ("Books/Philosophy").
+    shelf: Optional[str] = Field(default=None, max_length=500)
     top_k: int = Field(default=10, ge=1, le=20)
     # "provider:model" from GET /ask/models; unknown or absent -> the server default.
     model: Optional[str] = Field(default=None, max_length=120)
@@ -490,6 +529,14 @@ RERANK_EXECUTOR = None
 EXTRACTION_EXECUTOR = None
 
 
+def _lower_worker_priority() -> None:
+    if EXTRACTION_NICE > 0:
+        try:
+            os.nice(EXTRACTION_NICE)
+        except OSError:
+            pass
+
+
 def _new_extraction_executor() -> concurrent.futures.ProcessPoolExecutor:
     # "fork" (Linux/Docker's default anyway, made explicit here): the worker
     # only ever runs build_document_artifacts, a pure function of its plain
@@ -507,6 +554,7 @@ def _new_extraction_executor() -> concurrent.futures.ProcessPoolExecutor:
     load_tokenizer()
     return concurrent.futures.ProcessPoolExecutor(
         max_workers=INDEX_EXTRACTION_WORKERS,
+        initializer=_lower_worker_priority,
         mp_context=multiprocessing.get_context("fork"),
     )
 
@@ -659,6 +707,11 @@ def _belongs_to_collection(doc: dict, collection: dict) -> bool:
     return bool(source) and (not root or source == root or source.startswith(root + "/"))
 
 
+# Notes jotted in the app form a built-in library of their own. It has no
+# folder, so it is never scanned, and membership is by collection_id only.
+NOTES_COLLECTION_ID = "notes"
+
+
 def collection_document_ids(collection_id: Optional[str]) -> Optional[List[str]]:
     """Every document belonging to one library, for scoping search and Ask.
 
@@ -668,6 +721,8 @@ def collection_document_ids(collection_id: Optional[str]) -> Optional[List[str]]
     """
     if not collection_id:
         return None
+    if collection_id == NOTES_COLLECTION_ID:
+        return [doc["document_id"] for doc in list_metadata() if doc.get("collection_id") == NOTES_COLLECTION_ID]
     collection = next(
         (item for item in configured_collections() if item["id"] == collection_id), None
     )
@@ -677,6 +732,20 @@ def collection_document_ids(collection_id: Optional[str]) -> Optional[List[str]]
     if collection.get("legacy") and not root:
         return None  # the implicit library is the whole mount: no filter
     return [doc["document_id"] for doc in list_metadata() if _belongs_to_collection(doc, collection)]
+
+
+def scope_document_ids(collection_id: Optional[str], shelf: Optional[str] = None) -> Optional[List[str]]:
+    """The documents a search may return: one library's, narrowed to one shelf
+    (and its sub-shelves) when given. None means no restriction."""
+    ids = collection_document_ids(collection_id)
+    if not shelf:
+        return ids
+    try:
+        wanted = shelves.normalize_shelf(shelf)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    on_shelf = [doc["document_id"] for doc in list_metadata() if shelves.on_shelf(doc, wanted)]
+    return on_shelf if ids is None else [doc_id for doc_id in on_shelf if doc_id in set(ids)]
 
 
 def validate_doc_id(doc_id: str) -> str:
@@ -884,6 +953,76 @@ def backfill_document_kinds() -> None:
                 pass
 
 
+_SUBJECT_VECTORS: dict = {}
+_SUBJECT_LOCK = threading.Lock()
+_WORDISH = re.compile(r"[^\W\d_]{3,}")
+
+
+def _subject_vectors() -> dict:
+    """Each shelf subject's description, embedded once per process."""
+    with _SUBJECT_LOCK:
+        if not _SUBJECT_VECTORS:
+            labels = list(shelves.SUBJECTS)
+            vectors = embed_texts([shelves.SUBJECTS[label] for label in labels], kind="query")
+            _SUBJECT_VECTORS.update(zip(labels, vectors))
+        return dict(_SUBJECT_VECTORS)
+
+
+def _document_vector(doc_id: str) -> Optional[List[float]]:
+    """A document's gist for subject matching: the mean embedding of its most
+    word-rich early passages (a spreadsheet's opening sheet may be all figures)."""
+    chunks = read_json(CHUNKS_DIR / f"{doc_id}.json")
+    texts = [chunk.get("embedding_text") or chunk.get("text") or "" for chunk in chunks[:40]]
+    texts = [text for text in sorted(texts, key=lambda t: -len(_WORDISH.findall(t)))[:8] if text.strip()]
+    return shelves.mean_vector(embed_texts(texts)) if texts else None
+
+
+def _first_page_texts(doc_id: str, count: int = 3) -> List[str]:
+    try:
+        pages = read_json(EXTRACTED_DIR / f"{doc_id}.json").get("pages") or []
+    except Exception:
+        return []
+    return [page.get("text") or "" for page in pages[:count]]
+
+
+def _shelf_fields(metadata: dict, kind: Optional[str]) -> dict:
+    """A document's author, subject and suggested shelf (see shelves.py), for
+    ``kind`` (the reader's override, else the detected kind). Never the
+    reader's own ``shelf``. Best effort: {} when anything fails."""
+    doc_id = metadata["document_id"]
+    try:
+        author = subject = None
+        if kind != "note":
+            author = (
+                shelves.normalize_author(document_author(pdf_path(metadata)))
+                or shelves.author_from_filename(metadata.get("filename") or "")
+                or shelves.author_from_text(_first_page_texts(doc_id))
+            )
+            subject = shelves.classify_subject(_document_vector(doc_id), _subject_vectors())
+        return {"author": author, "subject": subject, "shelf_suggested": shelves.suggest_shelf(kind, subject, author)}
+    except Exception:
+        logger.warning("Could not suggest a shelf for document %s", doc_id, exc_info=True)
+        return {}
+
+
+def suggest_document_shelf(doc_id: str) -> Optional[dict]:
+    """Recompute and store a document's suggested shelf."""
+    metadata = read_metadata(doc_id)
+    fields = _shelf_fields(metadata, metadata.get("kind_override") or metadata.get("kind"))
+    return STORE.update(doc_id, fields) if fields else None
+
+
+def backfill_document_details() -> None:
+    """Once per start, in the background: classify documents indexed before
+    kind detection, then suggest shelves for those indexed before shelves."""
+    backfill_document_kinds()
+    for doc in list_metadata():
+        if SHUTDOWN.is_set():
+            return
+        if doc.get("indexing_status") == "indexed" and not doc.get("shelf_suggested"):
+            suggest_document_shelf(doc["document_id"])
+
+
 def _embed_and_finish(doc_id: str) -> None:
     """Embed and upsert a document's already-extracted chunks, then mark it
     indexed. Runs under the document's lock: the embedding model, Qdrant
@@ -902,6 +1041,9 @@ def _embed_and_finish(doc_id: str) -> None:
                 if indexed_batch:
                     vector_dim = len(indexed_batch[0]["embedding"])
                     upsert_chunks(indexed_batch)
+            metadata = read_metadata(doc_id)
+            kind = _detect_document_kind(doc_id, metadata.get("pages") or 0)
+            # One update: a document is never seen as indexed without its shelf.
             update_metadata(
                 doc_id,
                 indexing_status="indexed",
@@ -910,7 +1052,8 @@ def _embed_and_finish(doc_id: str) -> None:
                 embedding_model=EMBEDDING_MODEL,
                 vector_dim=vector_dim,
                 index_schema_version=INDEX_SCHEMA_VERSION,
-                kind=_detect_document_kind(doc_id, read_metadata(doc_id).get("pages") or 0),
+                kind=kind,
+                **_shelf_fields(metadata, metadata.get("kind_override") or kind),
             )
             update_ingest_entry(doc_id, "indexed")
         except Exception as exc:
@@ -936,6 +1079,7 @@ def index_worker() -> None:
     """
     global EXTRACTION_EXECUTOR
     pending: dict = {}
+    last_extraction = time.monotonic()
     while not SHUTDOWN.is_set():
         try:
             INDEX_SIGNAL.get(timeout=0.5 if pending else INDEX_POLL_SECONDS)
@@ -961,6 +1105,9 @@ def index_worker() -> None:
                 except Exception as exc:
                     _fail_indexing(doc_id, str(exc) or exc.__class__.__name__)
                     continue
+                last_extraction = time.monotonic()
+                if EXTRACTION_EXECUTOR is None:  # shut down while idle
+                    EXTRACTION_EXECUTOR = _new_extraction_executor()
                 try:
                     future = EXTRACTION_EXECUTOR.submit(
                         build_document_artifacts,
@@ -996,7 +1143,18 @@ def index_worker() -> None:
                 _embed_and_finish(doc_id)
 
         if not pending:
+            if (
+                EXTRACTION_EXECUTOR is not None
+                and MODEL_IDLE_UNLOAD_SECONDS > 0
+                and time.monotonic() - last_extraction > MODEL_IDLE_UNLOAD_SECONDS
+            ):
+                # Nothing to extract for a while: let the worker processes
+                # (each holding a layout model) exit. Recreated on demand.
+                EXTRACTION_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+                EXTRACTION_EXECUTOR = None
+                logger.info("Extraction workers idle; shut them down to free memory")
             continue
+        last_extraction = time.monotonic()
         done, _ = concurrent.futures.wait(
             pending.keys(), timeout=1, return_when=concurrent.futures.FIRST_COMPLETED
         )
@@ -1449,6 +1607,18 @@ def recover_interrupted_work() -> None:
     signal_index_worker()
 
 
+def idle_reaper() -> None:
+    """Unload the embedding and reranker models once nothing has used them
+    for MODEL_IDLE_UNLOAD_SECONDS (see its definition)."""
+    while not SHUTDOWN.wait(60):
+        for name, unload in (("embedding", unload_embedder_if_idle), ("reranker", unload_reranker_if_idle)):
+            try:
+                if unload(MODEL_IDLE_UNLOAD_SECONDS):
+                    logger.info("Unloaded the idle %s model to free memory", name)
+            except Exception:
+                logger.warning("Could not unload the idle %s model", name, exc_info=True)
+
+
 def start_workers() -> None:
     global WORKER_THREADS, RERANK_EXECUTOR, EXTRACTION_EXECUTOR
     if any(thread.is_alive() for thread in WORKER_THREADS):
@@ -1464,13 +1634,21 @@ def start_workers() -> None:
     # connections (STORE, Qdrant, the embedding model) -- exactly the case
     # fork-in-a-threaded-process is safe for, since the child never needs
     # any lock it might have inherited mid-acquisition.
-    EXTRACTION_EXECUTOR = _new_extraction_executor()
+    #
+    # Created on first use (see index_worker), not here: a service that
+    # starts with nothing to index never spawns the worker processes. The
+    # small tokenizer they inherit is still loaded now, so the first upload
+    # does not pay for it.
+    load_tokenizer()
+    EXTRACTION_EXECUTOR = None
     WORKER_THREADS = [
         threading.Thread(target=index_worker, daemon=True, name="index-worker"),
         threading.Thread(target=ingest_worker, daemon=True, name="ingest-worker"),
         threading.Thread(target=recover_interrupted_work, daemon=True, name="recovery-worker"),
-        threading.Thread(target=backfill_document_kinds, daemon=True, name="kind-backfill"),
+        threading.Thread(target=backfill_document_details, daemon=True, name="detail-backfill"),
     ]
+    if MODEL_IDLE_UNLOAD_SECONDS > 0:
+        WORKER_THREADS.append(threading.Thread(target=idle_reaper, daemon=True, name="idle-reaper"))
     if AUTO_INGEST_INTERVAL_SECONDS > 0:
         WORKER_THREADS.append(
             threading.Thread(target=auto_ingest_worker, daemon=True, name="auto-ingest-worker")
@@ -2217,9 +2395,9 @@ async def approve_ocr(doc_id: str):
 
 @app.patch("/documents/{doc_id}")
 async def patch_document(doc_id: str, patch: DocumentPatch):
-    """The reader's own marks on a document: owned (for books), read, and a
-    correction to the detected kind."""
-    await asyncio.to_thread(read_metadata, doc_id)
+    """The reader's own marks on a document: owned (for books), read, a
+    correction to the detected kind, and the shelf it sits on."""
+    metadata = await asyncio.to_thread(read_metadata, doc_id)
     changes = {}
     sent = patch.model_fields_set
     if "owned" in sent:
@@ -2228,11 +2406,161 @@ async def patch_document(doc_id: str, patch: DocumentPatch):
         changes["read_at"] = utc_now() if patch.read else None
     if "kind" in sent and patch.kind is not None:
         changes["kind_override"] = None if patch.kind == "auto" else patch.kind
+        # The top-level shelf follows the kind (Books vs Papers); author and
+        # subject were already worked out, so no re-embedding is needed.
+        kind = changes["kind_override"] or metadata.get("kind")
+        changes["shelf_suggested"] = shelves.suggest_shelf(kind, metadata.get("subject"), metadata.get("author"))
+    if "shelf" in sent:
+        try:
+            changes["shelf"] = shelves.normalize_shelf(patch.shelf)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not changes:
         return await asyncio.to_thread(read_metadata, doc_id)
     # Not update_metadata(): a reader's mark isn't a pipeline change, so it
     # shouldn't bump updated_at (which orders the indexing queue).
     return await asyncio.to_thread(STORE.update, doc_id, changes)
+
+
+def _note_title(text: str) -> str:
+    first = next((line.strip(" #*-\t") for line in text.splitlines() if line.strip(" #*-\t")), "Note")
+    return first if len(first) <= 80 else first[:79].rstrip() + "…"
+
+
+def _note_response(doc: dict) -> dict:
+    try:
+        text = pdf_path(doc).read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    return {
+        "document_id": doc["document_id"],
+        "title": doc.get("title"),
+        "text": text,
+        "created_at": doc.get("uploaded_at"),
+        "updated_at": doc.get("updated_at"),
+        "indexing_status": doc.get("indexing_status"),
+    }
+
+
+@app.post("/notes", status_code=201)
+async def create_note(body: NoteBody):
+    """Jot a note. It is saved as a Markdown file in the app's own data (never
+    in the read-only library), indexed like any document, and searchable on
+    its own through the built-in "Notes" library."""
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="a note needs some text")
+
+    def create() -> dict:
+        doc_id = generate_id()
+        stored = DOCUMENTS_DIR / f"{doc_id}.md"
+        stored.write_text(text + "\n", encoding="utf-8")
+        stamp = utc_now()[:16].replace(":", "")
+        create_document(
+            stored,
+            f"note-{stamp}.md",
+            hashlib.sha256(stored.read_bytes()).hexdigest(),
+            doc_id=doc_id,
+            collection_id=NOTES_COLLECTION_ID,
+        )
+        STORE.update(doc_id, {"title": _note_title(text), "kind_override": "note"})
+        enqueue_index(IndexTask(doc_id))
+        return _note_response(read_metadata(doc_id))
+
+    return await asyncio.to_thread(create)
+
+
+@app.get("/notes")
+async def list_notes():
+    """Every note, newest first, with its text."""
+
+    def notes() -> dict:
+        docs = [doc for doc in list_metadata() if doc.get("collection_id") == NOTES_COLLECTION_ID]
+        docs.sort(key=lambda doc: doc.get("uploaded_at") or "", reverse=True)
+        return {"notes": [_note_response(doc) for doc in docs]}
+
+    return await asyncio.to_thread(notes)
+
+
+@app.put("/notes/{doc_id}")
+async def update_note(doc_id: str, body: NoteBody):
+    """Replace a note's text and re-index it. Delete with DELETE /documents/{id}."""
+    metadata = await asyncio.to_thread(read_metadata, doc_id)
+    if metadata.get("collection_id") != NOTES_COLLECTION_ID:
+        raise HTTPException(status_code=404, detail="note not found")
+    if metadata.get("indexing_status") == "indexing":
+        # The running extraction would finish with the old text and mark the
+        # note indexed, silently dropping this edit from the index.
+        raise HTTPException(status_code=409, detail="this note is being indexed; try again in a moment")
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="a note needs some text")
+
+    def update() -> dict:
+        stored = pdf_path(metadata)
+        stored.write_text(text + "\n", encoding="utf-8")
+        STORE.update(
+            doc_id,
+            {
+                "title": _note_title(text),
+                "content_sha256": hashlib.sha256(stored.read_bytes()).hexdigest(),
+                "pipeline_version": -1,  # re-extract from the new text
+            },
+        )
+        enqueue_index(IndexTask(doc_id))
+        return _note_response(read_metadata(doc_id))
+
+    return await asyncio.to_thread(update)
+
+
+@app.post("/shelves/accept")
+async def accept_shelves(request: ShelfAccept):
+    """File documents on their suggested shelf (the listed ones, or every
+    document still waiting). Documents the reader already placed are skipped."""
+
+    def accept() -> dict:
+        wanted = set(request.document_ids) if request.document_ids is not None else None
+        accepted = 0
+        for doc in list_metadata():
+            if doc.get("shelf") or not doc.get("shelf_suggested"):
+                continue
+            if wanted is not None and doc["document_id"] not in wanted:
+                continue
+            STORE.update(doc["document_id"], {"shelf": doc["shelf_suggested"]})
+            accepted += 1
+        return {"accepted": accepted}
+
+    return await asyncio.to_thread(accept)
+
+
+@app.post("/shelves/move")
+async def move_shelf(request: ShelfMove):
+    """Rename or move a shelf; everything on it and on its sub-shelves comes
+    along. Suggested placements become the reader's choice as they move."""
+    try:
+        source = shelves.normalize_shelf(request.source)
+        target = shelves.normalize_shelf(request.target)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not source or not target:
+        raise HTTPException(status_code=422, detail="both shelves need a name")
+    if target.startswith(source + shelves.SEPARATOR):
+        raise HTTPException(status_code=422, detail="a shelf cannot move inside itself")
+
+    def move() -> dict:
+        moved = 0
+        for doc in list_metadata():
+            destination = shelves.moved_shelf(shelves.effective_shelf(doc) or "", source, target)
+            if destination:
+                try:
+                    shelves.normalize_shelf(destination)
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                STORE.update(doc["document_id"], {"shelf": destination})
+                moved += 1
+        return {"moved": moved, "shelf": target}
+
+    return await asyncio.to_thread(move)
 
 
 @app.delete("/documents/{doc_id}")
@@ -2278,7 +2606,7 @@ async def search(request: SearchRequest):
             dense_weight=request.dense_weight,
             rerank_passage=request.rerank_passage,
             max_per_doc=request.max_per_doc,
-            document_ids=await asyncio.to_thread(collection_document_ids, request.collection_id),
+            document_ids=await asyncio.to_thread(scope_document_ids, request.collection_id, request.shelf),
         )
     except HTTPException:
         raise
@@ -2425,7 +2753,7 @@ async def ask(request: AskRequest):
             gate,
             max_per_doc=max_per_doc,
             dedup_jaccard=ASK_DEDUP_JACCARD,
-            document_ids=await asyncio.to_thread(collection_document_ids, request.collection_id),
+            document_ids=await asyncio.to_thread(scope_document_ids, request.collection_id, request.shelf),
         )
     except HTTPException:
         raise
@@ -2734,10 +3062,20 @@ class CollectionPatch(BaseModel):
 
 
 def _collection_response() -> List[dict]:
-    docs = list_metadata()
+    docs = [doc for doc in list_metadata() if doc.get("collection_id") != NOTES_COLLECTION_ID]
+    notes = sum(1 for doc in list_metadata() if doc.get("collection_id") == NOTES_COLLECTION_ID)
     return [
         {**collection, "document_count": sum(_belongs_to_collection(doc, collection) for doc in docs)}
         for collection in configured_collections()
+    ] + [
+        {
+            "id": NOTES_COLLECTION_ID,
+            "name": "Notes",
+            "path": None,
+            "auto_scan": False,
+            "builtin": True,
+            "document_count": notes,
+        }
     ]
 
 

@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import Cover from "./Cover.jsx";
 import { CoverFlags, MarkControls } from "./DocMarks.jsx";
+import NotesPanel from "./NotesPanel.jsx";
+import ShelfView from "./ShelfView.jsx";
 import { displayTitle, loadStored, saveStored } from "./storage.js";
 
 const VIEW_KEY = "ai-librarian.stacks.view";
@@ -515,7 +517,10 @@ function Catalogue({ apiBase, documents, reindexing, onReindex, onRemove, onOpen
 // everything already processed — plus the ways in (upload,
 // rescan, import) and the progress of whatever is being processed.
 export default function Stacks(props) {
-  const { apiBase, documents, collections = [], onUpload, uploading, onRescan, onCreateCollection, onUpdateCollection, onDeleteCollection, attaching, notice, job, sectionRef } = props;
+  const { apiBase, documents, collections: allCollections = [], onUpload, uploading, onRescan, onCreateCollection, onUpdateCollection, onDeleteCollection, onImported, onOpenDocument, onScopeShelf, attaching, notice, job, sectionRef } = props;
+  // Built-in libraries (Notes) have no folder to scan, rename or remove.
+  const collections = useMemo(() => allCollections.filter((collection) => !collection.builtin), [allCollections]);
+  const noteCount = allCollections.find((collection) => collection.builtin)?.document_count || 0;
   const [tab, setTab] = useState("shelves");
   const [view, setView] = useState(() => (loadStored(VIEW_KEY, "grid") === "list" ? "list" : "grid"));
   const [activeCollectionId, setActiveCollectionId] = useState("");
@@ -614,6 +619,12 @@ export default function Stacks(props) {
           <button type="button" role="tab" aria-selected={tab === "shelves"} className={tab === "shelves" ? "active" : ""} onClick={() => setTab("shelves")}>
             Folders
           </button>
+          <button type="button" role="tab" aria-selected={tab === "sorted"} className={tab === "sorted" ? "active" : ""} onClick={() => setTab("sorted")}>
+            Shelves
+          </button>
+          <button type="button" role="tab" aria-selected={tab === "notes"} className={tab === "notes" ? "active" : ""} onClick={() => setTab("notes")}>
+            Notes <span className="tab-count">{noteCount}</span>
+          </button>
           <button type="button" role="tab" aria-selected={tab === "catalogue"} className={tab === "catalogue" ? "active" : ""} onClick={() => setTab("catalogue")}>
             Index <span className="tab-count">{documents.length}</span>
           </button>
@@ -630,7 +641,10 @@ export default function Stacks(props) {
         )}
       </div>
 
-      {tab === "shelves" ? <Shelves {...props} collection={activeCollection} libraryRoot={activeCollection?.path ?? props.libraryRoot} view={view} /> : <Catalogue {...props} />}
+      {tab === "shelves" && <Shelves {...props} collection={activeCollection} libraryRoot={activeCollection?.path ?? props.libraryRoot} view={view} />}
+      {tab === "sorted" && <ShelfView apiBase={apiBase} documents={documents} onChanged={onImported} onOpenDocument={onOpenDocument} onScopeShelf={onScopeShelf} />}
+      {tab === "notes" && <NotesPanel apiBase={apiBase} onChanged={onImported} />}
+      {tab === "catalogue" && <Catalogue {...props} />}
     </section>
   );
 }

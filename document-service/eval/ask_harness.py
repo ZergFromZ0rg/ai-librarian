@@ -182,7 +182,8 @@ def resolve_collection(name: str) -> dict:
     for doc in json.loads(_request("GET", "/documents"))["documents"]:
         source = doc.get("source_path") or ""
         if doc.get("collection_id") == collection["id"] or (
-            source and (not root or source == root or source.startswith(root + "/"))
+            not collection.get("builtin")  # Notes: no folder, membership by id alone
+            and source and (not root or source == root or source.startswith(root + "/"))
         ):
             members.add(doc["filename"].lower())
     return {**collection, "members": members}
@@ -372,6 +373,7 @@ def score(cases: list[dict], model: Optional[str], judge_spec: Optional[str],
     tag_stats: dict[str, list[int]] = {}  # tag -> [passed, total]
     libraries: dict[str, dict] = {}
 
+    width = max((len(c.get("id") or c.get("question", "?")) for c in cases), default=0)
     for case in cases:
         cid = case.get("id") or case.get("question", "?")
         library = None
@@ -382,9 +384,14 @@ def score(cases: list[dict], model: Optional[str], judge_spec: Optional[str],
         # fails on more than half the attempts, and we report the pass rate.
         runs = []
         for _ in range(repeat):
-            result = ask(case["question"], case.get("mode", "quick"),
-                         case.get("model") or model, provider_keys,
-                         library["id"] if library else None)
+            try:
+                result = ask(case["question"], case.get("mode", "quick"),
+                             case.get("model") or model, provider_keys,
+                             library["id"] if library else None)
+            except (TimeoutError, OSError) as exc:
+                # One slow or dropped answer is that case's failure, not the run's.
+                result = {"answer": "", "sources": [], "documents": None, "relevant_count": None,
+                          "model": None, "error": f"no response ({exc.__class__.__name__}: {exc})"}
             runs.append((result, check(case, result, library["members"] if library else None)))
         passed = [(r, m) for r, m in runs if not m["hard_failures"]]
         result, m = (passed[0] if passed else runs[-1])
@@ -435,10 +442,9 @@ def score(cases: list[dict], model: Optional[str], judge_spec: Optional[str],
                             f"R{_num(j.get('relevance')):.0f} "
                             f"C{_num(j.get('citation_accuracy')):.0f}{kp}")
         rows.append((cid, "  ".join(note)))
+        # Print as we go: a long run that dies late keeps what it already scored.
+        print(f"  {cid.ljust(width)}   {rows[-1][1]}", flush=True)
 
-    width = max((len(c) for c, _ in rows), default=0)
-    for cid, note in rows:
-        print(f"  {cid.ljust(width)}   {note}")
 
     print("\n" + "-" * (width + 40))
     print(f"  {len(cases)} cases, {hard_fail_cases} with hard failures")
@@ -528,7 +534,7 @@ def review(limit: int, mode: str, model: Optional[str], provider_keys: Optional[
 
 
 def main(argv: Optional[Iterable[str]] = None) -> int:
-    global BASE_URL
+    global BASE_URL, ASK_TIMEOUT
 
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -544,6 +550,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     p_score = sub.add_parser("score", help="replay answers.jsonl and report")
     p_score.add_argument("--answers", type=Path, default=ANSWERS_PATH)
+    p_score.add_argument("--timeout", type=int, default=ASK_TIMEOUT,
+                         help=f"seconds to wait for one answer (default {ASK_TIMEOUT}); a thinking model "
+                              "sends nothing while it reasons, so allow for that on slow hardware")
     p_score.add_argument("--repeat", type=int, default=1,
                          help="run each case N times; fail only if it fails a majority (default 1)")
     p_cap = sub.add_parser("capture", help="run questions now -> stubs")
@@ -563,6 +572,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     keys = keys or None
 
     if args.command == "score":
+        ASK_TIMEOUT = max(1, args.timeout)
         return score(load_cases(args.answers), args.model, args.judge, args.judge_url,
                      keys, max(1, args.repeat))
     if args.command == "capture":

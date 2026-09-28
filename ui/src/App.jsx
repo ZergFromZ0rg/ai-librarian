@@ -149,7 +149,9 @@ export default function App() {
   // The research console.
   const [mode, setModeState] = useState(() => (loadStored(MODE_KEY, "search") === "ask" ? "ask" : "search"));
   const [query, setQuery] = useState("");
-  const [scope, setScope] = useState(null); // { documentId, documentName } or null for the whole library
+  // { documentId, documentName } (one document), { shelf, documentName } (a
+  // virtual shelf and everything under it), or null for the whole library.
+  const [scope, setScope] = useState(null);
   const [searchParams, setSearchParams] = useState(loadSearchParams);
   const [askParams, setAskParams] = useState(loadAskParams);
   const [searchRun, setSearchRun] = useState(null);
@@ -382,7 +384,8 @@ export default function App() {
             max_per_doc: params.perDoc,
             max_text_chars: 20000,
             ...(params.library ? { collection_id: params.library } : {}),
-            ...(runScope ? { document_id: runScope.documentId } : {}),
+            ...(runScope?.documentId ? { document_id: runScope.documentId } : {}),
+            ...(runScope?.shelf ? { shelf: runScope.shelf } : {}),
           }),
         });
         setSearchRun({
@@ -422,6 +425,7 @@ export default function App() {
         topK: askParams.topK,
         minScore: askParams.minScore,
         documentId: scope?.documentId,
+        shelf: scope?.shelf,
         collectionId: activeLibraryId || undefined,
       });
     } else {
@@ -449,6 +453,12 @@ export default function App() {
 
   function scopeTo(documentId, documentName) {
     setScope({ documentId, documentName });
+    setSource(null);
+    focusConsole();
+  }
+
+  function scopeToShelf(shelf) {
+    setScope({ shelf, documentName: shelf.split("/").join(" › ") });
     setSource(null);
     focusConsole();
   }
@@ -943,10 +953,14 @@ export default function App() {
           libraryRoot={libraryRoot}
           settingRoot={settingRoot}
           onSetLibraryFolder={setLibraryFolder}
-          onImported={refreshDocuments}
+          onImported={() => {
+            refreshDocuments();
+            refreshCollections();
+          }}
           onJob={setJob}
           onOpenDocument={(doc) => openDocument(doc)}
           onScope={(doc) => scopeTo(doc.document_id, doc.filename)}
+          onScopeShelf={scopeToShelf}
           onUpload={uploadFiles}
           uploading={uploading}
           onRescan={rescanLibraryFolder}

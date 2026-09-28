@@ -260,8 +260,8 @@ export default function Console({
         )}
         {scope && (
           <span className="scope-chip" title={scope.documentName}>
-            <span className="scope-chip-label">within</span>
-            <span className="scope-chip-name">{displayTitle(scope.documentName)}</span>
+            <span className="scope-chip-label">{scope.shelf ? "on shelf" : "within"}</span>
+            <span className="scope-chip-name">{scope.shelf ? scope.documentName : displayTitle(scope.documentName)}</span>
             <button type="button" onClick={onClearScope} aria-label="Search the whole library">
               ×
             </button>
