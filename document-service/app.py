@@ -40,11 +40,7 @@ from chunking import (
 from conversations import ConversationStore
 from database import MetadataStore
 from doc_kind import detect_kind
-from embeddings import (
-    DEFAULT_MODEL as EMBEDDING_MODEL,
-    embed_texts,
-    unload_if_idle as unload_embedder_if_idle,
-)
+from embeddings import DEFAULT_MODEL as EMBEDDING_MODEL
 from extraction import (
     assess_scanned,
     assess_text_layer,
@@ -52,6 +48,7 @@ from extraction import (
     describe_skipped_pages,
     garbled_page_indices,
 )
+from models import embed_texts, model_info, rerank, shutdown as shutdown_models
 from ocr import estimate_seconds as estimate_ocr_seconds
 from parsers import (
     OCR_APPROVAL_MARKER,
@@ -63,12 +60,7 @@ from parsers import (
     location_label,
     media_type_for,
 )
-from reranker import (
-    DEFAULT_MODEL as RERANK_MODEL,
-    model_info,
-    rerank,
-    unload_if_idle as unload_reranker_if_idle,
-)
+from reranker import DEFAULT_MODEL as RERANK_MODEL
 from vector_store import (
     FUSION_METHOD,
     INDEX_SCHEMA_VERSION,
@@ -193,10 +185,10 @@ RERANK_MAX_WORKERS = int(os.environ.get("RERANK_MAX_WORKERS", "2"))
 # concurrently, threads would just queue up behind that lock. Each worker
 # loads its own copy of the layout model, so keep this modest.
 INDEX_EXTRACTION_WORKERS = int(os.environ.get("INDEX_EXTRACTION_WORKERS", "2"))
-# Background footprint. After this many idle seconds the embedding and
-# reranker models are unloaded and the extraction worker processes exit,
-# giving their memory back; the next search or upload loads them again (a
-# few seconds' delay). 0 keeps everything resident.
+# Background footprint. After this many idle seconds the model worker process
+# (models.py) and the extraction worker processes exit, giving all their
+# memory back; the next search or upload starts them again (a few seconds'
+# delay). 0 keeps everything resident.
 MODEL_IDLE_UNLOAD_SECONDS = int(os.environ.get("MODEL_IDLE_UNLOAD_SECONDS", "600"))
 # Niceness of extraction worker processes, so a big import yields the CPU to
 # whatever else the machine is doing. 0 leaves them at normal priority.
@@ -1607,18 +1599,6 @@ def recover_interrupted_work() -> None:
     signal_index_worker()
 
 
-def idle_reaper() -> None:
-    """Unload the embedding and reranker models once nothing has used them
-    for MODEL_IDLE_UNLOAD_SECONDS (see its definition)."""
-    while not SHUTDOWN.wait(60):
-        for name, unload in (("embedding", unload_embedder_if_idle), ("reranker", unload_reranker_if_idle)):
-            try:
-                if unload(MODEL_IDLE_UNLOAD_SECONDS):
-                    logger.info("Unloaded the idle %s model to free memory", name)
-            except Exception:
-                logger.warning("Could not unload the idle %s model", name, exc_info=True)
-
-
 def start_workers() -> None:
     global WORKER_THREADS, RERANK_EXECUTOR, EXTRACTION_EXECUTOR
     if any(thread.is_alive() for thread in WORKER_THREADS):
@@ -1647,8 +1627,6 @@ def start_workers() -> None:
         threading.Thread(target=recover_interrupted_work, daemon=True, name="recovery-worker"),
         threading.Thread(target=backfill_document_details, daemon=True, name="detail-backfill"),
     ]
-    if MODEL_IDLE_UNLOAD_SECONDS > 0:
-        WORKER_THREADS.append(threading.Thread(target=idle_reaper, daemon=True, name="idle-reaper"))
     if AUTO_INGEST_INTERVAL_SECONDS > 0:
         WORKER_THREADS.append(
             threading.Thread(target=auto_ingest_worker, daemon=True, name="auto-ingest-worker")
@@ -1673,6 +1651,7 @@ def stop_workers() -> None:
     if EXTRACTION_EXECUTOR is not None:
         EXTRACTION_EXECUTOR.shutdown(wait=False, cancel_futures=True)
         EXTRACTION_EXECUTOR = None
+    shutdown_models()
 
 
 @asynccontextmanager

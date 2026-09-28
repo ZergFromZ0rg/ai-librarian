@@ -80,9 +80,15 @@ _tokenizer_unavailable = False
 
 
 def _get_tokenizer():
-    """The embedding model's own fast tokenizer, or None to fall back to the
-    regex estimate. Only the tokenizer is loaded, never the model itself, so
-    this stays cheap enough to run at upload time.
+    """The embedding model's own tokenizer, or None to fall back to the regex
+    estimate.
+
+    Loaded straight from the model's ``tokenizer.json`` with the Rust
+    ``tokenizers`` library -- the same engine transformers' fast tokenizers
+    wrap -- rather than through ``transformers.AutoTokenizer``, whose import
+    chain pulls PyTorch, scikit-learn and pandas into this process (~275 MB
+    that would never be given back). The models themselves run in a separate
+    process (see models.py); this one only ever needs the tokenizer.
     """
     global _tokenizer, _tokenizer_unavailable
     if _tokenizer is not None or _tokenizer_unavailable:
@@ -90,13 +96,17 @@ def _get_tokenizer():
     with _tokenizer_lock:
         if _tokenizer is None and not _tokenizer_unavailable:
             try:
-                from transformers import AutoTokenizer
+                from huggingface_hub import hf_hub_download
+                from tokenizers import Tokenizer
 
                 from embeddings import DEFAULT_MODEL
 
-                tokenizer = AutoTokenizer.from_pretrained(DEFAULT_MODEL)
-                if not getattr(tokenizer, "is_fast", False):
-                    raise RuntimeError("a fast tokenizer is required for offsets")
+                # hf_hub_download honours HF_HUB_OFFLINE and the shared model cache.
+                tokenizer = Tokenizer.from_file(hf_hub_download(DEFAULT_MODEL, "tokenizer.json"))
+                # tokenizer.json may carry the model's 512-token truncation and
+                # padding; counting and splitting must see every token.
+                tokenizer.no_truncation()
+                tokenizer.no_padding()
                 _tokenizer = tokenizer
             except Exception:
                 _tokenizer_unavailable = True
@@ -145,17 +155,17 @@ _UNBROKEN_PIECE_CHARS = 8
 def _model_token_spans(tokenizer, text: str) -> tuple[List[tuple[int, int]], int]:
     """The model's token spans with oversized ones sub-split, plus the token
     count that sub-splitting implies."""
-    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+    encoding = tokenizer.encode(text, add_special_tokens=False)
     spans: List[tuple[int, int]] = []
     extra = 0
-    for start, end in encoding["offset_mapping"]:
+    for start, end in encoding.offsets:
         if end - start > _MAX_TOKEN_CHARS:
             pieces = range(start, end, _UNBROKEN_PIECE_CHARS)
             spans.extend((piece, min(piece + _UNBROKEN_PIECE_CHARS, end)) for piece in pieces)
             extra += len(pieces) - 1
         elif end > start:
             spans.append((start, end))
-    return spans, len(encoding["input_ids"]) + extra
+    return spans, len(encoding.ids) + extra
 
 
 def _token_spans(text: str) -> List[tuple[int, int]]:

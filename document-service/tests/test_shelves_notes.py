@@ -1,11 +1,9 @@
-"""Virtual shelves, jotted notes and idle unloading, through the API.
+"""Virtual shelves, jotted notes and lazy extraction workers, through the API.
 
 The service fixture's fake embedder scores "absurd" on its first axis, and the
 Philosophy subject description mentions "the absurd" -- so a PDF about the
 absurd really is classified as Philosophy here, end to end.
 """
-
-import time
 
 from conftest import make_pdf, wait_for_status
 
@@ -105,19 +103,8 @@ def test_notes_are_jotted_listed_scoped_edited_and_deleted(service):
     assert client.get("/notes").json()["notes"] == []
 
 
-def test_models_unload_after_idle_and_extraction_starts_lazily(service):
+def test_extraction_workers_start_lazily(service):
     module, client, _indexed = service
-    import embeddings
-    import reranker
-
-    for model_module in (embeddings, reranker):
-        model_module._model, model_module._model_name = object(), "fake"
-        model_module._last_used = time.monotonic()
-        assert not model_module.unload_if_idle(60)  # just used
-        model_module._last_used = time.monotonic() - 120
-        assert model_module.unload_if_idle(60)
-        assert model_module._model is None and not model_module.unload_if_idle(60)
-
     # No extraction worker processes exist until there is something to extract.
     assert module.EXTRACTION_EXECUTOR is None
     _upload(client, "lazy.pdf", "Freedom.")
