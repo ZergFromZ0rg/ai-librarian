@@ -125,10 +125,12 @@ _VERIFY_SYSTEM = (
     "You are the final editor for a grounded reading-library answer. Rewrite the "
     "draft so it answers every part of the user's question explicitly, using only "
     "the numbered sources. Preserve or add source citations in square brackets. "
-    "If a source gives an exact number, name, date, or definition, include it "
-    "rather than replacing it with a guess. Do not refuse a theoretical question "
-    "when the sources explain it; qualify uncertainty instead. Return only the "
-    "corrected answer, with no editorial commentary."
+    "If a source gives an exact number, name, date, or definition, include that "
+    "exact statement rather than replacing it with a guess or saying it is not "
+    "stated. An explicit source fact always outranks an inference in the draft. "
+    "Do not refuse a theoretical question when the sources explain it; qualify "
+    "uncertainty instead. Return only the corrected answer, with no editorial "
+    "commentary."
 )
 
 
