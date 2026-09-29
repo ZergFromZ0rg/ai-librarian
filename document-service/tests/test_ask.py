@@ -93,24 +93,24 @@ def test_ask_metrics_exposes_shape_telemetry_without_answer_text(service, monkey
 def test_ask_uses_the_requested_model_and_falls_back_when_unknown(service, monkeypatch):
     module, client, _indexed = service
     index_essay(client)
-    enable_fake_model(monkeypatch, module, "cloud-provider:cloud-opus-5")
+    enable_fake_model(monkeypatch, module, "openai:gpt-5.1")
     monkeypatch.setattr(module, "rerank", lambda query, passages: [1.0 for _ in passages])
     fake_stream = make_fake_stream()
     monkeypatch.setattr(module.generation, "generate_stream", fake_stream)
 
     # A known model is honoured.
-    client.post("/ask", json={"question": "q", "model": "cloud-provider:cloud-opus-5"})
-    assert fake_stream.calls[-1]["model"] == "cloud-provider:cloud-opus-5"
+    client.post("/ask", json={"question": "q", "model": "openai:gpt-5.1"})
+    assert fake_stream.calls[-1]["model"] == "openai:gpt-5.1"
 
     # An unknown model falls back to the server default.
     client.post("/ask", json={"question": "q", "model": "openai:gpt-does-not-exist"})
-    assert fake_stream.calls[-1]["model"] == "cloud-provider:cloud-opus-5"
+    assert fake_stream.calls[-1]["model"] == "openai:gpt-5.1"
 
 
 def test_ask_accepts_a_browser_supplied_api_key_for_an_unlisted_model(service, monkeypatch):
     module, client, _indexed = service
     index_essay(client)
-    # Only a local model is server-listed; the browser brings its own Cloud key.
+    # Only a local model is server-listed; the browser brings its own cloud key.
     enable_fake_model(monkeypatch, module, "ollama:local")
     monkeypatch.setattr(module, "rerank", lambda query, passages: [1.0 for _ in passages])
     fake_stream = make_fake_stream()
@@ -120,20 +120,20 @@ def test_ask_accepts_a_browser_supplied_api_key_for_an_unlisted_model(service, m
         "/ask",
         json={
             "question": "the absurd",
-            "model": "cloud-provider:cloud-sonnet-5",
-            "provider_keys": {"cloud-provider": "sk-ant-xyz", "bogus": "x", "openai": ""},
+            "model": "openai:gpt-5.1-mini",
+            "provider_keys": {"openai": "sk-xyz", "bogus": "x", "google": ""},
         },
     )
     assert response.status_code == 200
     call = fake_stream.calls[-1]
-    assert call["model"] == "cloud-provider:cloud-sonnet-5"
-    assert call["keys"] == {"cloud-provider": "sk-ant-xyz"}  # sanitised: bogus + empty dropped
+    assert call["model"] == "openai:gpt-5.1-mini"
+    assert call["keys"] == {"openai": "sk-xyz"}  # sanitised: bogus + empty dropped
 
 
 def test_sanitize_provider_keys(service):
     module, _client, _indexed = service
-    assert module._sanitize_provider_keys({"cloud-provider": " sk-1 ", "openai": "", "x": "y"}) == {
-        "cloud-provider": "sk-1"
+    assert module._sanitize_provider_keys({"openai": " sk-1 ", "google": "", "x": "y"}) == {
+        "openai": "sk-1"
     }
     assert module._sanitize_provider_keys("nope") == {}
     assert module._sanitize_provider_keys({"google": 123}) == {}

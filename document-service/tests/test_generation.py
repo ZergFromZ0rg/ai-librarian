@@ -10,9 +10,9 @@ import generation
 @pytest.fixture(autouse=True)
 def _hermetic(monkeypatch):
     monkeypatch.setenv("OLLAMA_URL", "")
-    for key in ("REMOTE_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GENERATION_MODEL"):
+    for key in ("OPENAI_API_KEY", "GEMINI_API_KEY", "GENERATION_MODEL"):
         monkeypatch.delenv(key, raising=False)
-    for key in ("REMOTE_MODELS", "OPENAI_MODELS", "GOOGLE_MODELS"):
+    for key in ("OPENAI_MODELS", "GOOGLE_MODELS"):
         monkeypatch.delenv(key, raising=False)
     generation._ollama_cache = (0.0, None)
 
@@ -48,7 +48,6 @@ def test_delta_from_ollama_line_reads_native_chunks():
 
 def test_context_passages_scales_with_provider():
     assert generation.context_passages_for("ollama:llama3.2:3b") == generation.ASK_CONTEXT_PASSAGES
-    assert generation.context_passages_for("cloud-provider:cloud-opus-5") == generation.ASK_CONTEXT_PASSAGES_CLOUD
     assert generation.context_passages_for("openai:gpt-5.1") == generation.ASK_CONTEXT_PASSAGES_CLOUD
 
 
@@ -73,7 +72,7 @@ def test_parse_ollama_tags():
 
 def test_split_model_id():
     assert generation._split_model_id("ollama:llama3.2:latest") == ("ollama", "llama3.2:latest")
-    assert generation._split_model_id("cloud-provider:cloud-opus-5") == ("cloud-provider", "cloud-opus-5")
+    assert generation._split_model_id("openai:gpt-5.1") == ("openai", "gpt-5.1")
     with pytest.raises(generation.GenerationError):
         generation._split_model_id("no-colon")
 
@@ -83,7 +82,6 @@ def test_list_models_merges_ollama_and_keyed_cloud_providers(monkeypatch):
         return [{"id": "ollama:local", "label": "local", "provider": "ollama"}]
 
     monkeypatch.setattr(generation, "_fetch_ollama_models", fake_ollama)
-    monkeypatch.setenv("REMOTE_API_KEY", "sk-ant-" + "x" * 40)
     monkeypatch.setenv("OPENAI_MODELS", "gpt-x,gpt-y")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-" + "y" * 40)
     # google has no key -> excluded
@@ -91,7 +89,6 @@ def test_list_models_merges_ollama_and_keyed_cloud_providers(monkeypatch):
     models = run(generation.list_models())
     ids = [m["id"] for m in models]
     assert ids[0] == "ollama:local"  # ollama first
-    assert "cloud-provider:cloud-opus-5" in ids
     assert "openai:gpt-x" in ids and "openai:gpt-y" in ids
     assert not any(m["provider"] == "google" for m in models)
 
@@ -101,22 +98,22 @@ def test_default_model_prefers_env_then_first_listed(monkeypatch):
         return [{"id": "ollama:a", "label": "a", "provider": "ollama"}]
 
     monkeypatch.setattr(generation, "_fetch_ollama_models", fake_ollama)
-    monkeypatch.setenv("REMOTE_API_KEY", "sk-ant-" + "x" * 40)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-" + "x" * 40)
 
     assert run(generation.default_model()) == "ollama:a"  # first listed
 
-    monkeypatch.setenv("GENERATION_MODEL", "cloud-provider:cloud-sonnet-5")
-    assert run(generation.default_model()) == "cloud-provider:cloud-sonnet-5"
+    monkeypatch.setenv("GENERATION_MODEL", "openai:gpt-5.1")
+    assert run(generation.default_model()) == "openai:gpt-5.1"
 
     monkeypatch.setenv("GENERATION_MODEL", "openai:not-available")
     assert run(generation.default_model()) == "ollama:a"  # env default not listed -> first
 
 
 def test_cloud_key_ignores_placeholders(monkeypatch):
-    monkeypatch.setenv("REMOTE_API_KEY", "sk-ant-PUT_YOURS_HERE")  # from .env.example
-    assert generation._cloud_key("cloud-provider") == ""
-    monkeypatch.setenv("REMOTE_API_KEY", "sk-ant-api03-" + "z" * 90)
-    assert generation._cloud_key("cloud-provider").startswith("sk-ant-api03-")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-PUT_YOURS_HERE")  # from .env.example
+    assert generation._cloud_key("openai") == ""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-" + "z" * 90)
+    assert generation._cloud_key("openai").startswith("sk-proj-")
 
 
 def test_enabled_and_backend_info_when_nothing_is_configured():
@@ -224,14 +221,14 @@ def test_generate_stream_errors_when_a_cloud_provider_has_no_key():
 
 def test_pick_map_model_prefers_local_then_cheap_cloud(monkeypatch):
     monkeypatch.setattr(generation, "_fetch_ollama_models", _aret([]))
-    monkeypatch.setenv("REMOTE_API_KEY", "sk-ant-" + "x" * 40)
-    monkeypatch.setenv("REMOTE_MODELS", "cloud-opus-5,cloud-haiku-4-5")
-    assert run(generation.pick_map_model("cloud-provider:cloud-opus-5")) == "cloud-provider:cloud-haiku-4-5"
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-" + "x" * 40)
+    monkeypatch.setenv("OPENAI_MODELS", "gpt-5.1,gpt-5.1-mini")
+    assert run(generation.pick_map_model("openai:gpt-5.1")) == "openai:gpt-5.1-mini"
 
     monkeypatch.setattr(
         generation, "_fetch_ollama_models", _aret([{"id": "ollama:m", "label": "m", "provider": "ollama"}])
     )
-    assert run(generation.pick_map_model("cloud-provider:cloud-opus-5")) == "ollama:m"
+    assert run(generation.pick_map_model("openai:gpt-5.1")) == "ollama:m"
 
 
 def _fake_stream_by_role():

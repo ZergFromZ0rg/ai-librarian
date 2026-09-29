@@ -7,7 +7,6 @@ const MODEL_KEY = "ai-librarian.ask.model";
 
 export const PROVIDER_LABELS = {
   ollama: "Local (Ollama)",
-  cloud-provider: "Cloud",
   openai: "OpenAI",
   google: "Gemini",
 };
@@ -16,7 +15,6 @@ export const PROVIDER_LABELS = {
 // (kept in step with the server's generation._CLOUD defaults). Settings owns
 // the actual key-entry form.
 export const CLOUD_PROVIDERS = [
-  { id: "cloud-provider", label: "Cloud provider (Cloud)", placeholder: "sk-ant-…", models: ["cloud-opus-5", "cloud-sonnet-5", "cloud-haiku-4-5"] },
   { id: "openai", label: "OpenAI (GPT)", placeholder: "sk-…", models: ["gpt-5.1", "gpt-5.1-mini"] },
   { id: "google", label: "Google (Gemini)", placeholder: "AIza…", models: ["gemini-2.5-pro", "gemini-2.5-flash"] },
 ];

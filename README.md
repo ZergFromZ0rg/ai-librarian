@@ -2,7 +2,7 @@
 
 AI Librarian is a self-hosted, local-first knowledge library for PDF documents. It extracts layout-aware Markdown, parses typed document blocks, builds structure-aware token-budgeted passages, and combines semantic and BM25 keyword retrieval in Qdrant before reranking passages with page-level source references.
 
-No hosted AI API is required for extraction or search: once the container images and search models are downloaded, document processing and retrieval stay on your server. The optional [Ask mode](#ask-mode) adds LLM-written answers over the retrieved passages — from a local [Ollama](https://ollama.com) model (fully offline) or, if you add a key, a cloud API (Cloud, OpenAI, Gemini).
+No hosted AI API is required for extraction or search: once the container images and search models are downloaded, document processing and retrieval stay on your server. The optional [Ask mode](#ask-mode) adds LLM-written answers over the retrieved passages — from a local [Ollama](https://ollama.com) model (fully offline) or, if you add a key, a cloud API (OpenAI or Gemini).
 
 ## What it does
 
@@ -237,7 +237,7 @@ Ask mode appears **when at least one model is available**. Models come from two 
 | Source | Setup | Notes |
 | --- | --- | --- |
 | **Local — [Ollama](https://ollama.com)** on the Docker host | `OLLAMA_URL` (default `http://host.docker.internal:11434`); models discovered from `/api/tags` | free, offline; CPU generation takes tens of seconds |
-| **Cloud API** — Cloud / OpenAI / Gemini | set `REMOTE_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` | fast and strong; needs network egress, bills per query |
+| **Cloud API** — OpenAI / Gemini | set `OPENAI_API_KEY` / `GEMINI_API_KEY` | fast and strong; needs network egress, bills per query |
 
 Each provider is hidden until it is configured. `GET /ask/models` returns the current list.
 
@@ -267,21 +267,21 @@ multi-passage prompt.
 
 ### Cloud APIs
 
-Two ways to add Cloud / OpenAI / Gemini:
+Two ways to add OpenAI / Gemini:
 
 - **In the browser** — the Ask tab's **API keys** button opens a panel; paste a key and
   that provider's models appear in the picker immediately. The key is held in that
   browser's `localStorage` and sent with each question — it is **never written to the
   server**. Re-enter it per browser/device. Because the key rides in the request body,
   only do this over localhost/LAN or behind `APP_TOKEN` + a TLS proxy.
-- **On the server** — set `REMOTE_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` in
+- **On the server** — set `OPENAI_API_KEY` / `GEMINI_API_KEY` in
   `.env`; those models are then available to everyone with no per-browser step.
 
 Every provider's models are always listed in the picker; the ones without a key are greyed
 out and labelled "needs API key" until you add one. The picker offers a small default model
-set per provider — override with `REMOTE_MODELS` / `OPENAI_MODELS` / `GOOGLE_MODELS`
-(comma-separated, server-side). Cloud uses the `cloud-provider` SDK (bundled, imported only when
-picked); OpenAI and Gemini use their OpenAI-compatible REST endpoints over `httpx`, no SDK.
+set per provider — override with `OPENAI_MODELS` / `GOOGLE_MODELS` (comma-separated,
+server-side). Both providers use their OpenAI-compatible REST endpoints over `httpx`, so no
+provider SDK is required.
 `GENERATION_MODEL` optionally sets the default model (`provider:model`, e.g.
 `ollama:llama3.2:latest`). A key shorter than 30 characters is treated as unset, so the
 `.env.example` placeholder never counts as configured.

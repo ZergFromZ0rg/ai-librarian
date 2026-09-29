@@ -3,7 +3,7 @@
 # transfer small and keeps host-only artifacts out of the image.
 .git/
 .github/
-.cloud/
+.local-tool-settings/
 data/
 library/
 *.ses

@@ -28,8 +28,7 @@ that library -- a source from outside it is a hard failure -- and ``tags``
 
 Add ``--judge <provider:model>`` for an LLM judge that also scores faithfulness,
 relevance, citation accuracy, and `key_points` coverage. The judge talks to
-Ollama (``--judge-url http://host:11434``) or the Cloud provider API
-(``--judge model cloud-...`` + ``REMOTE_API_KEY``).
+Ollama (``--judge-url http://host:11434``).
 
 The eval set lives in ``eval/answers.jsonl`` -- one JSON object per line:
 
@@ -43,7 +42,6 @@ The eval set lives in ``eval/answers.jsonl`` -- one JSON object per line:
 Config via environment:
     AI_LIBRARIAN_URL   base URL of the API   (default http://127.0.0.1:8000)
     APP_TOKEN          bearer token, if the API requires one
-    REMOTE_API_KEY  only for --judge model cloud-provider:...
 """
 
 from __future__ import annotations
@@ -306,35 +304,17 @@ class JudgeUnavailable(RuntimeError):
     """The judge could not run (missing key / URL) -- score degrades to deterministic."""
 
 
-def _judge_via_cloud-provider(model: str, system: str, prompt: str) -> str:
-    key = os.environ.get("REMOTE_API_KEY", "").strip()
-    if not key:
-        raise JudgeUnavailable("cloud-provider judge needs REMOTE_API_KEY in the environment")
-    body = json.dumps({
-        "model": model, "max_tokens": 1024, "system": system,
-        "messages": [{"role": "user", "content": prompt}],
-    }).encode()
-    req = urllib.request.Request("https://api.cloud-provider.com/v1/messages", data=body, method="POST")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("x-api-key", key)
-    req.add_header("cloud-provider-version", "2023-06-01")
-    with urllib.request.urlopen(req, timeout=ASK_TIMEOUT) as response:
-        return "".join(b.get("text", "") for b in json.loads(response.read())["content"])
-
-
 def judge(case: dict, result: dict, spec: str, judge_url: Optional[str]) -> dict:
     provider, _, model = spec.partition(":")
-    if not model:  # bare model name -> cloud-provider
-        provider, model = "cloud-provider", spec
+    if not model:  # bare model name -> Ollama
+        provider, model = "ollama", spec
     system, prompt = _JUDGE_SYSTEM, _judge_prompt(case, result)
     if provider == "ollama":
         if not judge_url:
             raise JudgeUnavailable("ollama judge needs --judge-url http://host:11434")
         raw = _judge_via_ollama(judge_url, model, system, prompt)
-    elif provider == "cloud-provider":
-        raw = _judge_via_cloud-provider(model, system, prompt)
     else:
-        raise SystemExit(f"unknown judge provider {provider!r} (use ollama:... or cloud-provider:...)")
+        raise SystemExit("unknown judge provider (use ollama:model with --judge-url)")
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     if not match:
         return {"error": f"judge returned no JSON: {raw[:200]}"}
@@ -571,9 +551,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                         help=f"API base URL, or the UI proxy http://<host>:3100/api (default {BASE_URL})")
     parser.add_argument("--model", help="override the Ask model for every case, e.g. ollama:qwen2.5:7b")
     parser.add_argument("--provider-key", action="append", default=[], metavar="PROVIDER=KEY",
-                        help="cloud key sent with each /ask (repeatable), e.g. cloud-provider=sk-ant-...")
+                        help="cloud key sent with each /ask (repeatable), e.g. openai=sk-...")
     parser.add_argument("--judge", metavar="PROVIDER:MODEL",
-                        help="LLM judge: ollama:qwen2.5:7b (with --judge-url) or cloud-provider:cloud-sonnet-5")
+                        help="LLM judge: ollama:qwen2.5:7b (with --judge-url)")
     parser.add_argument("--judge-url", help="Ollama base URL for --judge ollama:..., e.g. http://192.168.0.122:11434")
 
     sub = parser.add_subparsers(dest="command", required=True)

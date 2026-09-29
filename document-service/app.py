@@ -537,7 +537,7 @@ class AskRequest(BaseModel):
     # absent -> RERANK_MIN_SCORE (quick) or ASK_THOROUGH_MIN_SCORE (thorough).
     min_score: Optional[float] = Field(default=None, ge=-100, le=100)
     # Per-request cloud API keys the browser holds (it never persists them
-    # server-side). {"cloud-provider"|"openai"|"google": "<key>"}. Never logged.
+    # server-side). {"openai"|"google": "<key>"}. Never logged.
     provider_keys: Optional[dict] = None
 
 
@@ -2796,7 +2796,7 @@ _ASK_NO_ANSWER = (
 )
 
 
-_CLOUD_PROVIDERS = ("cloud-provider", "openai", "google")
+_CLOUD_PROVIDERS = ("openai", "google")
 ASK_THOROUGH_MIN_SCORE = _parse_min_score(os.environ.get("ASK_THOROUGH_MIN_SCORE", "-5.0"))
 ASK_AGENTIC_MAX_STEPS = max(0, generation.ASK_AGENTIC_MAX_STEPS)
 

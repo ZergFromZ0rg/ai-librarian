@@ -6,14 +6,12 @@ The reader picks the model per session; a model is identified as
 ``provider:model`` (split on the first colon):
 
   ``ollama:<tag>``       a model served by a local Ollama — free, offline
-  ``cloud-provider:<model>``  the Cloud API      (needs ``REMOTE_API_KEY``)
   ``openai:<model>``     the OpenAI API      (needs ``OPENAI_API_KEY``)
   ``google:<model>``     the Gemini API      (needs ``GEMINI_API_KEY``)
 
 Cloud providers appear only when their key is set; Ollama models are discovered
-live from ``/api/tags``. ``cloud-provider`` is reached through its own SDK (imported
-lazily); ``ollama`` / ``openai`` / ``google`` share one OpenAI-compatible
-streaming path over ``httpx``.
+live from ``/api/tags``. ``ollama`` / ``openai`` / ``google`` share one
+OpenAI-compatible streaming path over ``httpx``.
 """
 
 import asyncio
@@ -54,16 +52,15 @@ ASK_THOROUGH_MAX_DOCS = int(os.environ.get("ASK_THOROUGH_MAX_DOCS", "15"))
 # Bounded planner/search loop for agentic Ask mode.
 ASK_AGENTIC_MAX_STEPS = int(os.environ.get("ASK_AGENTIC_MAX_STEPS", "2"))
 # Order cheap cloud models are tried for the map step when no local model exists.
-_MAP_FALLBACKS = ("cloud-provider:cloud-haiku-4-5", "openai:gpt-5.1-mini", "google:gemini-2.5-flash")
+_MAP_FALLBACKS = ("openai:gpt-5.1-mini", "google:gemini-2.5-flash")
 
 # provider -> (default model list, API-key env var). Ollama is not here — it is
 # discovered, not configured.
 _CLOUD = {
-    "cloud-provider": ("cloud-opus-5,cloud-sonnet-5,cloud-haiku-4-5", "REMOTE_API_KEY"),
     "openai": ("gpt-5.1,gpt-5.1-mini", "OPENAI_API_KEY"),
     "google": ("gemini-2.5-pro,gemini-2.5-flash", "GEMINI_API_KEY"),
 }
-_CLOUD_ORDER = ("cloud-provider", "openai", "google")
+_CLOUD_ORDER = ("openai", "google")
 _OPENAI_COMPAT_BASE = {
     "openai": "https://api.openai.com/v1",
     "google": "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -150,9 +147,9 @@ def _default_model_env() -> str:
 def _cloud_key(provider: str) -> str:
     var = _CLOUD.get(provider, (None, None))[1]
     key = (os.environ.get(var) or "").strip() if var else ""
-    # A real key from any of the three providers is comfortably longer than 30
+    # A real key from either cloud provider is comfortably longer than 30
     # chars; this filters empty values and obvious placeholders
-    # ("sk-ant-PUT_YOURS_HERE") so a provider isn't advertised as configured
+    # ("sk-PUT_YOURS_HERE") so a provider isn't advertised as configured
     # only to 401 on the first call.
     return key if len(key) >= 30 else ""
 
@@ -222,7 +219,7 @@ async def list_models() -> List[dict]:
 
 async def default_model() -> Optional[str]:
     """The model used when the request names none: the env default if available,
-    otherwise the first listed (Ollama wins, then cloud-provider/openai/google)."""
+    otherwise the first listed (Ollama wins, then openai/google)."""
     models = await list_models()
     if not models:
         return None
@@ -254,7 +251,7 @@ def context_passages_for(model_id: str) -> int:
 def disabled_reason() -> str:
     return (
         "Ask mode has no models available — start Ollama on the server, or set "
-        "an API key (REMOTE_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY)."
+        "an API key (OPENAI_API_KEY / GEMINI_API_KEY)."
     )
 
 
@@ -532,13 +529,6 @@ async def _provider_stream(
         async for chunk in _ollama_native_stream(model, system, messages):
             yield chunk
         return
-    if provider == "cloud-provider":
-        key = keys.get("cloud-provider") or _cloud_key("cloud-provider")
-        if not key:
-            raise GenerationError("cloud-provider is not configured (no API key)")
-        async for chunk in _cloud-provider_stream(model, system, messages, key):
-            yield chunk
-        return
     if provider in _CLOUD:
         key = keys.get(provider) or _cloud_key(provider)
         if not key:
@@ -663,32 +653,3 @@ async def _openai_compatible_stream(
                         yield text
     except httpx.HTTPError as exc:
         raise GenerationError(f"{model}: request failed — {exc}") from exc
-
-
-_cloud-provider_clients: dict = {}  # api_key -> AsyncCloud provider
-
-
-async def _cloud-provider_stream(
-    model: str, system: str, messages: List[dict], api_key: str
-) -> AsyncIterator[str]:
-    if not api_key:
-        raise GenerationError("no Cloud provider API key")
-    try:
-        import cloud-provider
-    except ModuleNotFoundError as exc:  # pragma: no cover - deployment choice
-        raise GenerationError("the 'cloud-provider' package is not installed") from exc
-
-    client = _cloud-provider_clients.get(api_key)
-    if client is None:
-        client = _cloud-provider_clients[api_key] = cloud-provider.AsyncCloud provider(api_key=api_key)
-    try:
-        async with client.messages.stream(
-            model=model,
-            max_tokens=GENERATION_MAX_TOKENS,
-            system=system,
-            messages=messages,
-        ) as stream:
-            async for text in stream.text_stream:
-                yield text
-    except cloud-provider.APIError as exc:
-        raise GenerationError(f"Cloud API error: {exc}") from exc

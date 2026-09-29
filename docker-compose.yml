@@ -98,11 +98,9 @@ services:
       # optional "provider:model" default (empty = first available).
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-8192}
-      REMOTE_API_KEY: ${REMOTE_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GENERATION_MODEL: ${GENERATION_MODEL:-}
-      REMOTE_MODELS: ${REMOTE_MODELS:-}
       OPENAI_MODELS: ${OPENAI_MODELS:-}
       GOOGLE_MODELS: ${GOOGLE_MODELS:-}
       GENERATION_MAX_TOKENS: ${GENERATION_MAX_TOKENS:-2000}

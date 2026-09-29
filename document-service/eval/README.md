@@ -273,9 +273,9 @@ CPU is slow, so `--repeat 3` on the full set is a coffee break.
 python eval/ask_harness.py --url http://192.168.0.122:3100/api \
   --judge ollama:qwen2.5:7b --judge-url http://192.168.0.122:11434 score
 
-# Cloud provider judge (needs REMOTE_API_KEY)
-REMOTE_API_KEY=sk-ant-... python eval/ask_harness.py --url … \
-  --judge cloud-provider:cloud-sonnet-5 score
+# Local Ollama judge
+python eval/ask_harness.py --url … --judge-url http://host:11434 \
+  --judge ollama:qwen2.5:7b score
 ```
 
 A missing key/URL disables the judge for the run (deterministic checks still run).

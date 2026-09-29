@@ -76,7 +76,7 @@ def service(tmp_path, monkeypatch):
     # Keep Ask mode hermetic: no Ollama probe, no cloud keys. Tests that exercise
     # generation monkeypatch generation.list_models / generate_stream directly.
     monkeypatch.setenv("OLLAMA_URL", "")
-    for _key in ("REMOTE_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GENERATION_MODEL"):
+    for _key in ("OPENAI_API_KEY", "GEMINI_API_KEY", "GENERATION_MODEL"):
         monkeypatch.delenv(_key, raising=False)
     import generation
 
