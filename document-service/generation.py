@@ -79,6 +79,9 @@ _SYSTEM_PROMPT = (
     "When the sources do explain a theoretical or speculative topic, answer from "
     "that explanation rather than refusing; distinguish the source's account from "
     "established fact when appropriate. "
+    "Answer every part of a multi-part question explicitly, preferably in separate "
+    "sentences or bullets; do not omit a requested number, name, date, or definition "
+    "when a source provides it. "
     "The sources are the top matches from a search, not the whole library — if "
     "the question calls for broader coverage, answer from what is here and note "
     "what may be missing. Be concise and preserve any mathematical notation "
@@ -101,7 +104,8 @@ _REDUCE_SYSTEM = (
     "or [2][3]. If the notes do not answer the question, say so; point out where "
     "coverage looks thin. When the notes explain a theoretical or speculative "
     "topic, answer from that explanation instead of refusing, while qualifying "
-    "uncertainty when needed. Organise the answer well and keep it concise; "
+    "uncertainty when needed. Answer every part of a multi-part question explicitly, "
+    "including exact figures when present. Organise the answer well and keep it concise; "
     "preserve mathematical notation exactly."
 )
 
