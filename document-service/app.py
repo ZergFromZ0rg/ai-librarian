@@ -778,15 +778,36 @@ def collection_document_ids(collection_id: Optional[str]) -> Optional[List[str]]
 def scope_document_ids(collection_id: Optional[str], shelf: Optional[str] = None) -> Optional[List[str]]:
     """The documents a search may return: one library's, narrowed to one shelf
     (and its sub-shelves) when given. None means no restriction."""
-    ids = collection_document_ids(collection_id)
     if not shelf:
-        return ids
+        return collection_document_ids(collection_id)
+
+    collection = None
+    if collection_id and collection_id != NOTES_COLLECTION_ID:
+        collection = next(
+            (item for item in configured_collections() if item["id"] == collection_id), None
+        )
+        if collection is None:
+            raise HTTPException(status_code=404, detail="library not found")
     try:
         wanted = shelves.normalize_shelf(shelf)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    on_shelf = [doc["document_id"] for doc in list_metadata() if shelves.on_shelf(doc, wanted)]
-    return on_shelf if ids is None else [doc_id for doc_id in on_shelf if doc_id in set(ids)]
+
+    # Read the metadata table once and apply both predicates in memory. This is
+    # especially useful for Ask's multi-pass modes, where the same scope is
+    # reused for several retrievals.
+    documents = list_metadata()
+    scoped = []
+    for doc in documents:
+        if collection_id == NOTES_COLLECTION_ID:
+            in_collection = doc.get("collection_id") == NOTES_COLLECTION_ID
+        elif collection is None or (collection.get("legacy") and not collection.get("path")):
+            in_collection = True
+        else:
+            in_collection = _belongs_to_collection(doc, collection)
+        if in_collection and shelves.on_shelf(doc, wanted):
+            scoped.append(doc["document_id"])
+    return scoped
 
 
 def validate_doc_id(doc_id: str) -> str:
@@ -2692,6 +2713,9 @@ async def search(request: SearchRequest):
     started = time.monotonic()
     min_score = request.rerank_min_score if request.rerank_min_score is not None else RERANK_MIN_SCORE
     try:
+        scoped_document_ids = await asyncio.to_thread(
+            scope_document_ids, request.collection_id, request.shelf
+        )
         hits, candidate_count, rerank_dropped, _ = await retrieve(
             clean_query(request.query),
             request.top_k,
@@ -2704,7 +2728,7 @@ async def search(request: SearchRequest):
             dense_weight=request.dense_weight,
             rerank_passage=request.rerank_passage,
             max_per_doc=request.max_per_doc,
-            document_ids=await asyncio.to_thread(scope_document_ids, request.collection_id, request.shelf),
+            document_ids=scoped_document_ids,
         )
     except HTTPException:
         raise
@@ -2845,6 +2869,11 @@ async def ask(request: AskRequest):
     history_turns = [turn.model_dump() for turn in request.history]
     agentic_queries: list[str] = []
     try:
+        # Resolve the scope once. Quick precision recovery and Agentic follow-up
+        # searches reuse it, avoiding repeated SQLite scans of the library.
+        scoped_document_ids = await asyncio.to_thread(
+            scope_document_ids, request.collection_id, request.shelf
+        )
         hits, candidate_count, rerank_dropped, relevant_count = await retrieve(
             clean_query(request.question),
             passages,
@@ -2855,7 +2884,7 @@ async def ask(request: AskRequest):
             gate,
             max_per_doc=max_per_doc,
             dedup_jaccard=ASK_DEDUP_JACCARD,
-            document_ids=await asyncio.to_thread(scope_document_ids, request.collection_id, request.shelf),
+            document_ids=scoped_document_ids,
         )
         if agentic and hits and ASK_AGENTIC_MAX_STEPS:
             merged_hits = list(hits)
@@ -2888,9 +2917,7 @@ async def ask(request: AskRequest):
                     gate,
                     max_per_doc=max_per_doc,
                     dedup_jaccard=ASK_DEDUP_JACCARD,
-                    document_ids=await asyncio.to_thread(
-                        scope_document_ids, request.collection_id, request.shelf
-                    ),
+                    document_ids=scoped_document_ids,
                 )
                 candidate_count += extra_candidates
                 rerank_dropped += extra_dropped
@@ -2914,9 +2941,7 @@ async def ask(request: AskRequest):
                     gate,
                     max_per_doc=max_per_doc,
                     dedup_jaccard=ASK_DEDUP_JACCARD,
-                    document_ids=await asyncio.to_thread(
-                        scope_document_ids, request.collection_id, request.shelf
-                    ),
+                    document_ids=scoped_document_ids,
                 )
                 candidate_count += extra_candidates
                 rerank_dropped += extra_dropped
@@ -3331,8 +3356,9 @@ class CollectionPatch(BaseModel):
 
 
 def _collection_response() -> List[dict]:
-    docs = [doc for doc in list_metadata() if doc.get("collection_id") != NOTES_COLLECTION_ID]
-    notes = sum(1 for doc in list_metadata() if doc.get("collection_id") == NOTES_COLLECTION_ID)
+    all_documents = list_metadata()
+    docs = [doc for doc in all_documents if doc.get("collection_id") != NOTES_COLLECTION_ID]
+    notes = sum(1 for doc in all_documents if doc.get("collection_id") == NOTES_COLLECTION_ID)
     return [
         {**collection, "document_count": sum(_belongs_to_collection(doc, collection) for doc in docs)}
         for collection in configured_collections()

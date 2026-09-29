@@ -205,8 +205,12 @@ class MetadataStore:
                 f"INSERT INTO documents ({', '.join(COLUMNS)}) VALUES ({placeholders})",
                 values,
             )
+            row = self._conn.execute(
+                "SELECT * FROM documents WHERE document_id = ?",
+                (metadata["document_id"],),
+            ).fetchone()
             self._conn.commit()
-        return self.get(metadata["document_id"])
+        return _row_to_dict(row)
 
     def update(self, document_id: str, changes: dict) -> dict:
         unknown = set(changes) - UPDATABLE_COLUMNS
@@ -225,8 +229,11 @@ class MetadataStore:
             )
             if cursor.rowcount == 0:
                 raise KeyError(document_id)
+            row = self._conn.execute(
+                "SELECT * FROM documents WHERE document_id = ?", (document_id,)
+            ).fetchone()
             self._conn.commit()
-        return self.get(document_id)
+        return _row_to_dict(row)
 
     def delete(self, document_id: str) -> None:
         with self._lock:

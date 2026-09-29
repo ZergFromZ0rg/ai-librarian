@@ -1,6 +1,8 @@
 import hashlib
 import logging
 import os
+import threading
+import time
 from typing import Dict, List, Optional
 
 from qdrant_client import QdrantClient
@@ -42,10 +44,40 @@ ALLOW_INDEX_RESET = os.environ.get("ALLOW_INDEX_RESET", "").strip().lower() in {
 FUSION_METHOD = os.environ.get("FUSION_METHOD", "rrf").strip().lower()
 FUSION_DENSE_WEIGHT = float(os.environ.get("FUSION_DENSE_WEIGHT", "0.5"))
 _NATIVE_FUSION = {"rrf": Fusion.RRF, "dbsf": Fusion.DBSF}
+COLLECTION_EXISTS_CACHE_SECONDS = float(
+    os.environ.get("QDRANT_COLLECTION_CACHE_SECONDS", "5")
+)
 
 logger = logging.getLogger("ai_librarian.vector_store")
 
 client = QdrantClient(url=QDRANT_URL, timeout=10, check_compatibility=False)
+_COLLECTION_EXISTS_CACHE = {}
+_COLLECTION_CACHE_LOCK = threading.Lock()
+
+
+def _cached_collection_exists() -> bool:
+    """Avoid a metadata round trip before every search.
+
+    Collection creation and schema changes are handled by this process, so a
+    short-lived cache is safe and removes one Qdrant request from the normal
+    search path. The key includes the client identity and collection name so
+    tests and live reconfiguration can swap either without stale state.
+    """
+    key = (id(client), COLLECTION)
+    now = time.monotonic()
+    with _COLLECTION_CACHE_LOCK:
+        cached = _COLLECTION_EXISTS_CACHE.get(key)
+        if cached and now - cached[0] < COLLECTION_EXISTS_CACHE_SECONDS:
+            return cached[1]
+    exists = client.collection_exists(COLLECTION)
+    with _COLLECTION_CACHE_LOCK:
+        _COLLECTION_EXISTS_CACHE[key] = (now, exists)
+    return exists
+
+
+def _cache_collection_exists(exists: bool) -> None:
+    with _COLLECTION_CACHE_LOCK:
+        _COLLECTION_EXISTS_CACHE[(id(client), COLLECTION)] = (time.monotonic(), exists)
 
 
 def _create_collection(vector_size: int) -> None:
@@ -69,6 +101,7 @@ def ensure_collection(vector_size: int):
     collections = [collection.name for collection in client.get_collections().collections]
     if COLLECTION not in collections:
         _create_collection(vector_size)
+        _cache_collection_exists(True)
         return
 
     info = client.get_collection(COLLECTION)
@@ -80,6 +113,7 @@ def ensure_collection(vector_size: int):
     structural_ok = dense is not None and sparse_ok
     dimension_ok = dense is not None and dense.size == vector_size
     if structural_ok and dimension_ok:
+        _cache_collection_exists(True)
         return
 
     if structural_ok and not dimension_ok and not ALLOW_INDEX_RESET:
@@ -103,6 +137,7 @@ def ensure_collection(vector_size: int):
     )
     client.delete_collection(COLLECTION)
     _create_collection(vector_size)
+    _cache_collection_exists(True)
 
 
 def chunk_id_to_int(cid: str) -> int:
@@ -200,7 +235,7 @@ def search_vectors(
     a list value matches any of its items.
     `fusion` / `dense_weight` override FUSION_METHOD / FUSION_DENSE_WEIGHT.
     """
-    if not client.collection_exists(COLLECTION):
+    if not _cached_collection_exists():
         return []
 
     method = (fusion or FUSION_METHOD).strip().lower()
