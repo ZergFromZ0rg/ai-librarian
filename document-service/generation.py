@@ -121,6 +121,16 @@ _AGENT_SYSTEM = (
     "search. Do not answer the user, invent facts, or request more than one query."
 )
 
+_VERIFY_SYSTEM = (
+    "You are the final editor for a grounded reading-library answer. Rewrite the "
+    "draft so it answers every part of the user's question explicitly, using only "
+    "the numbered sources. Preserve or add source citations in square brackets. "
+    "If a source gives an exact number, name, date, or definition, include it "
+    "rather than replacing it with a guess. Do not refuse a theoretical question "
+    "when the sources explain it; qualify uncertainty instead. Return only the "
+    "corrected answer, with no editorial commentary."
+)
+
 
 class GenerationError(RuntimeError):
     """A provider failed to produce an answer (network, auth, bad response)."""
@@ -291,6 +301,41 @@ def build_ask_prompt(
         {"role": "user", "content": f"Sources:\n\n{context}\n\n---\n\nQuestion: {question}"}
     )
     return _SYSTEM_PROMPT, messages, used
+
+
+async def generate_agentic(
+    model_id: str,
+    question: str,
+    sources: List[dict],
+    history: Optional[List[dict]] = None,
+    keys: Optional[dict] = None,
+    max_passages: Optional[int] = None,
+) -> AsyncIterator[Tuple[str, str]]:
+    """Generate an answer, then run one bounded coverage-edit pass.
+
+    Research mode has already paid for a planner/search loop, so a short final
+    edit is worthwhile: small local models will sometimes retrieve the exact
+    fact but omit it when a question has multiple parts.
+    """
+    system, messages, _used = build_ask_prompt(question, sources, history, max_passages)
+    yield ("progress", "Checking answer coverage…")
+    draft = (await _complete(model_id, system, messages, keys)).strip()
+    verify_messages = list(history or [])
+    verify_messages.append(
+        {
+            "role": "user",
+            "content": (
+                f"Sources and question:\n\n{messages[-1]['content']}\n\n"
+                f"Draft answer:\n\n{draft}"
+            ),
+        }
+    )
+    try:
+        answer = (await _complete(model_id, _VERIFY_SYSTEM, verify_messages, keys)).strip()
+    except GenerationError as exc:
+        logger.info("Agentic coverage edit failed; using draft: %s", exc)
+        answer = draft
+    yield ("token", answer or draft)
 
 
 def _model_label(model_id: str) -> str:

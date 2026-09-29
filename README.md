@@ -327,7 +327,8 @@ local one, else a small cloud model, else your selected model — overridable wi
 **Research mode** is a bounded alternative for hard, multi-part questions. The selected model
 may request up to `ASK_AGENTIC_MAX_STEPS` targeted searches when the initial evidence looks
 incomplete. The server performs those searches, merges the results, and writes one grounded
-answer; the model cannot access arbitrary tools or files.
+answer; a final coverage-edit pass checks that requested details and exact figures were not
+omitted. The model cannot access arbitrary tools or files.
 
 ### Other knobs
 

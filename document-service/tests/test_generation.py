@@ -174,6 +174,26 @@ def test_decide_followup_accepts_only_a_bounded_search_command(monkeypatch):
     assert run(generation.decide_followup("ollama:m", "q?", [])) is None
 
 
+def test_generate_agentic_runs_a_coverage_edit(monkeypatch):
+    replies = iter(["Draft omits the exact figure.", "Each book has 410 pages [1]."])
+
+    async def fake_complete(*_args, **_kwargs):
+        return next(replies)
+
+    monkeypatch.setattr(generation, "_complete", fake_complete)
+    frames = run(
+        _collect(
+            generation.generate_agentic(
+                "ollama:m",
+                "How large is each book?",
+                [{"document": "Babel.pdf", "page": 2, "text": "Each book contains 410 pages."}],
+            )
+        )
+    )
+    assert frames[0][0] == "progress"
+    assert frames[-1] == ("token", "Each book has 410 pages [1].")
+
+
 def test_generate_stream_uses_a_request_key_for_a_cloud_provider(monkeypatch):
     seen = {}
 

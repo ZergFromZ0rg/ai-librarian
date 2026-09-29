@@ -2879,6 +2879,19 @@ async def ask(request: AskRequest):
                     model, request.question, used, history_turns, keys=provider_keys
                 ):
                     yield _sse({"type": kind, "text": text})
+            elif agentic:
+                _system, _messages, used = generation.build_ask_prompt(
+                    request.question, sources, history_turns, max_passages=passages
+                )
+                async for kind, text in generation.generate_agentic(
+                    model,
+                    request.question,
+                    used,
+                    history_turns,
+                    keys=provider_keys,
+                    max_passages=passages,
+                ):
+                    yield _sse({"type": kind, "text": text})
             else:
                 system, messages, used = generation.build_ask_prompt(
                     request.question, sources, history_turns, max_passages=passages
