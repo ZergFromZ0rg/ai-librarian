@@ -194,6 +194,16 @@ def test_generate_agentic_runs_a_coverage_edit(monkeypatch):
     assert frames[-1] == ("token", "Each book has 410 pages [1].")
 
 
+def test_repair_explicit_page_fact_adds_source_sentence_when_model_omits_it():
+    answer = generation._repair_explicit_page_fact(
+        "What does the Library of Babel contain, and how large is each book?",
+        "The library contains every possible combination of symbols.",
+        [{"text": "Each book contains four hundred ten pages; each page has forty lines."}],
+    )
+    assert "four hundred ten pages" in answer
+    assert answer.endswith("[1]")
+
+
 def test_generate_stream_uses_a_request_key_for_a_cloud_provider(monkeypatch):
     seen = {}
 

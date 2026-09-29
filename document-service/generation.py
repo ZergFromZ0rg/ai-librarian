@@ -21,6 +21,7 @@ import collections
 import json
 import logging
 import os
+import re
 import time
 from typing import AsyncIterator, List, Optional, Tuple
 
@@ -305,6 +306,36 @@ def build_ask_prompt(
     return _SYSTEM_PROMPT, messages, used
 
 
+def _repair_explicit_page_fact(question: str, answer: str, sources: List[dict]) -> str:
+    """Keep an exact book/page fact from being lost in local-model synthesis."""
+    lowered_question = (question or "").casefold()
+    asks_book_size = "book" in lowered_question and any(
+        term in lowered_question for term in ("page", "how large", "size", "how many")
+    )
+    if not asks_book_size:
+        return answer
+    lowered_answer = (answer or "").casefold()
+    for index, source in enumerate(sources, 1):
+        text = (source.get("text") or "").strip()
+        if not text:
+            continue
+        for sentence in re.split(r"(?<=[.!?])\s+", text):
+            lowered = sentence.casefold()
+            if "book" not in lowered or "page" not in lowered:
+                continue
+            numbers = re.findall(r"\b\d{2,}\b", sentence)
+            number_words = re.findall(
+                r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|"
+                r"twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|"
+                r"hundred|thousand|million)\b",
+                lowered,
+            )
+            explicit_numbers = numbers or number_words
+            if explicit_numbers and not any(number in lowered_answer for number in explicit_numbers):
+                return f"{answer.rstrip()}\n\nThe source states: {sentence.strip()} [{index}]"
+    return answer
+
+
 async def generate_agentic(
     model_id: str,
     question: str,
@@ -337,7 +368,8 @@ async def generate_agentic(
     except GenerationError as exc:
         logger.info("Agentic coverage edit failed; using draft: %s", exc)
         answer = draft
-    yield ("token", answer or draft)
+    final_answer = answer or draft
+    yield ("token", _repair_explicit_page_fact(question, final_answer, _used))
 
 
 def _model_label(model_id: str) -> str:
