@@ -2,6 +2,7 @@ import asyncio
 import collections
 import concurrent.futures
 import contextvars
+from difflib import SequenceMatcher
 import hashlib
 import json
 import logging
@@ -38,7 +39,7 @@ from chunking import (
     parse_typed_blocks,
 )
 from conversations import ConversationStore
-from database import MetadataStore
+from database import MetadataStore, OwnedBookStore
 from doc_kind import detect_kind
 from embeddings import (
     DEFAULT_MODEL as EMBEDDING_MODEL,
@@ -436,6 +437,7 @@ def record_ask_outcome(
 
 
 STORE = MetadataStore(DATA_DIR / "library.db")
+OWNED_BOOKS = OwnedBookStore(STORE._conn)
 _imported = STORE.import_legacy(METADATA_DIR)
 if _imported:
     logger.info("Imported %d legacy metadata records into %s", _imported, DATA_DIR / "library.db")
@@ -482,6 +484,20 @@ class DocumentPatch(BaseModel):
     kind: Optional[str] = Field(default=None, pattern=r"^(book|paper|document|auto)$")
     # "Books/Philosophy/Albert Camus"; null or "" goes back to the suggestion.
     shelf: Optional[str] = Field(default=None, max_length=500)
+
+
+class OwnedBookBody(BaseModel):
+    title: str = Field(min_length=1, max_length=300)
+    author: Optional[str] = Field(default=None, max_length=240)
+    notes: Optional[str] = Field(default=None, max_length=5_000)
+    pdf_less: bool = True
+
+
+class OwnedBookPatch(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=300)
+    author: Optional[str] = Field(default=None, max_length=240)
+    notes: Optional[str] = Field(default=None, max_length=5_000)
+    pdf_less: Optional[bool] = None
 
 
 class NoteBody(BaseModel):
@@ -2213,6 +2229,112 @@ async def config():
 @app.get("/documents")
 async def get_documents():
     return {"documents": await asyncio.to_thread(list_metadata)}
+
+
+def _match_key(value: Optional[str]) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+
+
+def _owned_book_match(book: dict, documents: list[dict]) -> Optional[dict]:
+    """Find a conservative title/author match for a PDF-less registry entry."""
+    wanted_title = _match_key(book.get("title"))
+    wanted_author = _match_key(book.get("author"))
+    if not wanted_title:
+        return None
+    best = None
+    for document in documents:
+        if document.get("indexing_status") == "error":
+            continue
+        filename = Path(document.get("filename") or "").stem
+        candidates = [document.get("title"), filename]
+        title_score = max(
+            (SequenceMatcher(None, wanted_title, _match_key(candidate)).ratio() for candidate in candidates if candidate),
+            default=0,
+        )
+        if wanted_title == _match_key(document.get("title")) or wanted_title == _match_key(filename):
+            title_score = 1.0
+        author_score = 1.0 if not wanted_author else max(
+            (SequenceMatcher(None, wanted_author, _match_key(document.get("author"))).ratio(),
+             SequenceMatcher(None, wanted_author, _match_key(filename)).ratio()),
+        )
+        score = title_score if not wanted_author else title_score * 0.8 + author_score * 0.2
+        if score >= (0.86 if wanted_author else 0.9) and (best is None or score > best[0]):
+            best = (score, document)
+    if best is None:
+        return None
+    document = best[1]
+    return {
+        "document_id": document["document_id"],
+        "filename": document["filename"],
+        "title": document.get("title") or Path(document["filename"]).stem,
+        "indexing_status": document.get("indexing_status"),
+        "score": round(best[0], 3),
+    }
+
+
+async def _owned_books_with_matches() -> list[dict]:
+    books, documents = await asyncio.gather(
+        asyncio.to_thread(OWNED_BOOKS.list_all),
+        asyncio.to_thread(list_metadata),
+    )
+    enriched = []
+    for book in books:
+        match = _owned_book_match(book, documents)
+        enriched.append({**book, "match": match, "match_alert": bool(book.get("pdf_less") and match)})
+    return enriched
+
+
+@app.get("/owned-books")
+async def get_owned_books():
+    return {"books": await _owned_books_with_matches()}
+
+
+@app.post("/owned-books")
+async def create_owned_book(body: OwnedBookBody):
+    now = utc_now()
+    record = {
+        "book_id": secrets.token_hex(6),
+        "title": body.title.strip(),
+        "author": body.author.strip() if body.author else None,
+        "notes": body.notes.strip() if body.notes else None,
+        "pdf_less": int(body.pdf_less),
+        "created_at": now,
+        "updated_at": now,
+    }
+    if not record["title"]:
+        raise HTTPException(status_code=422, detail="title cannot be blank")
+    created = await asyncio.to_thread(OWNED_BOOKS.create, record)
+    match = _owned_book_match(created, await asyncio.to_thread(list_metadata))
+    return {"book": {**created, "match": match, "match_alert": bool(created.get("pdf_less") and match)}}
+
+
+@app.patch("/owned-books/{book_id}")
+async def patch_owned_book(book_id: str, body: OwnedBookPatch):
+    if not re.fullmatch(r"[a-f0-9]{12}", book_id):
+        raise HTTPException(status_code=400, detail="invalid owned-book id")
+    changes = {key: value for key, value in body.model_dump().items() if key in body.model_fields_set}
+    if "title" in changes:
+        changes["title"] = changes["title"].strip()
+        if not changes["title"]:
+            raise HTTPException(status_code=422, detail="title cannot be blank")
+    if "author" in changes and changes["author"]:
+        changes["author"] = changes["author"].strip()
+    if "notes" in changes and changes["notes"]:
+        changes["notes"] = changes["notes"].strip()
+    changes["updated_at"] = utc_now()
+    try:
+        await asyncio.to_thread(OWNED_BOOKS.update, book_id, changes)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="owned book not found") from exc
+    return {"book": next(book for book in await _owned_books_with_matches() if book["book_id"] == book_id)}
+
+
+@app.delete("/owned-books/{book_id}")
+async def delete_owned_book(book_id: str):
+    if not re.fullmatch(r"[a-f0-9]{12}", book_id):
+        raise HTTPException(status_code=400, detail="invalid owned-book id")
+    await asyncio.to_thread(OWNED_BOOKS.delete, book_id)
+    return {"ok": True}
 
 
 @app.post("/documents")

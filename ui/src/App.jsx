@@ -35,6 +35,7 @@ const MODE_KEY = "ai-librarian.mode";
 const SEARCH_PARAMS_KEY = "ai-librarian.search.params";
 const ASK_PARAMS_KEY = "ai-librarian.ask.params";
 const LIBRARY_KEY = "ai-librarian.library";
+const SIDEBAR_COLLAPSED_KEY = "ai-librarian.sidebar.collapsed";
 const LEGACY_THOROUGH_KEY = "ai-librarian.ask.thorough";
 
 // Server defaults until /config says otherwise (RERANK_MIN_SCORE and
@@ -110,6 +111,7 @@ export default function App() {
   const [theme, setTheme] = useState(() => currentTheme() || "light");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [notebookOpen, setNotebookOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => loadStored(SIDEBAR_COLLAPSED_KEY, "") === "1");
 
   // Collection maintenance: uploads, rescans, folder-import jobs, reindexing.
   const [job, setJob] = useState(null);
@@ -178,6 +180,7 @@ export default function App() {
   useEffect(() => saveStored(KEYS_KEY, apiKeys), [apiKeys]);
   useEffect(() => saveStored(SEARCH_PARAMS_KEY, searchParams), [searchParams]);
   useEffect(() => saveStored(ASK_PARAMS_KEY, askParams), [askParams]);
+  useEffect(() => saveStored(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? "1" : "0"), [sidebarCollapsed]);
 
   const setActiveChatId = useCallback((id) => {
     setActiveChatIdState(id);
@@ -776,50 +779,49 @@ export default function App() {
   // ---- render --------------------------------------------------------------
 
   return (
-    <div className="app" onDragEnter={handleDragEnter} onDragLeave={handleDragLeave} onDrop={handleDrop}>
-      <header className="masthead">
-        <div className="masthead-left">
-          <button type="button" className="brand" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>
+    <div className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}`} onDragEnter={handleDragEnter} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+      <aside className="app-sidebar" aria-label="Workspace navigation">
+        <div className="sidebar-head">
+          <div className="sidebar-brand">
             <span className="brand-mark" aria-hidden="true" />
-            <span className="brand-name">AI Librarian</span>
+            <span>AI Librarian</span>
+          </div>
+          <button type="button" className="sidebar-collapse" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}>
+            <span aria-hidden="true">{sidebarCollapsed ? "›" : "‹"}</span>
           </button>
-          {askEnabled && (
-            <button
-              type="button"
-              className={`chat-crumb${isAsk ? " current" : ""}`}
-              onClick={() => setNotebookOpen(true)}
-              title="Switch conversation"
-            >
-              <span className="chat-crumb-sep" aria-hidden="true">/</span>
-              <span className="chat-crumb-label">Chat</span>
-              <span className="chat-crumb-title">{activeChatTitle}</span>
-              <span className="chat-crumb-caret" aria-hidden="true">▾</span>
-            </button>
-          )}
         </div>
-        <nav className="masthead-nav">
-          <button type="button" className="nav-button" onClick={() => setNotebookOpen(true)} aria-expanded={notebookOpen}>
-            <NotebookIcon />
-            <span className="nav-label">History</span>
+        {askEnabled && (
+          <button type="button" className="sidebar-new" onClick={newChat} title="New chat">
+            <span aria-hidden="true">＋</span>
+            New chat
           </button>
-          <button type="button" className="nav-button" onClick={() => stacksRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+        )}
+        <nav className="sidebar-nav" aria-label="Primary">
+          <button type="button" className="sidebar-link" onClick={() => stacksRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })} aria-label="Library" title="Library">
             <LibraryIcon />
-            <span className="nav-label">Library</span>
+            Library
           </button>
-          <span className="health" title={`Index: ${health?.qdrant ? "ready" : "offline"}`}>
-            <span className={`health-dot${healthReady ? " ready" : health ? " down" : ""}`} />
-            <span className="nav-label">{healthReady ? "Ready" : health?.status || "Connecting"}</span>
-          </span>
-          <div className="settings-anchor">
-            <button
-              type="button"
-              className="icon-button"
-              onClick={() => setSettingsOpen((open) => !open)}
-              aria-label="Settings"
-              aria-expanded={settingsOpen}
-              title="Settings"
-            >
+          <button type="button" className="sidebar-link" onClick={() => setNotebookOpen(true)} aria-label="History" title="History">
+            <NotebookIcon />
+            History
+          </button>
+        </nav>
+        {askEnabled && chats.length > 0 && (
+          <div className="sidebar-history">
+            <div className="sidebar-section-label">Recent chats</div>
+            {chats.slice(0, 8).map((chat) => (
+              <button type="button" className={`sidebar-chat${chat.id === activeChatId ? " active" : ""}`} key={chat.id} onClick={() => selectChat(chat.id)} title={chat.title}>
+                <span aria-hidden="true">¶</span>
+                <span>{chat.title || "Untitled chat"}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="sidebar-footer">
+          <div className="sidebar-settings-anchor">
+            <button type="button" className="sidebar-link" onClick={() => setSettingsOpen((open) => !open)} aria-expanded={settingsOpen} aria-label="Settings" title="Settings">
               <GearIcon />
+              Settings
             </button>
             {settingsOpen && (
               <Settings
@@ -842,11 +844,25 @@ export default function App() {
               />
             )}
           </div>
-        </nav>
+          <span className="sidebar-status"><span className={`health-dot${healthReady ? " ready" : health ? " down" : ""}`} />{healthReady ? "Index ready" : "Connecting"}</span>
+        </div>
+      </aside>
+      <header className="masthead">
+        <div className="masthead-left">
+          <div className="brand">
+            <span className="brand-mark" aria-hidden="true" />
+            <span className="brand-name">AI Librarian</span>
+          </div>
+          {askEnabled && (
+            <div className={`chat-crumb${isAsk ? " current" : ""}`}>
+              <span className="chat-crumb-title">{activeChatTitle}</span>
+            </div>
+          )}
+        </div>
       </header>
 
       <main>
-        <section className={`hero${workspaceActive ? " docked" : ""}`} ref={heroRef}>
+        <section className={`hero${workspaceActive ? " docked" : ""}${workspaceActive && isAsk ? " chat-bottom" : ""}`} ref={heroRef}>
           <div className="hero-center">
             {!workspaceActive && (
               <div className="hero-intro">
@@ -891,19 +907,16 @@ export default function App() {
               }}
             />
             {!workspaceActive && inquiries.length > 0 && (
-              // Laid out as a grid of equal columns so the row spans exactly
-              // the search bar's width, whatever the queries' lengths.
-              <div
-                className="recent-inquiries"
-                style={{ gridTemplateColumns: `auto repeat(${Math.min(3, inquiries.length)}, minmax(0, 1fr))` }}
-              >
+              <div className="recent-inquiries">
                 <span className="eyebrow">Recent</span>
-                {inquiries.slice(0, 3).map((entry) => (
-                  <button type="button" className="inquiry-chip" key={`${entry.mode}:${entry.q}`} onClick={() => runInquiry(entry)} title={entry.q}>
-                    <span className="inquiry-chip-glyph" aria-hidden="true">{entry.mode === "ask" ? "¶" : "§"}</span>
-                    <span className="inquiry-chip-text">{entry.q}</span>
-                  </button>
-                ))}
+                <div className="recent-inquiry-list">
+                  {inquiries.slice(0, 6).map((entry) => (
+                    <button type="button" className="inquiry-chip" key={`${entry.mode}:${entry.q}`} onClick={() => runInquiry(entry)} title={entry.q}>
+                      <span className="inquiry-chip-glyph" aria-hidden="true">{entry.mode === "ask" ? "¶" : "§"}</span>
+                      <span className="inquiry-chip-text">{entry.q}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
             {!workspaceActive && (
@@ -946,37 +959,39 @@ export default function App() {
           </section>
         )}
 
-        <Stacks
-          sectionRef={stacksRef}
-          apiBase={API_BASE}
-          documents={documents}
-          collections={collections}
-          libraryRoot={libraryRoot}
-          settingRoot={settingRoot}
-          onSetLibraryFolder={setLibraryFolder}
-          onImported={() => {
-            refreshDocuments();
-            refreshCollections();
-          }}
-          onJob={setJob}
-          onOpenDocument={(doc) => openDocument(doc)}
-          onScope={(doc) => scopeTo(doc.document_id, doc.filename)}
-          onScopeShelf={scopeToShelf}
-          onUpload={uploadFiles}
-          uploading={uploading}
-          onRescan={rescanLibraryFolder}
-          onCreateCollection={createCollection}
-          onUpdateCollection={updateCollection}
-          onDeleteCollection={deleteCollection}
-          onApproveOcr={approveOcr}
-          attaching={attaching}
-          reindexing={reindexing}
-          onReindex={reindexDocuments}
-          onRemove={removeDocument}
-          onPatch={patchDocument}
-          notice={notice}
-          job={job}
-        />
+        {!workspaceActive && (
+          <Stacks
+            sectionRef={stacksRef}
+            apiBase={API_BASE}
+            documents={documents}
+            collections={collections}
+            libraryRoot={libraryRoot}
+            settingRoot={settingRoot}
+            onSetLibraryFolder={setLibraryFolder}
+            onImported={() => {
+              refreshDocuments();
+              refreshCollections();
+            }}
+            onJob={setJob}
+            onOpenDocument={(doc) => openDocument(doc)}
+            onScope={(doc) => scopeTo(doc.document_id, doc.filename)}
+            onScopeShelf={scopeToShelf}
+            onUpload={uploadFiles}
+            uploading={uploading}
+            onRescan={rescanLibraryFolder}
+            onCreateCollection={createCollection}
+            onUpdateCollection={updateCollection}
+            onDeleteCollection={deleteCollection}
+            onApproveOcr={approveOcr}
+            attaching={attaching}
+            reindexing={reindexing}
+            onReindex={reindexDocuments}
+            onRemove={removeDocument}
+            onPatch={patchDocument}
+            notice={notice}
+            job={job}
+          />
+        )}
       </main>
 
       <Notebook

@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import Cover from "./Cover.jsx";
 import { CoverFlags, MarkControls } from "./DocMarks.jsx";
 import NotesPanel from "./NotesPanel.jsx";
+import OwnedBooks from "./OwnedBooks.jsx";
 import ShelfView from "./ShelfView.jsx";
 import { displayTitle, loadStored, saveStored } from "./storage.js";
 
@@ -625,6 +626,9 @@ export default function Stacks(props) {
           <button type="button" role="tab" aria-selected={tab === "notes"} className={tab === "notes" ? "active" : ""} onClick={() => setTab("notes")}>
             Notes <span className="tab-count">{noteCount}</span>
           </button>
+          <button type="button" role="tab" aria-selected={tab === "owned"} className={tab === "owned" ? "active" : ""} onClick={() => setTab("owned")}>
+            Owned books
+          </button>
           <button type="button" role="tab" aria-selected={tab === "catalogue"} className={tab === "catalogue" ? "active" : ""} onClick={() => setTab("catalogue")}>
             Index <span className="tab-count">{documents.length}</span>
           </button>
@@ -644,6 +648,7 @@ export default function Stacks(props) {
       {tab === "shelves" && <Shelves {...props} collection={activeCollection} libraryRoot={activeCollection?.path ?? props.libraryRoot} view={view} />}
       {tab === "sorted" && <ShelfView apiBase={apiBase} documents={documents} onChanged={onImported} onOpenDocument={onOpenDocument} onScopeShelf={onScopeShelf} />}
       {tab === "notes" && <NotesPanel apiBase={apiBase} onChanged={onImported} />}
+      {tab === "owned" && <OwnedBooks apiBase={apiBase} documents={documents} onOpenDocument={onOpenDocument} />}
       {tab === "catalogue" && <Catalogue {...props} />}
     </section>
   );

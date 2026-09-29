@@ -7,7 +7,7 @@ import { displayTitle } from "./storage.js";
 
 // Turn each bracketed citation number ("[1]", "[2][3]" -> two) into its own
 // <sup class="cite" data-n="N"> so it can be made clickable in `components`.
-function citationRehype() {
+function citationRehype(maxCitation = Infinity) {
   const pattern = /\[(\d+)\]/g;
   const split = (value) => {
     pattern.lastIndex = 0;
@@ -17,6 +17,11 @@ function citationRehype() {
     let last = 0;
     let match;
     while ((match = pattern.exec(value)) !== null) {
+      if (Number(match[1]) > maxCitation) {
+        pieces.push({ type: "text", value: match[0] });
+        last = match.index + match[0].length;
+        continue;
+      }
       if (match.index > last) pieces.push({ type: "text", value: value.slice(last, match.index) });
       pieces.push({
         type: "element",
@@ -45,7 +50,9 @@ function citationRehype() {
     }
     node.children = next;
   };
-  return (tree) => walk(tree);
+  // unified calls the rehype plugin first, then calls the transformer it
+  // returns with the syntax tree. Keep that two-stage shape explicit.
+  return () => (tree) => walk(tree);
 }
 
 // One assistant turn. Split out (rather than inlined in the .map() below) so
@@ -77,7 +84,7 @@ function AssistantTurn({ turn, index, onViewSource, onToggleCitation, modelLabel
         <div className="answer prose">
           <ReactMarkdown
             remarkPlugins={remarkPlugins}
-            rehypePlugins={[citationRehype, katexPlugin]}
+            rehypePlugins={[citationRehype(turn.sources?.length || 0), katexPlugin]}
             skipHtml
             components={{
               sup: ({ node, children }) => {
@@ -177,15 +184,19 @@ export function AskRail({ conversation, onToggleCitation }) {
 
 export default function AskThread({ conversation, onViewSource, onToggleCitation, modelLabel, noModels, loading }) {
   const lastUserRef = useRef(null);
-  const count = conversation.length;
+  const lastScrolledUserIndex = useRef(-1);
 
-  // Bring each follow-up question into view once, as it's asked — not on
-  // every streamed token, which would fight the reader scrolling back up. A
-  // conversation's first question already sits at the top of the page.
+  // Anchor each new question once, before its answer grows. The assistant can
+  // stream for a long time; re-scrolling on every token would make it
+  // impossible to read or inspect the answer while it is being generated.
   useEffect(() => {
-    if (count > 2) lastUserRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
-    else window.scrollTo({ top: 0 });
-  }, [count]);
+    const lastUserIndex = conversation.map((turn) => turn.role).lastIndexOf("user");
+    if (lastUserIndex < 0 || lastUserIndex === lastScrolledUserIndex.current) return;
+    lastScrolledUserIndex.current = lastUserIndex;
+    window.requestAnimationFrame(() => {
+      lastUserRef.current?.scrollIntoView({ block: "start", behavior: "auto" });
+    });
+  }, [conversation]);
 
   if (loading) {
     return (

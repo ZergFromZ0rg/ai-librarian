@@ -3267,6 +3267,403 @@ select.input {
   }
 }
 
+/* Recent inquiries are compact, centered pills rather than full-width rows.
+   The array is newest-first, so the first chip stays leftmost once a row is
+   full. With fewer items the whole group remains centered. */
+.recent-inquiries {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.recent-inquiries > .eyebrow {
+  margin: 0;
+  text-align: center;
+}
+
+.recent-inquiry-list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.recent-inquiries .inquiry-chip {
+  flex: 0 1 auto;
+  width: auto;
+  max-width: min(300px, 100%);
+  height: 32px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  padding-inline: 12px;
+}
+
+.recent-inquiries .inquiry-chip:hover {
+  background: var(--surface-3);
+}
+
+/* A little more rhythm in the rail: one compact action group, then history. */
+.app-sidebar {
+  gap: 12px;
+}
+
+.sidebar-head {
+  min-height: 30px;
+}
+
+.sidebar-nav {
+  gap: 2px;
+}
+
+.sidebar-link {
+  min-height: 36px;
+}
+
+.sidebar-history {
+  gap: 2px;
+  padding-top: 2px;
+}
+
+.sidebar-chat {
+  min-height: 34px;
+  border: 1px solid transparent;
+}
+
+.sidebar-chat.active {
+  border-color: var(--rule);
+}
+
+@media (max-width: 560px) {
+  .recent-inquiries .inquiry-chip {
+    max-width: 100%;
+  }
+}
+
+/* ---------------------------------------------------------- owned books -- */
+.owned-books {
+  display: grid;
+  gap: 20px;
+  margin-top: 24px;
+}
+
+.owned-books-intro {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 16px;
+}
+
+.owned-books-intro h3 {
+  margin-top: 4px;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.owned-books-intro p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.owned-books-count {
+  flex: none;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.owned-book-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.2fr) minmax(150px, 0.8fr) minmax(180px, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  background: var(--surface-2);
+  padding: 12px;
+}
+
+.owned-book-form .input {
+  width: 100%;
+}
+
+.owned-book-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.owned-book-check input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.owned-book-list {
+  display: grid;
+  gap: 8px;
+}
+
+.owned-book-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 14px 16px;
+}
+
+.owned-book-card.has-match {
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--rule));
+  background: color-mix(in srgb, var(--ok-tint) 55%, var(--surface));
+}
+
+.owned-book-card-main {
+  min-width: 0;
+}
+
+.owned-book-card h4 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.owned-book-author,
+.owned-book-notes {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.owned-book-notes {
+  color: var(--ink-2);
+  font-style: italic;
+}
+
+.owned-book-card-side {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.owned-book-status {
+  border: 1px solid var(--rule-strong);
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.owned-book-status.matched {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.owned-book-alert {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ok);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.owned-book-alert > span {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--ok);
+  color: var(--surface);
+  font-size: 10px;
+}
+
+.owned-books-empty {
+  margin: 0;
+  padding: 20px 0;
+}
+
+@media (max-width: 900px) {
+  .owned-book-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .owned-book-form .owned-book-check {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 560px) {
+  .owned-books-intro,
+  .owned-book-card {
+    flex-direction: column;
+  }
+
+  .owned-book-form {
+    grid-template-columns: 1fr;
+  }
+
+  .owned-book-form .owned-book-check {
+    grid-column: auto;
+  }
+
+  .owned-book-card-side {
+    justify-content: flex-start;
+  }
+}
+
+/* ------------------------------------------------------- chat bottom dock -- */
+/* Ask keeps the composer in reach at the bottom, while Search retains the
+   compact top dock that is useful for scanning result lists. */
+.hero.docked.chat-bottom {
+  position: fixed;
+  top: auto;
+  right: 0;
+  bottom: 0;
+  left: 252px;
+  z-index: 45;
+  border-top: 1px solid var(--rule);
+  border-bottom: 0;
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
+  padding: 12px 28px 16px;
+  backdrop-filter: blur(12px);
+}
+
+.hero.docked.chat-bottom .hero-center {
+  max-width: 1040px;
+}
+
+.app:has(.hero.chat-bottom) .workspace {
+  padding-bottom: calc(var(--dock-h) + 48px);
+}
+
+.hero.chat-bottom ~ .workspace .turn {
+  scroll-margin-top: calc(var(--mast-h) + 20px);
+}
+
+/* The rail changes the available chat width rather than overlaying it. */
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sidebar-collapse {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.sidebar-collapse:hover {
+  border-color: var(--rule);
+  background: var(--surface-3);
+  color: var(--ink);
+}
+
+.app.sidebar-collapsed .app-sidebar {
+  width: 72px;
+  align-items: center;
+  padding-inline: 8px;
+}
+
+.app.sidebar-collapsed .sidebar-head {
+  width: 100%;
+  justify-content: center;
+}
+
+.app.sidebar-collapsed .sidebar-brand {
+  padding-inline: 0;
+}
+
+.app.sidebar-collapsed .sidebar-brand > span:last-child,
+.app.sidebar-collapsed .sidebar-history,
+.app.sidebar-collapsed .sidebar-status {
+  display: none;
+}
+
+.app.sidebar-collapsed .sidebar-new {
+  display: flex;
+  justify-content: center;
+  width: 42px;
+  padding: 0;
+  font-size: 0;
+}
+
+.app.sidebar-collapsed .sidebar-new span {
+  font-size: 20px;
+}
+
+.app.sidebar-collapsed .sidebar-collapse {
+  display: grid;
+}
+
+.app.sidebar-collapsed .sidebar-nav,
+.app.sidebar-collapsed .sidebar-footer,
+.app.sidebar-collapsed .sidebar-settings-anchor {
+  width: 100%;
+}
+
+.app.sidebar-collapsed .sidebar-link {
+  justify-content: center;
+  padding-inline: 0;
+  font-size: 0;
+}
+
+.app.sidebar-collapsed .sidebar-link svg,
+.app.sidebar-collapsed .sidebar-icon {
+  flex-basis: 18px;
+}
+
+.app.sidebar-collapsed .masthead,
+.app.sidebar-collapsed main {
+  margin-left: 72px;
+}
+
+.app.sidebar-collapsed .hero.docked.chat-bottom {
+  left: 72px;
+}
+
+@media (max-width: 860px) {
+  .sidebar-head {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .sidebar-collapse {
+    display: grid;
+  }
+
+  .hero.docked.chat-bottom {
+    left: 72px;
+    padding-inline: 14px;
+  }
+}
+
 @media (max-width: 640px) {
   .masthead {
     padding: 0 10px;
@@ -3726,5 +4123,590 @@ select.input {
   .note-jot-foot {
     flex-direction: column;
     align-items: stretch;
+  }
+}
+
+/* ------------------------------------------------------ workspace shell -- */
+/* The navigation rail keeps the research tools one click away while leaving
+   the center of the screen for the question, answer, and source context. */
+:root {
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f7f7f8;
+  --surface-3: #eeeeef;
+  --rule: #e5e5e7;
+  --rule-strong: #d1d1d5;
+  --mast-h: 56px;
+  --r: 8px;
+}
+
+.app-sidebar {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 60;
+  display: flex;
+  width: 252px;
+  flex-direction: column;
+  gap: 18px;
+  border-right: 1px solid var(--rule);
+  background: var(--surface-2);
+  padding: 18px 12px 14px;
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px 4px;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.sidebar-brand .brand-mark {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+}
+
+.sidebar-brand .brand-mark::after {
+  right: 3px;
+  bottom: 3px;
+  border-radius: 1px;
+}
+
+.sidebar-new {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 40px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 9px;
+  background: var(--surface);
+  padding: 0 13px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 550;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.sidebar-new:hover {
+  background: var(--surface-3);
+  border-color: #bdbdc2;
+}
+
+.sidebar-new span {
+  color: var(--muted);
+  font-size: 18px;
+  font-weight: 300;
+  line-height: 1;
+}
+
+.sidebar-nav,
+.sidebar-history {
+  display: grid;
+  gap: 3px;
+}
+
+.sidebar-nav {
+  padding-top: 2px;
+}
+
+.sidebar-link,
+.sidebar-chat {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  gap: 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  padding: 9px 10px;
+  color: var(--ink-2);
+  font-size: 13px;
+  text-align: left;
+}
+
+.sidebar-link:hover,
+.sidebar-chat:hover,
+.sidebar-link.active,
+.sidebar-chat.active {
+  background: #eaeaec;
+  color: var(--ink);
+}
+
+.sidebar-link.active {
+  font-weight: 550;
+}
+
+.sidebar-link svg,
+.sidebar-icon {
+  flex: 0 0 17px;
+  color: var(--muted);
+}
+
+.sidebar-link.active .sidebar-icon {
+  color: var(--accent);
+}
+
+.sidebar-section-label {
+  padding: 10px 10px 5px;
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.sidebar-history {
+  min-height: 0;
+  overflow: auto;
+}
+
+.sidebar-chat {
+  gap: 8px;
+  padding-block: 8px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.sidebar-chat > span:first-child {
+  flex: 0 0 15px;
+  color: var(--faint);
+  font-family: var(--mono);
+  text-align: center;
+}
+
+.sidebar-chat > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-footer {
+  display: grid;
+  gap: 4px;
+  margin-top: auto;
+  border-top: 1px solid var(--rule);
+  padding-top: 10px;
+}
+
+.sidebar-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.masthead,
+main {
+  margin-left: 252px;
+}
+
+/* Navigation is intentionally owned by the left rail. Keep this explicit so
+   older markup or a cached component cannot put the controls back in the top
+   bar. */
+.masthead .masthead-nav,
+.masthead .nav-button,
+.masthead .health,
+.masthead .settings-anchor {
+  display: none !important;
+}
+
+.masthead {
+  height: var(--mast-h);
+  border-bottom-color: var(--rule);
+  padding-inline: 28px;
+}
+
+.masthead .brand {
+  display: none;
+}
+
+.masthead-left {
+  gap: 0;
+}
+
+.chat-crumb {
+  padding-inline: 0;
+}
+
+.masthead-nav .nav-button {
+  color: var(--muted);
+}
+
+.masthead-nav .nav-button:first-child {
+  display: none;
+}
+
+.hero {
+  min-height: calc(100svh - var(--mast-h));
+  padding: 64px 28px 96px;
+}
+
+.hero-center {
+  max-width: 760px;
+}
+
+.hero-intro {
+  margin-bottom: 18px;
+}
+
+.hero-intro h1 {
+  font-size: clamp(28px, 3vw, 36px);
+  font-weight: 600;
+  letter-spacing: -0.04em;
+}
+
+.console {
+  border-radius: 14px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.06);
+}
+
+.console-top {
+  padding: 8px 12px;
+}
+
+.console-bar {
+  min-height: 64px;
+  padding: 14px 14px 14px 18px;
+}
+
+.console textarea {
+  font-size: 16px;
+}
+
+.console-submit {
+  height: 34px;
+  border-radius: 9px;
+}
+
+.workspace {
+  max-width: 1040px;
+  padding-top: 36px;
+}
+
+.hero.docked {
+  top: var(--mast-h);
+  padding-inline: 28px;
+}
+
+.hero.docked .hero-center {
+  max-width: 1040px;
+}
+
+@media (max-width: 860px) {
+  .app-sidebar {
+    width: 72px;
+    align-items: center;
+    padding-inline: 8px;
+  }
+
+  .sidebar-brand {
+    padding-inline: 0;
+  }
+
+  .sidebar-brand > span:last-child,
+  .sidebar-link:not(:has(svg)):not(:has(.sidebar-icon)),
+  .sidebar-link,
+  .sidebar-status,
+  .sidebar-history,
+  .sidebar-footer .sidebar-link {
+    font-size: 0;
+  }
+
+  .sidebar-nav,
+  .sidebar-footer,
+  .sidebar-settings-anchor {
+    width: 100%;
+  }
+
+  .sidebar-link {
+    justify-content: center;
+    padding-inline: 0;
+  }
+
+  .sidebar-link svg,
+  .sidebar-icon {
+    flex-basis: 18px;
+  }
+
+  .sidebar-new {
+    justify-content: center;
+    width: 42px;
+    padding: 0;
+    font-size: 0;
+  }
+
+  .sidebar-new span {
+    font-size: 20px;
+  }
+
+  .masthead,
+  main {
+    margin-left: 72px;
+  }
+
+  .masthead .brand {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .masthead {
+    padding-inline: 14px;
+  }
+
+  .nav-label,
+  .health .nav-label {
+    display: none;
+  }
+
+  .hero,
+  .hero.docked {
+    padding-inline: 14px;
+  }
+
+  .workspace {
+    padding-inline: 14px;
+  }
+
+  .hero-intro {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+}
+
+/* Settings belongs to the workspace rail, so it opens beside the rail rather
+   than behaving like a detached top-bar menu. */
+.sidebar-settings-anchor {
+  position: relative;
+}
+
+.sidebar-settings-anchor .settings-popover {
+  top: auto;
+  right: auto;
+  bottom: 0;
+  left: calc(100% + 12px);
+  max-height: calc(100vh - 28px);
+  border-radius: 12px;
+}
+
+/* Keep a question visually distinct from the streamed answer without turning
+   the thread into a stack of heavy cards. */
+.turn.user {
+  max-width: 82%;
+  padding: 4px 2px 4px 0;
+}
+
+.turn.user .turn-label {
+  color: var(--accent);
+}
+
+.turn.assistant {
+  max-width: 100%;
+  padding: 18px 22px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.025);
+}
+
+.answer :is(ul, ol) {
+  margin-top: 0.45em;
+  margin-bottom: 0.75em;
+}
+
+.answer :is(li + li) {
+  margin-top: 0.25em;
+}
+
+.answer :is(h1, h2, h3, h4) {
+  margin-top: 1.15em;
+  margin-bottom: 0.35em;
+  font-family: var(--sans);
+  letter-spacing: -0.02em;
+}
+
+.answer table {
+  margin-block: 1em;
+}
+
+.turn-footnote {
+  margin-top: 16px;
+  border-top: 1px solid var(--rule);
+  padding-top: 10px;
+  line-height: 1.45;
+}
+
+@media (max-width: 860px) {
+  .sidebar-settings-anchor .settings-popover {
+    position: fixed;
+    top: auto;
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+    width: auto;
+    max-height: calc(100vh - 24px);
+  }
+
+  .turn.user {
+    max-width: 100%;
+  }
+}
+
+/* Compact rail: every control shares one narrow column.  Keep this last so
+   the responsive rail cannot grow back to the older 72px icon width. */
+.app.sidebar-collapsed .app-sidebar {
+  width: 48px;
+  gap: 12px;
+  padding-inline: 8px;
+}
+
+.app.sidebar-collapsed .sidebar-head,
+.app.sidebar-collapsed .sidebar-nav,
+.app.sidebar-collapsed .sidebar-footer,
+.app.sidebar-collapsed .sidebar-settings-anchor {
+  width: 32px;
+}
+
+.app.sidebar-collapsed .sidebar-head {
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+}
+
+.app.sidebar-collapsed .sidebar-new,
+.app.sidebar-collapsed .sidebar-link {
+  display: grid;
+  place-items: center;
+  position: relative;
+  width: 32px;
+  min-height: 32px;
+  height: 32px;
+  margin-inline: auto;
+  padding: 0;
+}
+
+.app.sidebar-collapsed .sidebar-new {
+  height: 32px;
+}
+
+.app.sidebar-collapsed .sidebar-new span {
+  font-size: 16px;
+}
+
+.app.sidebar-collapsed .sidebar-link svg,
+.app.sidebar-collapsed .sidebar-link .sidebar-icon {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  transform: translate(-50%, -50%);
+}
+
+.app.sidebar-collapsed .sidebar-new span {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.app.sidebar-collapsed .sidebar-nav {
+  gap: 4px;
+}
+
+.app.sidebar-collapsed .sidebar-footer {
+  align-items: center;
+}
+
+.app.sidebar-collapsed .masthead,
+.app.sidebar-collapsed main {
+  margin-left: 48px;
+}
+
+.app.sidebar-collapsed .hero.docked.chat-bottom {
+  left: 48px;
+}
+
+@media (max-width: 860px) {
+  .app-sidebar {
+    width: 48px;
+    gap: 12px;
+    padding-inline: 8px;
+  }
+
+  .sidebar-head,
+  .sidebar-nav,
+  .sidebar-footer,
+  .sidebar-settings-anchor {
+    width: 32px;
+  }
+
+  .sidebar-head {
+    flex-direction: column;
+    justify-content: center;
+    gap: 6px;
+  }
+
+  .sidebar-new,
+  .sidebar-link {
+    display: grid;
+    place-items: center;
+    position: relative;
+    width: 32px;
+    min-height: 32px;
+    height: 32px;
+    margin-inline: auto;
+    padding: 0;
+  }
+
+  .sidebar-new {
+    height: 32px;
+  }
+
+  .sidebar-new span {
+    font-size: 16px;
+  }
+
+  .sidebar-link svg,
+  .sidebar-link .sidebar-icon {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 18px;
+    height: 18px;
+    flex: none;
+    transform: translate(-50%, -50%);
+  }
+
+  .sidebar-new span {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
+
+  .sidebar-nav {
+    gap: 4px;
+  }
+
+  .sidebar-footer {
+    align-items: center;
+  }
+
+  .masthead,
+  main {
+    margin-left: 48px;
+  }
+
+  .hero.docked.chat-bottom {
+    left: 48px;
   }
 }

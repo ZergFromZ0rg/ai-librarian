@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from database import SCHEMA, MetadataStore
+from database import SCHEMA, MetadataStore, OwnedBookStore
 
 
 def make_record(document_id="abc123abc123", **overrides):
@@ -149,5 +149,36 @@ def test_import_legacy_loads_json_once(tmp_path):
         # Second call is a no-op because the table is already populated.
         (metadata_dir / "def456def456.json").write_text(json.dumps(make_record("def456def456")))
         assert store.import_legacy(metadata_dir) == 0
+    finally:
+        store.close()
+
+
+def test_owned_book_registry_round_trip(tmp_path):
+    store = MetadataStore(tmp_path / "library.db")
+    owned = OwnedBookStore(store._conn)
+    try:
+        created = owned.create(
+            {
+                "book_id": "abc123abc123",
+                "title": "The Dispossessed",
+                "author": "Ursula K. Le Guin",
+                "notes": "Paperback",
+                "pdf_less": 1,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            }
+        )
+        assert created["title"] == "The Dispossessed"
+        assert owned.list_all()[0]["pdf_less"] == 1
+
+        updated = owned.update(
+            "abc123abc123",
+            {"notes": "Paperback shelf", "pdf_less": 0, "updated_at": "later"},
+        )
+        assert updated["notes"] == "Paperback shelf"
+        assert updated["pdf_less"] == 0
+
+        owned.delete("abc123abc123")
+        assert owned.list_all() == []
     finally:
         store.close()

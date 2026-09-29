@@ -102,14 +102,15 @@ export default function useAsk({ apiBase, activeId, onActiveIdChange, onConversa
     };
   }, [activeId, apiBase, onActiveIdChange, startSession]);
 
-  // "+ New chat": always a clean slate, even when the current chat is itself
-  // a new one that hasn't been saved yet (its id is already null, so the
-  // effect above wouldn't fire on its own).
+  // "+ New chat": an empty draft is already a new chat. Keeping that session
+  // stable makes repeated clicks harmless and prevents a spammed button from
+  // continually resetting the composer or scroll position.
   const newChat = useCallback(() => {
     adoptRef.current = null;
+    if (!activeId && chat.messages.length === 0 && !chat.loading && !busy) return;
     if (activeId) onActiveIdChange(null);
     else startSession(null);
-  }, [activeId, onActiveIdChange, startSession]);
+  }, [activeId, busy, chat.loading, chat.messages.length, onActiveIdChange, startSession]);
 
   useEffect(() => {
     let cancelled = false;

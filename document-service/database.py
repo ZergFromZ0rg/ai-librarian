@@ -109,6 +109,17 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE INDEX IF NOT EXISTS idx_documents_content_sha256 ON documents (content_sha256);
 CREATE INDEX IF NOT EXISTS idx_documents_uploaded_at ON documents (uploaded_at DESC);
 CREATE INDEX IF NOT EXISTS idx_documents_indexing_status ON documents (indexing_status);
+
+CREATE TABLE IF NOT EXISTS owned_books (
+    book_id               TEXT PRIMARY KEY,
+    title                 TEXT NOT NULL,
+    author                TEXT,
+    notes                 TEXT,
+    pdf_less              INTEGER NOT NULL DEFAULT 1,
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_owned_books_title ON owned_books (title);
 """
 
 
@@ -329,3 +340,54 @@ class MetadataStore:
                 self._conn.commit()
             imported += 1
         return imported
+
+
+class OwnedBookStore:
+    """Small registry for books the reader owns independently of files."""
+
+    def __init__(self, connection):
+        self._conn = connection
+        self._lock = threading.RLock()
+
+    def list_all(self) -> List[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM owned_books ORDER BY updated_at DESC, title COLLATE NOCASE"
+            ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def create(self, record: dict) -> dict:
+        columns = ("book_id", "title", "author", "notes", "pdf_less", "created_at", "updated_at")
+        with self._lock:
+            self._conn.execute(
+                f"INSERT INTO owned_books ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                tuple(record.get(column) for column in columns),
+            )
+            row = self._conn.execute(
+                "SELECT * FROM owned_books WHERE book_id = ?", (record["book_id"],)
+            ).fetchone()
+            self._conn.commit()
+        return _row_to_dict(row)
+
+    def update(self, book_id: str, changes: dict) -> dict:
+        allowed = {"title", "author", "notes", "pdf_less", "updated_at"}
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError(f"unknown owned-book columns: {sorted(unknown)}")
+        with self._lock:
+            cursor = self._conn.execute(
+                f"UPDATE owned_books SET {', '.join(f'{key} = ?' for key in changes)} WHERE book_id = ?",
+                (*changes.values(), book_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(book_id)
+            row = self._conn.execute(
+                "SELECT * FROM owned_books WHERE book_id = ?", (book_id,)
+            ).fetchone()
+            self._conn.commit()
+        return _row_to_dict(row)
+
+    def delete(self, book_id: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM owned_books WHERE book_id = ?", (book_id,))
+            self._conn.commit()
