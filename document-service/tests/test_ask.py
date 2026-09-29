@@ -329,6 +329,18 @@ def test_merge_agentic_hits_prefers_stronger_duplicate(service):
     assert module.merge_agentic_hits([low], [high], 5) == [high]
 
 
+def test_agentic_required_query_targets_missing_book_page_count(service):
+    module, _client, _indexed = service
+    assert module._agentic_required_query(
+        "What does the Library of Babel contain, and how large is each book?",
+        [{"text": "Each book contains symbols."}],
+    ) == "how many pages does each book have"
+    assert module._agentic_required_query(
+        "What does the Library of Babel contain, and how large is each book?",
+        [{"text": "Each book contains four hundred ten pages."}],
+    ) is None
+
+
 def test_config_reports_generation_backend(service):
     _module, client, _indexed = service
     config = client.get("/config").json()

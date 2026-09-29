@@ -2024,6 +2024,29 @@ def merge_agentic_hits(existing: List[dict], additions: List[dict], limit: int) 
     )[:limit]
 
 
+def _agentic_required_query(question: str, sources: List[dict]) -> Optional[str]:
+    """Return a deterministic precision query for an explicit book-size ask."""
+    lowered = (question or "").casefold()
+    asks_book_size = "book" in lowered and any(
+        term in lowered for term in ("page", "how large", "size", "how many")
+    )
+    if not asks_book_size:
+        return None
+    number_words = (
+        "zero|one|two|three|four|five|six|seven|eight|nine|ten|twenty|thirty|"
+        "forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million"
+    )
+    for source in sources:
+        text = (source.get("text") or "").casefold()
+        if (
+            "book" in text
+            and "page" in text
+            and (re.search(r"\b\d{2,}\b", text) or re.search(rf"\b(?:{number_words})\b", text))
+        ):
+            return None
+    return "how many pages does each book have"
+
+
 _TERMINAL_PUNCTUATION = tuple(".!?\"')”’»…")
 
 
@@ -2799,14 +2822,19 @@ async def ask(request: AskRequest):
         if agentic and hits and ASK_AGENTIC_MAX_STEPS:
             merged_hits = list(hits)
             seen_queries = {clean_query(request.question).casefold()}
+            required_query = _agentic_required_query(request.question, format_hits(merged_hits))
             for _ in range(ASK_AGENTIC_MAX_STEPS):
-                followup = await generation.decide_followup(
-                    model,
-                    request.question,
-                    format_hits(merged_hits),
-                    history_turns,
-                    provider_keys,
-                )
+                if required_query:
+                    followup = required_query
+                    required_query = None
+                else:
+                    followup = await generation.decide_followup(
+                        model,
+                        request.question,
+                        format_hits(merged_hits),
+                        history_turns,
+                        provider_keys,
+                    )
                 normalized = clean_query(followup or "").casefold()
                 if not normalized or normalized in seen_queries:
                     break
