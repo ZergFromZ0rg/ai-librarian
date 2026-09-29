@@ -39,8 +39,8 @@
 {"id": "scoped-solar", "query": "how much do solar panels degrade per year", "relevant": [{"document": "home-solar-installation-1.docx", "contains": "half a percent"}, {"document": "home-solar-installation-deck-1.pptx", "contains": "half a percent"}, {"document": "home-solar-installation-data-1.xlsx", "page": 2, "contains": "half a percent"}], "tags": ["scoped"], "collection": "Documents"}
 {"id": "scope-probe-newton", "search": {"rerank_min_score": -100}, "query": "Isaac Newton birthplace", "collection": "Documents", "tags": ["scoped"]}
 {"id": "scope-probe-generic", "search": {"rerank_min_score": -100}, "query": "summary of the main points", "collection": "Documents", "tags": ["scoped"]}
-{"id": "gate-car-tire", "query": "how do I change a car tire", "expect_empty": true}
-{"id": "gate-black-holes", "query": "what causes black holes to evaporate", "expect_empty": true}
-{"id": "gate-chess", "query": "best chess opening for beginners", "expect_empty": true}
-{"id": "gate-curry", "query": "recipe for chicken curry", "expect_empty": true}
-{"id": "gate-taxes", "query": "how do I file my income taxes", "expect_empty": true}
+{"id": "gate-car-tire", "query": "how do I change a car tire", "collection": "Documents", "expect_empty": true}
+{"id": "gate-black-holes", "query": "what causes black holes to evaporate", "collection": "Documents", "expect_empty": true}
+{"id": "gate-chess", "query": "best chess opening for beginners", "collection": "Documents", "expect_empty": true}
+{"id": "gate-curry", "query": "recipe for chicken curry", "collection": "Documents", "expect_empty": true}
+{"id": "gate-taxes", "query": "how do I file my income taxes", "collection": "Documents", "expect_empty": true}

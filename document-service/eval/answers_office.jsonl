@@ -19,6 +19,6 @@
 {"id": "multi-japanese", "question": "東京オフィスの会議は何曜日ですか？", "must_mention": ["wednesday|水曜"], "key_points": ["every Wednesday"], "must_cite": [{"document": "café-équipe--notes-multilingues-1.docx"}, {"document": "café-équipe--notes-multilingues-deck-1.pptx"}, {"document": "café-équipe--notes-multilingues-data-1.xlsx"}], "tags": ["multilingual"]}
 {"id": "scoped-stipend", "question": "How much is the home office stipend?", "collection": "Documents", "must_mention": ["500"], "must_cite": [{"document": "onboarding-handbook-1.docx"}, {"document": "onboarding-handbook-2.docx"}, {"document": "onboarding-handbook-deck-1.pptx"}, {"document": "onboarding-handbook-data-2.xlsx"}], "tags": ["scoped"]}
 {"id": "scoped-refusal-newton", "question": "Where was Isaac Newton born?", "collection": "Documents", "expect_refusal": true, "must_not_mention": ["woolsthorpe"], "tags": ["scoped"]}
-{"id": "refuse-car-tire", "question": "How do I change a car tire?", "expect_refusal": true, "tags": ["refusal"]}
-{"id": "refuse-black-holes", "question": "What causes black holes to evaporate?", "expect_refusal": true, "tags": ["refusal"]}
-{"id": "refuse-curry", "question": "Give me a recipe for chicken curry.", "expect_refusal": true, "tags": ["refusal"]}
+{"id": "refuse-car-tire", "question": "How do I change a car tire?", "collection": "Documents", "expect_refusal": true, "tags": ["refusal"]}
+{"id": "refuse-black-holes", "question": "What causes black holes to evaporate?", "collection": "Documents", "expect_refusal": true, "tags": ["refusal"]}
+{"id": "refuse-curry", "question": "Give me a recipe for chicken curry.", "collection": "Documents", "expect_refusal": true, "tags": ["refusal"]}
