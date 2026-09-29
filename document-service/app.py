@@ -362,6 +362,7 @@ def record_ask(
     latency_ms: float,
     rerank_dropped: int = 0,
     model: Optional[str] = None,
+    agentic_searches: Optional[List[str]] = None,
 ) -> None:
     """Append one ask-log line (same JSONL file as search). Never raises."""
     if not SEARCH_LOG_ENABLED:
@@ -371,6 +372,7 @@ def record_ask(
             "ts": utc_now(),
             "mode": "ask",
             "ask_mode": request.mode,
+            "agentic_searches": agentic_searches or None,
             "query": request.question,
             "model": model,
             "history_turns": len(request.history),
@@ -490,8 +492,9 @@ class AskRequest(BaseModel):
     top_k: int = Field(default=10, ge=1, le=20)
     # "provider:model" from GET /ask/models; unknown or absent -> the server default.
     model: Optional[str] = Field(default=None, max_length=120)
-    # "quick" = one grounded pass; "thorough" = map-reduce over a wider pool.
-    mode: str = Field(default="quick", pattern=r"^(quick|thorough)$")
+    # "quick" = one grounded pass; "thorough" = map-reduce; "agentic" = a
+    # bounded planner/search loop followed by one grounded pass.
+    mode: str = Field(default="quick", pattern=r"^(quick|thorough|agentic)$")
     # Overrides the relevance gate (reranker score floor) for this question;
     # absent -> RERANK_MIN_SCORE (quick) or ASK_THOROUGH_MIN_SCORE (thorough).
     min_score: Optional[float] = Field(default=None, ge=-100, le=100)
@@ -1988,6 +1991,39 @@ async def retrieve(
     return hits[:top_k], candidate_count, dropped, relevant_count
 
 
+def _agentic_hit_key(hit: dict) -> tuple:
+    payload = hit.get("payload") or {}
+    return (
+        payload.get("document_id"),
+        payload.get("group_id") or payload.get("chunk_id"),
+        payload.get("page"),
+        payload.get("text") or payload.get("retrieval_text"),
+    )
+
+
+def merge_agentic_hits(existing: List[dict], additions: List[dict], limit: int) -> List[dict]:
+    """Merge follow-up results while keeping the strongest score per passage."""
+    merged = {_agentic_hit_key(hit): hit for hit in existing}
+    for hit in additions:
+        key = _agentic_hit_key(hit)
+        previous = merged.get(key)
+        hit_score = hit.get("rerank_score")
+        previous_score = previous.get("rerank_score") if previous else None
+        if previous is None or (
+            hit_score is not None
+            and (previous_score is None or hit_score > previous_score)
+        ):
+            merged[key] = hit
+    return sorted(
+        merged.values(),
+        key=lambda hit: (
+            hit.get("rerank_score") is not None,
+            hit.get("rerank_score") if hit.get("rerank_score") is not None else hit.get("score", 0),
+        ),
+        reverse=True,
+    )[:limit]
+
+
 _TERMINAL_PUNCTUATION = tuple(".!?\"')”’»…")
 
 
@@ -2070,6 +2106,7 @@ async def config():
         # Defaults the UI's relevance-threshold controls start from.
         "rerank_min_score": RERANK_MIN_SCORE,
         "ask_thorough_min_score": ASK_THOROUGH_MIN_SCORE,
+        "ask_agentic_max_steps": ASK_AGENTIC_MAX_STEPS,
         "generation": await generation.backend_info(),
         "pipeline_version": PIPELINE_VERSION,
         "index_schema_version": INDEX_SCHEMA_VERSION,
@@ -2676,6 +2713,7 @@ _ASK_NO_ANSWER = (
 
 _CLOUD_PROVIDERS = ("cloud-provider", "openai", "google")
 ASK_THOROUGH_MIN_SCORE = _parse_min_score(os.environ.get("ASK_THOROUGH_MIN_SCORE", "-5.0"))
+ASK_AGENTIC_MAX_STEPS = max(0, generation.ASK_AGENTIC_MAX_STEPS)
 
 
 def _sanitize_provider_keys(raw) -> dict:
@@ -2726,6 +2764,7 @@ async def ask(request: AskRequest):
         raise HTTPException(status_code=503, detail=generation.disabled_reason())
 
     thorough = request.mode == "thorough"
+    agentic = request.mode == "agentic"
     if thorough:
         # A wider pool, grouped by document for the per-document map step, and a
         # looser gate — the map step is the real relevance filter.
@@ -2742,6 +2781,8 @@ async def ask(request: AskRequest):
         gate = request.min_score
 
     started = time.monotonic()
+    history_turns = [turn.model_dump() for turn in request.history]
+    agentic_queries: list[str] = []
     try:
         hits, candidate_count, rerank_dropped, relevant_count = await retrieve(
             clean_query(request.question),
@@ -2755,6 +2796,43 @@ async def ask(request: AskRequest):
             dedup_jaccard=ASK_DEDUP_JACCARD,
             document_ids=await asyncio.to_thread(scope_document_ids, request.collection_id, request.shelf),
         )
+        if agentic and hits and ASK_AGENTIC_MAX_STEPS:
+            merged_hits = list(hits)
+            seen_queries = {clean_query(request.question).casefold()}
+            for _ in range(ASK_AGENTIC_MAX_STEPS):
+                followup = await generation.decide_followup(
+                    model,
+                    request.question,
+                    format_hits(merged_hits),
+                    history_turns,
+                    provider_keys,
+                )
+                normalized = clean_query(followup or "").casefold()
+                if not normalized or normalized in seen_queries:
+                    break
+                seen_queries.add(normalized)
+                agentic_queries.append(followup)
+                extra_hits, extra_candidates, extra_dropped, extra_relevant = await retrieve(
+                    followup,
+                    passages,
+                    request.document_id,
+                    request.filename,
+                    True,
+                    SearchRequest.model_fields["rerank_k"].default,
+                    gate,
+                    max_per_doc=max_per_doc,
+                    dedup_jaccard=ASK_DEDUP_JACCARD,
+                    document_ids=await asyncio.to_thread(
+                        scope_document_ids, request.collection_id, request.shelf
+                    ),
+                )
+                candidate_count += extra_candidates
+                rerank_dropped += extra_dropped
+                relevant_count += extra_relevant
+                merged_hits = merge_agentic_hits(merged_hits, extra_hits, passages * 4)
+                hits = diversify_hits(
+                    merged_hits, passages, max_per_doc, ASK_DEDUP_JACCARD
+                )
     except HTTPException:
         raise
     except Exception as exc:
@@ -2774,9 +2852,8 @@ async def ask(request: AskRequest):
         (time.monotonic() - started) * 1000,
         rerank_dropped,
         model=model,
+        agentic_searches=agentic_queries,
     )
-
-    history_turns = [turn.model_dump() for turn in request.history]
 
     async def event_stream():
         rid = REQUEST_ID.get()
@@ -2787,6 +2864,8 @@ async def ask(request: AskRequest):
                     {"type": "sources", "results": [], "low_confidence": False, "model": model}
                 )
                 return
+            if agentic and agentic_queries:
+                yield _sse({"type": "progress", "text": f"Follow-up searches: {len(agentic_queries)}…"})
             if thorough:
                 grouped = collections.OrderedDict()
                 for source in sources:
@@ -2816,6 +2895,7 @@ async def ask(request: AskRequest):
                     "model": model,
                     "documents": len({s.get("document_id") for s in used}),
                     "relevant_count": relevant_count,
+                    "agentic_searches": agentic_queries,
                 }
             )
         except generation.GenerationError as exc:

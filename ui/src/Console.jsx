@@ -188,7 +188,7 @@ export default function Console({
   const summary = isAsk
     ? [
         ask.noModels ? null : ask.modelLabel(ask.selectedModel),
-        askParams.mode === "thorough" ? "thorough" : `quick · ${askParams.topK} sources`,
+        askParams.mode === "thorough" ? "thorough" : askParams.mode === "agentic" ? "research · bounded follow-ups" : `quick · ${askParams.topK} sources`,
         askParams.minScore == null ? "auto floor" : `${floorLabel(askParams.minScore).toLowerCase()} floor`,
       ]
         .filter(Boolean)
@@ -343,6 +343,7 @@ export default function Console({
                   options={[
                     { value: "quick", label: "Quick", hint: "One grounded pass over the best passages." },
                     { value: "thorough", label: "Thorough", hint: "Read a wider set of passages, grouped by document, and synthesise across them. Slower." },
+                    { value: "agentic", label: "Research", hint: "Search again when the first evidence leaves an important gap. Slowest, bounded." },
                   ]}
                 />
                 {askParams.mode === "quick" && (
@@ -360,8 +361,8 @@ export default function Console({
                   value={askParams.minScore}
                   disabled={busy}
                   onChange={(value) => onAskParams({ ...askParams, minScore: value })}
-                  autoLabel={askParams.mode === "thorough" ? `Auto ${formatScore(defaults.thorough)}` : `Auto ${formatScore(defaults.search)}`}
-                  fallback={askParams.mode === "thorough" ? defaults.thorough : defaults.search}
+                  autoLabel={`Auto ${formatScore(defaults[askParams.mode] ?? defaults.search)}`}
+                  fallback={defaults[askParams.mode] ?? defaults.search}
                 />
               </>
             ) : (

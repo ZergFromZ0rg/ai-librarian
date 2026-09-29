@@ -298,6 +298,37 @@ def test_ask_thorough_mode_streams_progress_then_synthesis(service, monkeypatch)
     assert [e for e in events if e["type"] == "sources"][0]["results"]
 
 
+def test_ask_agentic_mode_runs_bounded_followup_and_merges_sources(service, monkeypatch):
+    module, client, _indexed = service
+    index_essay(client)
+    enable_fake_model(monkeypatch, module)
+    monkeypatch.setattr(module, "rerank", lambda query, passages: [1.0 for _ in passages])
+
+    followups = iter(["what does freedom mean in the essay", None])
+
+    async def fake_decide(*_args, **_kwargs):
+        return next(followups)
+
+    monkeypatch.setattr(module.generation, "decide_followup", fake_decide)
+
+    async def fake_stream(model, system, messages, keys=None):
+        yield "Research answer [1]."
+
+    monkeypatch.setattr(module.generation, "generate_stream", fake_stream)
+    events = parse_sse(client.post("/ask", json={"question": "the absurd", "mode": "agentic"}).text)
+    assert any(e["type"] == "progress" and "Follow-up" in e["text"] for e in events)
+    source_event = [e for e in events if e["type"] == "sources"][0]
+    assert source_event["agentic_searches"] == ["what does freedom mean in the essay"]
+    assert source_event["results"]
+
+
+def test_merge_agentic_hits_prefers_stronger_duplicate(service):
+    module, _client, _indexed = service
+    low = {"rerank_score": 1.0, "score": 1.0, "payload": {"document_id": "a", "group_id": "g", "page": 1, "text": "same"}}
+    high = {"rerank_score": 4.0, "score": 1.0, "payload": {"document_id": "a", "group_id": "g", "page": 1, "text": "same"}}
+    assert module.merge_agentic_hits([low], [high], 5) == [high]
+
+
 def test_config_reports_generation_backend(service):
     _module, client, _indexed = service
     config = client.get("/config").json()

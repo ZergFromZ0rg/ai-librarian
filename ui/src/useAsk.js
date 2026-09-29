@@ -246,7 +246,7 @@ export default function useAsk({ apiBase, activeId, onActiveIdChange, onConversa
     [patchSession],
   );
 
-  // `options`: { mode: "quick"|"thorough", topK, minScore (null = server
+  // `options`: { mode: "quick"|"thorough"|"agentic", topK, minScore (null = server
   // default for the mode), documentId (scope to one document), collectionId
   // (scope to one library) }.
   const ask = useCallback(

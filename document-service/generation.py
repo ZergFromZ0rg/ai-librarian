@@ -50,6 +50,8 @@ OLLAMA_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "8192"))
 ASK_THOROUGH_PASSAGES = int(os.environ.get("ASK_THOROUGH_PASSAGES", "40"))
 ASK_THOROUGH_MAX_PER_DOC = int(os.environ.get("ASK_THOROUGH_MAX_PER_DOC", "6"))
 ASK_THOROUGH_MAX_DOCS = int(os.environ.get("ASK_THOROUGH_MAX_DOCS", "15"))
+# Bounded planner/search loop for agentic Ask mode.
+ASK_AGENTIC_MAX_STEPS = int(os.environ.get("ASK_AGENTIC_MAX_STEPS", "2"))
 # Order cheap cloud models are tried for the map step when no local model exists.
 _MAP_FALLBACKS = ("cloud-provider:cloud-haiku-4-5", "openai:gpt-5.1-mini", "google:gemini-2.5-flash")
 
@@ -96,6 +98,14 @@ _REDUCE_SYSTEM = (
     "or [2][3]. If the notes do not answer the question, say so; point out where "
     "coverage looks thin. Organise the answer well and keep it concise; preserve "
     "mathematical notation exactly."
+)
+
+_AGENT_SYSTEM = (
+    "You are deciding whether a reading-library answer needs another search. "
+    "Inspect the question and the numbered passages. If the passages support a "
+    "complete answer, reply exactly DONE. If an important part is missing, reply "
+    "with exactly SEARCH: followed by one short, concrete search query. Do not "
+    "answer the user, invent facts, or request more than one query."
 )
 
 
@@ -299,6 +309,44 @@ async def _complete(
     model_id: str, system: str, messages: List[dict], keys: Optional[dict] = None
 ) -> str:
     return "".join([chunk async for chunk in generate_stream(model_id, system, messages, keys)])
+
+
+async def decide_followup(
+    model_id: str,
+    question: str,
+    sources: List[dict],
+    history: Optional[List[dict]] = None,
+    keys: Optional[dict] = None,
+) -> Optional[str]:
+    """Return one bounded follow-up search query, or ``None``.
+
+    The application owns retrieval and citation numbering; the model can only
+    propose a query and cannot call arbitrary tools or access the filesystem.
+    """
+    blocks = []
+    for index, source in enumerate(sources[:20], 1):
+        text = (source.get("text") or "").strip()
+        if text:
+            label = source.get("document") or source.get("document_id") or "source"
+            blocks.append(f"[{index}] {label} ({_passage_location(source)})\n{text[:2500]}")
+    messages = list(history or [])
+    messages.append({
+        "role": "user",
+        "content": f"Question: {question}\n\nPassages:\n\n{chr(10).join(blocks) or '(none)'}",
+    })
+    try:
+        raw = (await _complete(model_id, _AGENT_SYSTEM, messages, keys)).strip()
+    except GenerationError as exc:
+        logger.info("Agentic planning stopped after planner failure: %s", exc)
+        return None
+    for line in raw.splitlines():
+        line = line.strip()
+        if line.upper().startswith("SEARCH:"):
+            query = line.split(":", 1)[1].strip()
+            return query[:500] or None
+        if line.upper() == "DONE":
+            return None
+    return None
 
 
 async def generate_thorough(

@@ -39,7 +39,7 @@ const LEGACY_THOROUGH_KEY = "ai-librarian.ask.thorough";
 
 // Server defaults until /config says otherwise (RERANK_MIN_SCORE and
 // ASK_THOROUGH_MIN_SCORE).
-const DEFAULT_FLOORS = { search: -2, thorough: -5 };
+const DEFAULT_FLOORS = { search: -2, thorough: -5, agentic: -2 };
 
 function currentTheme() {
   const stored = document.documentElement.dataset.theme;
@@ -68,7 +68,7 @@ function loadAskParams() {
   const stored = loadStored(ASK_PARAMS_KEY, null, true) || {};
   const legacyThorough = loadStored(LEGACY_THOROUGH_KEY, "") === "1";
   return {
-    mode: stored.mode === "thorough" || stored.mode === "quick" ? stored.mode : legacyThorough ? "thorough" : "quick",
+    mode: ["quick", "thorough", "agentic"].includes(stored.mode) ? stored.mode : legacyThorough ? "thorough" : "quick",
     topK: Number.isInteger(stored.topK) ? stored.topK : 10,
     minScore: typeof stored.minScore === "number" ? stored.minScore : null, // null = server default for the depth
   };
@@ -281,6 +281,7 @@ export default function App() {
         setFloors({
           search: typeof config.rerank_min_score === "number" ? config.rerank_min_score : DEFAULT_FLOORS.search,
           thorough: typeof config.ask_thorough_min_score === "number" ? config.ask_thorough_min_score : DEFAULT_FLOORS.thorough,
+          agentic: typeof config.rerank_min_score === "number" ? config.rerank_min_score : DEFAULT_FLOORS.agentic,
         });
       })
       .catch(() => {});

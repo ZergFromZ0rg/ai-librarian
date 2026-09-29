@@ -233,7 +233,7 @@ One JSON object per line. `#`-prefixed and blank lines are ignored.
 | field | meaning |
 |---|---|
 | `id`, `question` | required |
-| `mode` | `quick` (default) or `thorough` |
+| `mode` | `quick` (default), `thorough`, or `agentic` (bounded follow-up retrieval) |
 | `model` | per-case model override (`provider:model`) |
 | `must_mention` | regexes (case-insensitive) the answer **must** contain — hard check |
 | `must_not_mention` | regexes the answer must **not** contain — hard check |
@@ -294,6 +294,7 @@ cd document-service
 python eval/ask_harness.py --url http://192.168.0.122:3100/api score
 python eval/ask_harness.py --url … --model ollama:qwen2.5:7b score   # pin a model
 python eval/ask_harness.py --url … capture "…" --mode thorough       # try thorough
+python eval/ask_harness.py --url … capture "…" --mode agentic        # try bounded follow-ups
 ```
 
 `--model` / `--provider-key PROVIDER=KEY` before the subcommand override the model

@@ -309,6 +309,8 @@ paragraphs of one chapter:
   top-ranked this many documents are sent through the per-document map step; raise it for a
   "what have I read about X" question that should sweep a larger library, at the cost of one
   extra map call per additional document.
+- `ASK_AGENTIC_MAX_STEPS` (default 2) — maximum follow-up searches in Research mode. Each
+  step adds one planner call and one retrieval pass; set it to `0` to disable follow-ups.
 
 Each answer's source header shows the spread — "*N passages · M documents · K relevant
 matches*" — so you can see when coverage is thin.
@@ -321,6 +323,11 @@ the answer from those notes with citations. It is slower (a handful of extra cal
 shines with a capable synthesis model. The map passes use the cheapest available model — a
 local one, else a small cloud model, else your selected model — overridable with
 `ASK_THOROUGH_MAP_MODEL`.
+
+**Research mode** is a bounded alternative for hard, multi-part questions. The selected model
+may request up to `ASK_AGENTIC_MAX_STEPS` targeted searches when the initial evidence looks
+incomplete. The server performs those searches, merges the results, and writes one grounded
+answer; the model cannot access arbitrary tools or files.
 
 ### Other knobs
 
@@ -415,7 +422,7 @@ Important endpoints:
 - `POST /documents/{id}/retry` — retry failed indexing
 - `DELETE /documents/{id}` — delete stored files and vectors
 - `POST /search` — semantic retrieval (set `rerank: true` to reorder and relevance-gate; `rerank_min_score`, `fusion`, and `dense_weight` override the server defaults per request; `collection_id` limits it to one library). Each result carries `file_type` and a human `location` ("p. 3", "slide 2")
-- `POST /ask` — retrieve, then stream a grounded answer as Server-Sent Events (`token` chunks, `progress` in thorough mode, then one `sources` event); body: `{"question", "history": [{"role", "content"}], "model": "provider:model", "mode": "quick"|"thorough", "collection_id"?}`. Returns 503 when no model is available. See [Ask mode](#ask-mode)
+- `POST /ask` — retrieve, then stream a grounded answer as Server-Sent Events (`token` chunks, `progress` in thorough/research mode, then one `sources` event); body: `{"question", "history": [{"role", "content"}], "model": "provider:model", "mode": "quick"|"thorough"|"agentic", "collection_id"?}`. Returns 503 when no model is available. See [Ask mode](#ask-mode)
 - `GET /ask/models` — models the reader may pick, plus the current default
 - `GET|POST /conversations`, `GET|PUT|DELETE /conversations/{id}` — saved Ask conversations (server-side; the UI's **Chat** picker)
 - `GET /library/tree?path=` — one level of the mounted `/library` volume (sub-folders + supported files, marked when indexed)

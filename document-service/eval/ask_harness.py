@@ -557,10 +557,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                          help="run each case N times; fail only if it fails a majority (default 1)")
     p_cap = sub.add_parser("capture", help="run questions now -> stubs")
     p_cap.add_argument("question", nargs="+")
-    p_cap.add_argument("--mode", choices=["quick", "thorough"], default="quick")
+    p_cap.add_argument("--mode", choices=["quick", "thorough", "agentic"], default="quick")
     p_rev = sub.add_parser("review", help="recent Ask questions from the log -> stubs")
     p_rev.add_argument("-n", "--limit", type=int, default=20)
-    p_rev.add_argument("--mode", choices=["quick", "thorough"], default="quick")
+    p_rev.add_argument("--mode", choices=["quick", "thorough", "agentic"], default="quick")
 
     args = parser.parse_args(list(argv) if argv is not None else None)
     BASE_URL = args.url.rstrip("/")

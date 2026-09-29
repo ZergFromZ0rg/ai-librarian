@@ -152,6 +152,21 @@ def test_build_ask_prompt_respects_max_passages():
     assert len(used) == 2
 
 
+def test_decide_followup_accepts_only_a_bounded_search_command(monkeypatch):
+    async def fake_complete(*_args, **_kwargs):
+        return "SEARCH: find the second part of the argument"
+
+    monkeypatch.setattr(generation, "_complete", fake_complete)
+    query = run(generation.decide_followup("ollama:m", "q?", [{"text": "first"}]))
+    assert query == "find the second part of the argument"
+
+    async def done(*_args, **_kwargs):
+        return "DONE"
+
+    monkeypatch.setattr(generation, "_complete", done)
+    assert run(generation.decide_followup("ollama:m", "q?", [])) is None
+
+
 def test_generate_stream_uses_a_request_key_for_a_cloud_provider(monkeypatch):
     seen = {}
 
