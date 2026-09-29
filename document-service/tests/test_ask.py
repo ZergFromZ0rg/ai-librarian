@@ -72,6 +72,24 @@ def test_ask_streams_answer_then_sources(service, monkeypatch):
     assert fake_stream.calls[0]["model"] == FAKE_MODEL
 
 
+def test_ask_metrics_exposes_shape_telemetry_without_answer_text(service, monkeypatch):
+    module, client, _indexed = service
+    index_essay(client)
+    enable_fake_model(monkeypatch, module)
+    monkeypatch.setattr(module, "rerank", lambda query, passages: [1.0 for _ in passages])
+    monkeypatch.setattr(module.generation, "generate_stream", make_fake_stream())
+
+    assert client.post("/ask", json={"question": "What is the absurd?"}).status_code == 200
+    metrics = client.get("/admin/ask-metrics").json()
+    assert metrics["enabled"] is True
+    assert metrics["count"] >= 1
+    quick = metrics["by_mode"]["quick"]
+    assert quick["count"] >= 1
+    assert quick["average_answer_chars"] > 0
+    assert 0 <= quick["average_cited_source_fraction"] <= 1
+    assert "The absurd is the confrontation" not in json.dumps(metrics)
+
+
 def test_ask_uses_the_requested_model_and_falls_back_when_unknown(service, monkeypatch):
     module, client, _indexed = service
     index_essay(client)

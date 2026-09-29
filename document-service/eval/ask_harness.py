@@ -362,7 +362,8 @@ def load_cases(path: Path) -> list[dict]:
 
 
 def score(cases: list[dict], model: Optional[str], judge_spec: Optional[str],
-          judge_url: Optional[str], provider_keys: Optional[dict], repeat: int = 1) -> int:
+          judge_url: Optional[str], provider_keys: Optional[dict], repeat: int = 1,
+          json_out: Optional[Path] = None) -> int:
     rows: list[tuple[str, str]] = []
     hard_fail_cases = 0
     faith = rel = cite_acc = 0.0
@@ -372,6 +373,7 @@ def score(cases: list[dict], model: Optional[str], judge_spec: Optional[str],
     substantive = 0
     tag_stats: dict[str, list[int]] = {}  # tag -> [passed, total]
     libraries: dict[str, dict] = {}
+    snapshot_cases: list[dict] = []
 
     width = max((len(c.get("id") or c.get("question", "?")) for c in cases), default=0)
     for case in cases:
@@ -442,6 +444,16 @@ def score(cases: list[dict], model: Optional[str], judge_spec: Optional[str],
                             f"R{_num(j.get('relevance')):.0f} "
                             f"C{_num(j.get('citation_accuracy')):.0f}{kp}")
         rows.append((cid, "  ".join(note)))
+        snapshot_cases.append({
+            "id": cid,
+            "mode": case.get("mode", "quick"),
+            "passed": not case_failed,
+            "hard_failures": m["hard_failures"],
+            "answer_chars": m["answer_chars"],
+            "sources": m["sources"],
+            "cited_fraction": round(m["cited_fraction"], 3),
+            "model": result.get("model"),
+        })
         # Print as we go: a long run that dies late keeps what it already scored.
         print(f"  {cid.ljust(width)}   {rows[-1][1]}", flush=True)
 
@@ -457,6 +469,23 @@ def score(cases: list[dict], model: Optional[str], judge_spec: Optional[str],
         print(f"  judge ({judge_spec}):  faithfulness {faith / judged_n:.1f}  "
               f"relevance {rel / judged_n:.1f}  citation {cite_acc / judged_n:.1f}"
               + (f"  key-point coverage {kp_hits}/{kp_total}" if kp_total else ""))
+    if json_out:
+        snapshot = {
+            "schema_version": 1,
+            "url": BASE_URL,
+            "model": model,
+            "repeat": repeat,
+            "cases": len(cases),
+            "hard_failures": hard_fail_cases,
+            "substantive": substantive,
+            "mean_context_cited": round(cited_frac_sum / substantive, 3) if substantive else 0.0,
+            "by_tag": {tag: {"passed": ok, "total": total}
+                       for tag, (ok, total) in sorted(tag_stats.items())},
+            "results": snapshot_cases,
+        }
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(f"  snapshot: {json_out}")
     return 1 if hard_fail_cases else 0
 
 
@@ -555,6 +584,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                               "sends nothing while it reasons, so allow for that on slow hardware")
     p_score.add_argument("--repeat", type=int, default=1,
                          help="run each case N times; fail only if it fails a majority (default 1)")
+    p_score.add_argument("--json-out", type=Path,
+                         help="write a machine-readable regression snapshot to this path")
     p_cap = sub.add_parser("capture", help="run questions now -> stubs")
     p_cap.add_argument("question", nargs="+")
     p_cap.add_argument("--mode", choices=["quick", "thorough", "agentic"], default="quick")
@@ -574,7 +605,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     if args.command == "score":
         ASK_TIMEOUT = max(1, args.timeout)
         return score(load_cases(args.answers), args.model, args.judge, args.judge_url,
-                     keys, max(1, args.repeat))
+                     keys, max(1, args.repeat), args.json_out)
     if args.command == "capture":
         return capture(args.question, args.mode, args.model, keys)
     if args.command == "review":

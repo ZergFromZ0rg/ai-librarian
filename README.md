@@ -435,10 +435,15 @@ Important endpoints:
 - `POST /library/root` — narrow (or, with `path: ""`, reset) which folder under `/library` counts as the library; what auto-ingest scans and where Browse opens by default
 - `POST /admin/ingest-folder` — recursively import a folder under `/library` (the older form of `POST /library/import` on a directory)
 - `GET /admin/search-log` — recent queries with their returned pages and scores
+- `GET /admin/ask-metrics` — aggregate Ask answer length, citation coverage, latency, and errors from persistent telemetry
 - `GET /health/live` — process liveness
 - `GET /health/ready` — Qdrant readiness, indexing backlog, and ingest queue depth
 
 Every search appends one JSON line to `data/app/logs/search.jsonl` (rotated, stays on the server): the query, the candidate budget, latency, the reranker cutoff and how many hits it dropped, and each returned hit's page and dense/rerank scores. It is meant for tuning retrieval quality — inspect it with `GET /admin/search-log` or read the file directly. Set `SEARCH_LOG=off` in `.env` to disable.
+
+Ask requests append a second outcome record after generation with only shape
+metrics (answer character count, citation count and fraction, mode, model,
+latency, and error status); answer text is never written to the telemetry log.
 
 ## Development and tests
 

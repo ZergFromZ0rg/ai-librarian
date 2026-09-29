@@ -178,6 +178,11 @@ python eval/ask_harness.py --url http://127.0.0.1:8010 --model ollama:qwen3:4b \
   score --answers eval/answers_office.jsonl
 ```
 
+Add `--json-out path/to/snapshot.json` to `score` to save a compact regression
+snapshot with per-case pass/fail, source count, citation coverage, and answer
+length. Snapshots are intended for release comparisons; model-generated answers
+remain intentionally out of the file.
+
 The corpus exercises Word tables and bullet lists, multi-sheet workbooks
 (formulas, dates, a header-only sheet), slide text boxes and speaker notes,
 French / German / Japanese text, and a Word file ending in a 6,000-character

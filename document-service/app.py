@@ -397,6 +397,44 @@ def record_ask(
         logger.exception("Could not write ask-log entry")
 
 
+def record_ask_outcome(
+    request: "AskRequest",
+    answer: str,
+    sources: List[dict],
+    latency_ms: float,
+    model: Optional[str],
+    low_confidence: bool,
+    error: Optional[str] = None,
+) -> None:
+    """Persist answer-shape telemetry without storing answer content."""
+    if not SEARCH_LOG_ENABLED:
+        return
+    try:
+        cited = {
+            int(number)
+            for number in re.findall(r"\[(\d+)\]", answer or "")
+            if 1 <= int(number) <= len(sources)
+        }
+        entry = {
+            "ts": utc_now(),
+            "mode": "ask_outcome",
+            "ask_mode": request.mode,
+            "query": request.question,
+            "model": model,
+            "answer_chars": len(answer or ""),
+            "citation_count": len(cited),
+            "source_count": len(sources),
+            "cited_source_fraction": round(len(cited) / len(sources), 3) if sources else 0.0,
+            "low_confidence": low_confidence,
+            "generation_latency_ms": round(latency_ms, 1),
+            "outcome": "error" if error else "ok",
+            "error": error,
+        }
+        search_logger.info(json.dumps(entry, ensure_ascii=False))
+    except Exception:
+        logger.exception("Could not write ask-outcome telemetry")
+
+
 STORE = MetadataStore(DATA_DIR / "library.db")
 _imported = STORE.import_legacy(METADATA_DIR)
 if _imported:
@@ -2861,6 +2899,34 @@ async def ask(request: AskRequest):
                 hits = diversify_hits(
                     merged_hits, passages, max_per_doc, ASK_DEDUP_JACCARD
                 )
+        elif request.mode == "quick" and hits:
+            # Keep Quick mode inexpensive but recover an explicit page/count
+            # fact when the first broad query lands on a neighbouring passage.
+            precision_query = _agentic_required_query(request.question, format_hits(hits))
+            if precision_query:
+                extra_hits, extra_candidates, extra_dropped, extra_relevant = await retrieve(
+                    precision_query,
+                    passages,
+                    request.document_id,
+                    request.filename,
+                    True,
+                    SearchRequest.model_fields["rerank_k"].default,
+                    gate,
+                    max_per_doc=max_per_doc,
+                    dedup_jaccard=ASK_DEDUP_JACCARD,
+                    document_ids=await asyncio.to_thread(
+                        scope_document_ids, request.collection_id, request.shelf
+                    ),
+                )
+                candidate_count += extra_candidates
+                rerank_dropped += extra_dropped
+                relevant_count += extra_relevant
+                hits = diversify_hits(
+                    merge_agentic_hits(hits, extra_hits, passages * 4),
+                    passages,
+                    max_per_doc,
+                    ASK_DEDUP_JACCARD,
+                )
     except HTTPException:
         raise
     except Exception as exc:
@@ -2885,9 +2951,21 @@ async def ask(request: AskRequest):
 
     async def event_stream():
         rid = REQUEST_ID.get()
+        generation_started = time.monotonic()
+        answer_parts: list[str] = []
+        used: list[dict] = []
         try:
             if not sources:
+                answer_parts.append(_ASK_NO_ANSWER)
                 yield _sse({"type": "token", "text": _ASK_NO_ANSWER})
+                record_ask_outcome(
+                    request,
+                    _ASK_NO_ANSWER,
+                    used,
+                    (time.monotonic() - generation_started) * 1000,
+                    model,
+                    False,
+                )
                 yield _sse(
                     {"type": "sources", "results": [], "low_confidence": False, "model": model}
                 )
@@ -2906,6 +2984,8 @@ async def ask(request: AskRequest):
                 async for kind, text in generation.generate_thorough(
                     model, request.question, used, history_turns, keys=provider_keys
                 ):
+                    if kind == "token":
+                        answer_parts.append(text)
                     yield _sse({"type": kind, "text": text})
             elif agentic:
                 _system, _messages, used = generation.build_ask_prompt(
@@ -2919,6 +2999,8 @@ async def ask(request: AskRequest):
                     keys=provider_keys,
                     max_passages=passages,
                 ):
+                    if kind == "token":
+                        answer_parts.append(text)
                     yield _sse({"type": kind, "text": text})
             else:
                 system, messages, used = generation.build_ask_prompt(
@@ -2927,7 +3009,16 @@ async def ask(request: AskRequest):
                 async for chunk in generation.generate_stream(
                     model, system, messages, keys=provider_keys
                 ):
+                    answer_parts.append(chunk)
                     yield _sse({"type": "token", "text": chunk})
+            record_ask_outcome(
+                request,
+                "".join(answer_parts),
+                used,
+                (time.monotonic() - generation_started) * 1000,
+                model,
+                low_confidence,
+            )
             yield _sse(
                 {
                     "type": "sources",
@@ -2941,9 +3032,27 @@ async def ask(request: AskRequest):
             )
         except generation.GenerationError as exc:
             logger.warning("Ask generation failed [request %s]: %s", rid, exc)
+            record_ask_outcome(
+                request,
+                "".join(answer_parts),
+                used,
+                (time.monotonic() - generation_started) * 1000,
+                model,
+                low_confidence,
+                error="generation_error",
+            )
             yield _sse({"type": "error", "detail": f"answer generation failed (request {rid})"})
         except Exception:
             logger.exception("Unexpected error while streaming an answer [request %s]", rid)
+            record_ask_outcome(
+                request,
+                "".join(answer_parts),
+                used,
+                (time.monotonic() - generation_started) * 1000,
+                model,
+                low_confidence,
+                error="unexpected_error",
+            )
             yield _sse({"type": "error", "detail": f"answer generation failed (request {rid})"})
 
     return StreamingResponse(
@@ -3026,6 +3135,45 @@ async def admin_search_log(limit: int = Query(50, ge=1, le=500)):
         return entries
 
     return {"enabled": True, "entries": await asyncio.to_thread(tail)}
+
+
+@app.get("/admin/ask-metrics")
+async def admin_ask_metrics(limit: int = Query(500, ge=1, le=5000)):
+    """Aggregate answer-shape telemetry from the persistent search log."""
+    path = LOGS_DIR / "search.jsonl"
+    if not SEARCH_LOG_ENABLED or not path.exists():
+        return {"enabled": SEARCH_LOG_ENABLED, "count": 0, "by_mode": {}}
+
+    def summarize() -> dict:
+        entries = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if item.get("mode") == "ask_outcome":
+                entries.append(item)
+        entries = entries[-limit:]
+        by_mode: dict[str, dict] = {}
+        for item in entries:
+            mode = item.get("ask_mode") or "unknown"
+            bucket = by_mode.setdefault(
+                mode,
+                {"count": 0, "errors": 0, "answer_chars": 0.0, "cited_source_fraction": 0.0},
+            )
+            bucket["count"] += 1
+            bucket["errors"] += item.get("outcome") != "ok"
+            bucket["answer_chars"] += item.get("answer_chars") or 0
+            bucket["cited_source_fraction"] += item.get("cited_source_fraction") or 0.0
+        for bucket in by_mode.values():
+            count = bucket["count"] or 1
+            bucket["average_answer_chars"] = round(bucket.pop("answer_chars") / count, 1)
+            bucket["average_cited_source_fraction"] = round(
+                bucket.pop("cited_source_fraction") / count, 3
+            )
+        return {"enabled": True, "count": len(entries), "by_mode": by_mode}
+
+    return await asyncio.to_thread(summarize)
 
 
 @app.get("/admin/reranker")
