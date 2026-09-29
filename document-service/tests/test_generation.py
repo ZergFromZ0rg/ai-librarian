@@ -54,6 +54,13 @@ def test_context_passages_scales_with_provider():
 
 def test_system_prompt_flags_that_sources_are_a_sample():
     assert "not the whole library" in generation._SYSTEM_PROMPT
+    assert "theoretical or speculative topic" in generation._SYSTEM_PROMPT
+
+
+def test_agent_prompt_requires_explicit_coverage_for_each_requested_part():
+    assert "every requested fact" in generation._AGENT_SYSTEM
+    assert "number, name, date" in generation._AGENT_SYSTEM
+    assert "When in doubt, search" in generation._AGENT_SYSTEM
 
 
 def test_parse_ollama_tags():

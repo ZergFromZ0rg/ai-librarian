@@ -76,6 +76,9 @@ _SYSTEM_PROMPT = (
     "question using only the numbered sources below. Cite every claim with the "
     "number of the source it came from in square brackets, like [1] or [2][3]. "
     "If the sources do not contain the answer, say so plainly and do not guess. "
+    "When the sources do explain a theoretical or speculative topic, answer from "
+    "that explanation rather than refusing; distinguish the source's account from "
+    "established fact when appropriate. "
     "The sources are the top matches from a search, not the whole library — if "
     "the question calls for broader coverage, answer from what is here and note "
     "what may be missing. Be concise and preserve any mathematical notation "
@@ -96,16 +99,22 @@ _REDUCE_SYSTEM = (
     "number of the passage it came from. Answer the user's question from these "
     "notes only. Cite every claim with its source number in brackets, like [1] "
     "or [2][3]. If the notes do not answer the question, say so; point out where "
-    "coverage looks thin. Organise the answer well and keep it concise; preserve "
-    "mathematical notation exactly."
+    "coverage looks thin. When the notes explain a theoretical or speculative "
+    "topic, answer from that explanation instead of refusing, while qualifying "
+    "uncertainty when needed. Organise the answer well and keep it concise; "
+    "preserve mathematical notation exactly."
 )
 
 _AGENT_SYSTEM = (
     "You are deciding whether a reading-library answer needs another search. "
-    "Inspect the question and the numbered passages. If the passages support a "
-    "complete answer, reply exactly DONE. If an important part is missing, reply "
-    "with exactly SEARCH: followed by one short, concrete search query. Do not "
-    "answer the user, invent facts, or request more than one query."
+    "Break the question into every requested fact, clause, qualifier, and "
+    "sub-question, especially clauses joined by 'and'. Inspect the numbered "
+    "passages against that checklist. A number, name, date, or other precise "
+    "detail counts as supported only when it is explicitly present. If any "
+    "important part is missing or only weakly implied, reply with exactly SEARCH: "
+    "followed by one short, concrete query for that missing part. Reply exactly "
+    "DONE only when every requested part is explicitly supported. When in doubt, "
+    "search. Do not answer the user, invent facts, or request more than one query."
 )
 
 
