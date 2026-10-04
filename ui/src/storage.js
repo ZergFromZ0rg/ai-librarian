@@ -1,5 +1,5 @@
 // Per-browser memory for the research console: what was recently opened (the
-// covers floating around the search bar), what was recently asked (the
+// books on the front-page shelf), what was recently asked (the
 // "recent inquiries" list), and the console's own settings. All of it is a
 // convenience — every read tolerates missing, corrupt, or blocked storage.
 
@@ -71,7 +71,7 @@ export function clearInquiries() {
   return [];
 }
 
-// The covers for the floating shelf: recently opened documents first (still
+// The books for the front-page shelf: recently opened documents first (still
 // in the library, in the order they were opened), then topped up with the
 // most recently indexed ones so a fresh browser still has something to show.
 export function shelfItems(recents, documents, limit) {
@@ -120,7 +120,7 @@ export function timeAgo(timestamp, now = Date.now()) {
 // Filename → a readable title for a cover: no extension, separators as spaces.
 export function displayTitle(filename) {
   return (filename || "Untitled")
-    .replace(/\.pdf$/i, "")
+    .replace(/\.(?:pdf|epub)$/i, "")
     .replace(/[_]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();

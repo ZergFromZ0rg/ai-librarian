@@ -43,7 +43,7 @@ export default function ResultCard({ result, index, ordinal, onViewSource, onSco
             title={result.document}
             onClick={() => onViewSource(sourceFromResult(result))}
           >
-            {displayTitle(result.document)}
+            {result.title || displayTitle(result.document)}
           </button>
           <span className="finding-pages">{pages}</span>
         </div>
@@ -63,8 +63,9 @@ export default function ResultCard({ result, index, ordinal, onViewSource, onSco
         </ReactMarkdown>
       </div>
       <footer className="finding-actions">
+        {!result.is_note && <button type="button" className="text-button" onClick={() => onViewSource({ ...sourceFromResult(result), savePassage: true })}>Save passage to notes</button>}
         <button type="button" className="text-button" onClick={() => onViewSource(sourceFromResult(result))}>
-          {!result.file_type || result.file_type === "pdf" ? "View page ↗" : "View source ↗"}
+          {!result.file_type || ["pdf", "epub"].includes(result.file_type) ? "View page ↗" : "View source ↗"}
         </button>
         {onScope && (
           <button type="button" className="text-button" onClick={() => onScope(result)}>

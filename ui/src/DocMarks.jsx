@@ -17,6 +17,7 @@ export function CoverFlags({ doc }) {
       <span className={`flag flag-read${read ? " is-read" : ""}`} title={read ? "Read" : "Unread"}>
         {read ? "✓ Read" : "Unread"}
       </span>
+      {doc?.rating && <span className="flag flag-rating" title={`Your rating: ${doc.rating} out of 5 stars`}>★ {doc.rating}/5</span>}
       {owned != null && <span className={`flag flag-owned${owned ? " is-owned" : ""}`}>{owned ? "Owned" : "Not owned"}</span>}
     </>
   );

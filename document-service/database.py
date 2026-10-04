@@ -60,6 +60,13 @@ COLUMNS = (
     "subject",
     "shelf",
     "shelf_suggested",
+    "metadata_edited",
+    "source_document_id",
+    "source_page",
+    "source_quote",
+    "note_text",
+    "rating",
+    "review",
 )
 UPDATABLE_COLUMNS = frozenset(COLUMNS) - {"document_id"}
 
@@ -168,6 +175,13 @@ class MetadataStore:
             ("subject", "TEXT"),
             ("shelf", "TEXT"),
             ("shelf_suggested", "TEXT"),
+            ("metadata_edited", "INTEGER"),
+            ("source_document_id", "TEXT"),
+            ("source_page", "INTEGER"),
+            ("source_quote", "TEXT"),
+            ("note_text", "TEXT"),
+            ("rating", "INTEGER"),
+            ("review", "TEXT"),
         ):
             if column not in existing:
                 self._conn.execute(

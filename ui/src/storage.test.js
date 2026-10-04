@@ -90,6 +90,7 @@ describe("relevancePercent", () => {
 describe("displayTitle", () => {
   it("drops the extension and underscores", () => {
     expect(displayTitle("The_Myth_of_Sisyphus.PDF")).toBe("The Myth of Sisyphus");
+    expect(displayTitle("The_Quiet_Library.EPUB")).toBe("The Quiet Library");
   });
 });
 

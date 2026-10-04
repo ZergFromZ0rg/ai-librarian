@@ -2,8 +2,8 @@ import asyncio
 import collections
 import concurrent.futures
 import contextvars
-from difflib import SequenceMatcher
 import hashlib
+import io
 import json
 import logging
 import logging.handlers
@@ -18,6 +18,7 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import List, Optional
 
@@ -58,6 +59,7 @@ from parsers import (
     OCR_APPROVAL_MARKER,
     SUPPORTED_EXTENSIONS,
     document_author,
+    epub_title,
     extract_source_pages,
     file_type_for_path,
     is_supported_path,
@@ -477,6 +479,11 @@ class SearchRequest(BaseModel):
 
 
 class DocumentPatch(BaseModel):
+    rating: Optional[int] = Field(default=None, ge=1, le=5, strict=True)
+    review: Optional[str] = Field(default=None, max_length=20_000)
+    title: Optional[str] = Field(default=None, max_length=300)
+    author: Optional[str] = Field(default=None, max_length=240)
+    subject: Optional[str] = Field(default=None, max_length=240)
     # Only the fields sent are changed. `owned` may be null to clear it;
     # `kind` "auto" drops the reader's override and goes back to the guess.
     owned: Optional[bool] = None
@@ -501,6 +508,9 @@ class OwnedBookPatch(BaseModel):
 
 
 class NoteBody(BaseModel):
+    source_document_id: Optional[str] = None
+    source_page: Optional[int] = Field(default=None, ge=1)
+    source_quote: Optional[str] = Field(default=None, max_length=20_000)
     text: str = Field(min_length=1, max_length=20_000)
 
 
@@ -1077,6 +1087,8 @@ def _shelf_fields(metadata: dict, kind: Optional[str]) -> dict:
                 or shelves.author_from_text(_first_page_texts(doc_id))
             )
             subject = shelves.classify_subject(_document_vector(doc_id), _subject_vectors())
+        if metadata.get("metadata_edited"):
+            author, subject = metadata.get("author"), metadata.get("subject")
         return {"author": author, "subject": subject, "shelf_suggested": shelves.suggest_shelf(kind, subject, author)}
     except Exception:
         logger.warning("Could not suggest a shelf for document %s", doc_id, exc_info=True)
@@ -1120,7 +1132,7 @@ def _embed_and_finish(doc_id: str) -> None:
                     vector_dim = len(indexed_batch[0]["embedding"])
                     upsert_chunks(indexed_batch)
             metadata = read_metadata(doc_id)
-            kind = _detect_document_kind(doc_id, metadata.get("pages") or 0)
+            kind = "book" if metadata.get("file_type") == "epub" else _detect_document_kind(doc_id, metadata.get("pages") or 0)
             # One update: a document is never seen as indexed without its shelf.
             update_metadata(
                 doc_id,
@@ -1426,7 +1438,8 @@ def create_document(
         "document_id": doc_id,
         "filename": filename,
         "file_type": file_type_for_path(filename) or "document",
-        "title": title_from_filename(filename),
+        "title": (epub_title(stored_path) if file_type_for_path(filename) == "epub" else None)
+        or title_from_filename(filename),
         "stored_filename": stored_path.name,
         "content_sha256": content_sha256,
         "source_path": source_path,
@@ -2134,7 +2147,7 @@ def _runs_on(text: str, filename: str) -> bool:
     """
     if not text or text.endswith(_TERMINAL_PUNCTUATION):
         return False
-    if (file_type_for_path(filename) or "pdf") not in {"pdf", "word", "text", "markdown"}:
+    if (file_type_for_path(filename) or "pdf") not in {"pdf", "epub", "word", "text", "markdown"}:
         return False
     last_line = text.rstrip().rsplit("\n", 1)[-1].strip()
     return not (
@@ -2167,6 +2180,7 @@ def format_hits(hits: List[dict], max_text_chars: int = 20_000) -> List[dict]:
             matched = ""
 
         filename = payload.get("filename") or ""
+        current = STORE.get(payload.get("document_id") or "") or {}
         file_type = file_type_for_path(filename) or "pdf"
         page = payload.get("page")
         page_end = payload.get("page_end") or page
@@ -2176,6 +2190,8 @@ def format_hits(hits: List[dict], max_text_chars: int = 20_000) -> List[dict]:
                 "group_id": payload.get("group_id"),
                 "document_id": payload.get("document_id"),
                 "document": filename or payload.get("document_id"),
+                "title": current.get("title"),
+                "is_note": current.get("collection_id") == NOTES_COLLECTION_ID,
                 "file_type": file_type,
                 "page": page,
                 "page_end": page_end,
@@ -2345,7 +2361,7 @@ async def upload_document(file: UploadFile = File(...)):
     if suffix not in SUPPORTED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
-            detail="supported files are PDF, Word, Excel, PowerPoint, text, Markdown, and CSV",
+            detail="supported files are PDF, EPUB, Word, Excel, PowerPoint, text, Markdown, and CSV",
         )
 
     doc_id = generate_id()
@@ -2444,10 +2460,10 @@ def _stored_file_path(doc_id: str) -> Path:
     return stored
 
 
-def _stored_pdf_path(doc_id: str) -> Path:
+def _stored_paged_path(doc_id: str) -> Path:
     metadata = read_metadata(doc_id)
-    if metadata.get("file_type") != "pdf":
-        raise HTTPException(status_code=400, detail="page rendering is only available for PDF files")
+    if metadata.get("file_type") not in {"pdf", "epub"}:
+        raise HTTPException(status_code=400, detail="page rendering is only available for PDF and EPUB files")
     return _stored_file_path(doc_id)
 
 
@@ -2500,15 +2516,53 @@ def _thumbnail_width(requested: int) -> int:
     return min((160, 320, 480), key=lambda size: abs(size - requested))
 
 
+@app.put("/documents/{doc_id}/cover")
+async def upload_document_cover(doc_id: str, file: UploadFile = File(...)):
+    await asyncio.to_thread(read_metadata, doc_id)
+    data = await file.read(8 * 1024 * 1024 + 1)
+    await file.close()
+    if len(data) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="cover must be smaller than 8 MB")
+
+    def save():
+        from PIL import Image, ImageOps, UnidentifiedImageError
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                if image.format not in {"JPEG", "PNG", "WEBP"} or image.width * image.height > 20_000_000:
+                    raise ValueError("unsupported or oversized image")
+                image = ImageOps.exif_transpose(image).convert("RGB")
+                image.thumbnail((600, 900))
+                THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
+                target = THUMBNAILS_DIR / f"{doc_id}-custom.jpg"
+                temporary = target.with_suffix(f".{uuid.uuid4().hex}.tmp")
+                image.save(temporary, format="JPEG", quality=85)
+                os.replace(temporary, target)
+        except (ValueError, OSError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
+            raise HTTPException(status_code=422, detail="choose a JPEG, PNG or WebP image under 20 megapixels") from exc
+    await asyncio.to_thread(save)
+    return {"saved": True}
+
+
+@app.delete("/documents/{doc_id}/cover")
+async def reset_document_cover(doc_id: str):
+    await asyncio.to_thread(read_metadata, doc_id)
+    await asyncio.to_thread((THUMBNAILS_DIR / f"{doc_id}-custom.jpg").unlink, missing_ok=True)
+    return {"reset": True}
+
+
 @app.get("/documents/{doc_id}/thumbnail")
 async def get_document_thumbnail(doc_id: str, w: int = Query(default=320, ge=80, le=640)):
     """The document's first page as a small JPEG, cached on disk.
 
     The UI shows these as covers on its shelves, often dozens at once, so they
     are rendered once at a fixed set of widths and then served from the cache
-    until the source PDF changes.
+    until the source file changes.
     """
-    stored = await asyncio.to_thread(_stored_pdf_path, doc_id)
+    await asyncio.to_thread(read_metadata, doc_id)
+    custom = THUMBNAILS_DIR / f"{doc_id}-custom.jpg"
+    if custom.exists():
+        return FileResponse(custom, media_type="image/jpeg", headers={"Cache-Control": "no-cache"})
+    stored = await asyncio.to_thread(_stored_paged_path, doc_id)
     width = _thumbnail_width(w)
     cached = THUMBNAILS_DIR / f"{doc_id}-{width}.jpg"
 
@@ -2542,7 +2596,7 @@ async def get_document_thumbnail(doc_id: str, w: int = Query(default=320, ge=80,
     return Response(
         content=image,
         media_type="image/jpeg",
-        headers={"Cache-Control": "public, max-age=86400"},
+        headers={"Cache-Control": "no-cache"},
     )
 
 
@@ -2553,7 +2607,7 @@ async def get_document_page(
     highlight: str = Query(default="", max_length=2_000),
     zoom: float = Query(default=2.0, ge=1.0, le=4.0),
 ):
-    stored = await asyncio.to_thread(_stored_pdf_path, doc_id)
+    stored = await asyncio.to_thread(_stored_paged_path, doc_id)
     if page < 1:
         raise HTTPException(status_code=404, detail="page out of range")
 
@@ -2561,6 +2615,10 @@ async def get_document_page(
         with pymupdf.open(stored) as source:
             if page > source.page_count:
                 raise HTTPException(status_code=404, detail="page out of range")
+            if stored.suffix.lower() == ".epub":
+                # EPUB pages are reflowed by PyMuPDF and cannot be inserted
+                # into a temporary PDF for annotation. Render the page itself.
+                return source[page - 1].get_pixmap(matrix=pymupdf.Matrix(zoom, zoom)).tobytes("png")
             single = pymupdf.open()
             try:
                 single.insert_pdf(source, from_page=page - 1, to_page=page - 1)
@@ -2641,6 +2699,17 @@ async def patch_document(doc_id: str, patch: DocumentPatch):
     metadata = await asyncio.to_thread(read_metadata, doc_id)
     changes = {}
     sent = patch.model_fields_set
+    if "rating" in sent:
+        changes["rating"] = patch.rating
+    if "review" in sent:
+        changes["review"] = (patch.review or "").strip() or None
+    for field in ("title", "author", "subject"):
+        if field in sent:
+            value = (getattr(patch, field) or "").strip()
+            if field == "title" and not value:
+                raise HTTPException(status_code=422, detail="title cannot be empty")
+            changes[field] = value or None
+            changes["metadata_edited"] = 1
     if "owned" in sent:
         changes["owned"] = None if patch.owned is None else int(patch.owned)
     if "read" in sent and patch.read is not None:
@@ -2656,6 +2725,11 @@ async def patch_document(doc_id: str, patch: DocumentPatch):
             changes["shelf"] = shelves.normalize_shelf(patch.shelf)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if {"author", "subject"} & sent:
+        changes["shelf_suggested"] = shelves.suggest_shelf(
+            changes.get("kind_override", metadata.get("kind_override")) or metadata.get("kind"),
+            changes.get("subject", metadata.get("subject")), changes.get("author", metadata.get("author")),
+        )
     if not changes:
         return await asyncio.to_thread(read_metadata, doc_id)
     # Not update_metadata(): a reader's mark isn't a pipeline change, so it
@@ -2668,6 +2742,10 @@ def _note_title(text: str) -> str:
     return first if len(first) <= 80 else first[:79].rstrip() + "…"
 
 
+def _note_index_text(text: str, quote: Optional[str]) -> str:
+    return text + ("\n\n<!-- source-passage -->\n> " + quote.replace("\n", "\n> ") if quote else "") + "\n"
+
+
 def _note_response(doc: dict) -> dict:
     try:
         text = pdf_path(doc).read_text(encoding="utf-8")
@@ -2676,7 +2754,10 @@ def _note_response(doc: dict) -> dict:
     return {
         "document_id": doc["document_id"],
         "title": doc.get("title"),
-        "text": text,
+        "text": doc.get("note_text") if doc.get("note_text") is not None else text,
+        "source_document_id": doc.get("source_document_id"),
+        "source_page": doc.get("source_page"),
+        "source_quote": doc.get("source_quote"),
         "created_at": doc.get("uploaded_at"),
         "updated_at": doc.get("updated_at"),
         "indexing_status": doc.get("indexing_status"),
@@ -2692,10 +2773,19 @@ async def create_note(body: NoteBody):
     if not text:
         raise HTTPException(status_code=422, detail="a note needs some text")
 
+    if body.source_document_id:
+        source = await asyncio.to_thread(read_metadata, body.source_document_id)
+        if source.get("collection_id") == NOTES_COLLECTION_ID:
+            raise HTTPException(status_code=422, detail="link notes to a source document, not another note")
+        if body.source_page and body.source_page > (source.get("pages") or 0):
+            raise HTTPException(status_code=422, detail="source page out of range")
+    elif body.source_page or body.source_quote:
+        raise HTTPException(status_code=422, detail="a source document is required")
+
     def create() -> dict:
         doc_id = generate_id()
         stored = DOCUMENTS_DIR / f"{doc_id}.md"
-        stored.write_text(text + "\n", encoding="utf-8")
+        stored.write_text(_note_index_text(text, body.source_quote), encoding="utf-8")
         stamp = utc_now()[:16].replace(":", "")
         create_document(
             stored,
@@ -2704,7 +2794,9 @@ async def create_note(body: NoteBody):
             doc_id=doc_id,
             collection_id=NOTES_COLLECTION_ID,
         )
-        STORE.update(doc_id, {"title": _note_title(text), "kind_override": "note"})
+        STORE.update(doc_id, {"title": _note_title(text), "kind_override": "note",
+                              "source_document_id": body.source_document_id,
+                              "source_page": body.source_page, "source_quote": body.source_quote, "note_text": text})
         enqueue_index(IndexTask(doc_id))
         return _note_response(read_metadata(doc_id))
 
@@ -2712,11 +2804,13 @@ async def create_note(body: NoteBody):
 
 
 @app.get("/notes")
-async def list_notes():
+async def list_notes(source_document_id: Optional[str] = None):
     """Every note, newest first, with its text."""
 
     def notes() -> dict:
         docs = [doc for doc in list_metadata() if doc.get("collection_id") == NOTES_COLLECTION_ID]
+        if source_document_id:
+            docs = [doc for doc in docs if doc.get("source_document_id") == source_document_id]
         docs.sort(key=lambda doc: doc.get("uploaded_at") or "", reverse=True)
         return {"notes": [_note_response(doc) for doc in docs]}
 
@@ -2739,11 +2833,12 @@ async def update_note(doc_id: str, body: NoteBody):
 
     def update() -> dict:
         stored = pdf_path(metadata)
-        stored.write_text(text + "\n", encoding="utf-8")
+        stored.write_text(_note_index_text(text, metadata.get("source_quote")), encoding="utf-8")
         STORE.update(
             doc_id,
             {
                 "title": _note_title(text),
+                "note_text": text,
                 "content_sha256": hashlib.sha256(stored.read_bytes()).hexdigest(),
                 "pipeline_version": -1,  # re-extract from the new text
             },

@@ -6,15 +6,15 @@ import { MarkControls } from "./DocMarks.jsx";
 import { katexPlugin, prepareMath, remarkPlugins } from "./markdown.js";
 import { displayTitle } from "./storage.js";
 
-// A lightbox over a server-rendered page image with the matched passage
-// highlighted, plus a link out to the raw PDF at the same page. `onPage`
+// A lightbox over a server-rendered PDF or EPUB page image, plus a link to
+// the original file. PDF matches are highlighted on the rendered page. `onPage`
 // reports every page the reader lands on (so reopening the document from the
 // shelf resumes there); `onScope` narrows the console to this document.
 // `doc` is the document's current record (for the read/owned marks) and
 // `onPatch(changes)` updates them.
-export default function SourceViewer({ apiBase, source, doc, onPatch, onClose, onPage, onScope }) {
+export default function SourceViewer({ apiBase, source, doc, onPatch, onClose, onPage, onScope, onBook, onSavePassage }) {
   const { documentId, documentName, page: startPage, matched, snippet } = source;
-  const isPdf = !doc || doc.file_type === "pdf";
+  const isPaged = !doc || doc.file_type === "pdf" || doc.file_type === "epub";
   const [page, setPage] = useState(startPage || 1);
   const [pageCount, setPageCount] = useState(null);
   const [status, setStatus] = useState("loading");
@@ -66,11 +66,11 @@ export default function SourceViewer({ apiBase, source, doc, onPatch, onClose, o
   }`;
 
   useEffect(() => {
-    if (isPdf) setStatus("loading");
-  }, [imageSrc, isPdf]);
+    if (isPaged) setStatus("loading");
+  }, [imageSrc, isPaged]);
 
   useEffect(() => {
-    if (isPdf) return undefined;
+    if (isPaged) return undefined;
     let cancelled = false;
     setStatus("loading");
     fetch(`${apiBase}/documents/${documentId}/extracted-page/${page}`)
@@ -88,7 +88,7 @@ export default function SourceViewer({ apiBase, source, doc, onPatch, onClose, o
     return () => {
       cancelled = true;
     };
-  }, [apiBase, documentId, isPdf, page]);
+  }, [apiBase, documentId, isPaged, page]);
 
   // Rendered through a portal straight onto <body>: any ancestor with its own
   // filter/transform/backdrop-filter turns `position: fixed` into "fixed to
@@ -123,12 +123,14 @@ export default function SourceViewer({ apiBase, source, doc, onPatch, onClose, o
           </div>
           {doc && <MarkControls doc={doc} compact onPatch={onPatch} />}
           <div className="viewer-actions">
+            {onBook && <button type="button" className="text-button" onClick={onBook}>Book details & notes</button>}
+            {onSavePassage && snippet && page === (startPage || 1) && <button type="button" className="text-button" onClick={() => onSavePassage({ ...source, page })}>Save passage</button>}
             {onScope && (
               <button type="button" className="text-button" onClick={() => onScope({ documentId, documentName })}>
                 Search within
               </button>
             )}
-            <a className="text-button" href={`${apiBase}/documents/${documentId}/file${isPdf ? `#page=${page}` : ""}`} target="_blank" rel="noreferrer">
+            <a className="text-button" href={`${apiBase}/documents/${documentId}/file${doc?.file_type === "pdf" ? `#page=${page}` : ""}`} target="_blank" rel="noreferrer">
               Open original ↗
             </a>
             <button type="button" className="icon-button" onClick={onClose} aria-label="Close">
@@ -137,9 +139,9 @@ export default function SourceViewer({ apiBase, source, doc, onPatch, onClose, o
           </div>
         </div>
         <div className="viewer-page-area">
-          {status === "loading" && <div className="viewer-status">{isPdf ? "Rendering page…" : "Loading extracted text…"}</div>}
+          {status === "loading" && <div className="viewer-status">{isPaged ? "Rendering page…" : "Loading extracted text…"}</div>}
           {status === "error" && <div className="viewer-status error">Could not load this page.</div>}
-          {isPdf ? (
+          {isPaged ? (
             <img
               key={imageSrc}
               src={imageSrc}
