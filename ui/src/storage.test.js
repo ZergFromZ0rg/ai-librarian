@@ -6,6 +6,7 @@ import {
   historyEntries,
   isRead,
   ownedState,
+  readingStatus,
   loadInquiries,
   loadRecents,
   recordInquiry,
@@ -76,6 +77,11 @@ describe("shelfItems", () => {
     const documents = [doc("a"), doc("b")];
     expect(shelfItems([{ id: "a" }, { id: "b" }], documents, 1)).toHaveLength(1);
   });
+
+  it("includes catalogue-only books without treating them as indexing work", () => {
+    const book = { ...doc("paper-copy", "catalogued"), record_type: "standalone", file_type: "book", updated_at: "2026-04-01" };
+    expect(shelfItems([], [book, doc("queued", "queued")], 4).map((item) => item.doc.document_id)).toEqual(["paper-copy"]);
+  });
 });
 
 describe("relevancePercent", () => {
@@ -104,6 +110,8 @@ describe("document marks", () => {
   it("reads read_at and owned", () => {
     expect(isRead({ read_at: "2026-01-01" })).toBe(true);
     expect(isRead({ read_at: null })).toBe(false);
+    expect(readingStatus({ reading_status: "reading", read_at: null })).toBe("reading");
+    expect(isRead({ reading_status: "reading", read_at: "2026-01-01" })).toBe(false);
     expect(ownedState({ kind: "book", owned: 1 })).toBe(true);
     expect(ownedState({ kind: "book", owned: 0 })).toBe(false);
     expect(ownedState({ kind: "book", owned: null })).toBe(false); // unmarked = not owned

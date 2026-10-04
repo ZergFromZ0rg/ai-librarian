@@ -86,8 +86,8 @@ export function shelfItems(recents, documents, limit) {
     if (items.length >= limit) return items;
   }
   const fresh = documents
-    .filter((doc) => !seen.has(doc.document_id) && doc.indexing_status === "indexed")
-    .sort((a, b) => String(b.indexed_at || "").localeCompare(String(a.indexed_at || "")));
+    .filter((doc) => !seen.has(doc.document_id) && ["indexed", "catalogued"].includes(doc.indexing_status))
+    .sort((a, b) => String(b.indexed_at || b.updated_at || "").localeCompare(String(a.indexed_at || a.updated_at || "")));
   for (const doc of fresh) {
     items.push({ doc, page: 1, openedAt: null });
     if (items.length >= limit) break;
@@ -132,8 +132,12 @@ export function docKind(doc) {
   return doc?.kind_override || doc?.kind || "document";
 }
 
+export function readingStatus(doc) {
+  return doc?.reading_status || (doc?.read_at ? "read" : "to_read");
+}
+
 export function isRead(doc) {
-  return Boolean(doc?.read_at);
+  return readingStatus(doc) === "read";
 }
 
 // Owned is only meaningful for books (null for anything else). A book the

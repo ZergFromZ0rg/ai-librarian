@@ -17,8 +17,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from difflib import SequenceMatcher
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -27,7 +26,7 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.datastructures import Headers, MutableHeaders
 
 import generation
@@ -40,7 +39,7 @@ from chunking import (
     parse_typed_blocks,
 )
 from conversations import ConversationStore
-from database import MetadataStore, OwnedBookStore
+from database import MetadataStore
 from doc_kind import detect_kind
 from embeddings import (
     DEFAULT_MODEL as EMBEDDING_MODEL,
@@ -439,7 +438,6 @@ def record_ask_outcome(
 
 
 STORE = MetadataStore(DATA_DIR / "library.db")
-OWNED_BOOKS = OwnedBookStore(STORE._conn)
 _imported = STORE.import_legacy(METADATA_DIR)
 if _imported:
     logger.info("Imported %d legacy metadata records into %s", _imported, DATA_DIR / "library.db")
@@ -478,12 +476,48 @@ class SearchRequest(BaseModel):
     max_per_doc: int = Field(default=0, ge=0, le=50)
 
 
+def _normalized_isbn(value: Optional[str], length: int) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = re.sub(r"[-\s]", "", value).upper()
+    if not normalized:
+        return None
+    if length == 10:
+        if not re.fullmatch(r"\d{9}[\dX]", normalized):
+            raise ValueError("ISBN-10 must contain 10 digits (the last may be X)")
+        digits = [int(char) for char in normalized[:9]] + [10 if normalized[-1] == "X" else int(normalized[-1])]
+        valid = sum((10 - index) * digit for index, digit in enumerate(digits)) % 11 == 0
+    else:
+        if not re.fullmatch(r"\d{13}", normalized):
+            raise ValueError("ISBN-13 must contain 13 digits")
+        valid = sum((1 if index % 2 == 0 else 3) * int(char) for index, char in enumerate(normalized)) % 10 == 0
+    if not valid:
+        raise ValueError(f"ISBN-{length} checksum is invalid")
+    return normalized
+
+
 class DocumentPatch(BaseModel):
     rating: Optional[int] = Field(default=None, ge=1, le=5, strict=True)
     review: Optional[str] = Field(default=None, max_length=20_000)
     title: Optional[str] = Field(default=None, max_length=300)
     author: Optional[str] = Field(default=None, max_length=240)
     subject: Optional[str] = Field(default=None, max_length=240)
+    subtitle: Optional[str] = Field(default=None, max_length=300)
+    description: Optional[str] = Field(default=None, max_length=20_000)
+    publisher: Optional[str] = Field(default=None, max_length=300)
+    published_year: Optional[int] = Field(default=None, ge=1000, le=2100, strict=True)
+    page_count: Optional[int] = Field(default=None, ge=1, le=1_000_000, strict=True)
+    language: Optional[str] = Field(default=None, max_length=50, pattern=r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
+    isbn_10: Optional[str] = Field(default=None, max_length=24)
+    isbn_13: Optional[str] = Field(default=None, max_length=24)
+    genres: Optional[List[str]] = Field(default=None, max_length=20)
+    acquisition_source: Optional[str] = Field(
+        default=None,
+        pattern=r"^(?:book_store|kindle|audiobook|borrowed|second_hand|gifted|library|other)$",
+    )
+    reading_status: Optional[str] = Field(default=None, pattern=r"^(?:to_read|reading|read|abandoned)$")
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
     # Only the fields sent are changed. `owned` may be null to clear it;
     # `kind` "auto" drops the reader's override and goes back to the guess.
     owned: Optional[bool] = None
@@ -491,6 +525,48 @@ class DocumentPatch(BaseModel):
     kind: Optional[str] = Field(default=None, pattern=r"^(book|paper|document|auto)$")
     # "Books/Philosophy/Albert Camus"; null or "" goes back to the suggestion.
     shelf: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator("isbn_10", mode="before")
+    @classmethod
+    def validate_isbn_10(cls, value):
+        return _normalized_isbn(value, 10)
+
+    @field_validator("isbn_13", mode="before")
+    @classmethod
+    def validate_isbn_13(cls, value):
+        return _normalized_isbn(value, 13)
+
+    @field_validator("language", "acquisition_source", mode="before")
+    @classmethod
+    def empty_string_is_none(cls, value):
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("genres")
+    @classmethod
+    def validate_genres(cls, values):
+        if values is None:
+            return None
+        cleaned = []
+        for value in values:
+            genre = value.strip()
+            if not genre:
+                continue
+            if len(genre) > 80:
+                raise ValueError("genres must be 80 characters or fewer")
+            if genre.casefold() not in {item.casefold() for item in cleaned}:
+                cleaned.append(genre)
+        return cleaned
+
+    @field_validator("started_at", "finished_at")
+    @classmethod
+    def validate_calendar_date(cls, value):
+        if value in (None, ""):
+            return None
+        try:
+            date.fromisoformat(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("date must use YYYY-MM-DD") from exc
+        return value
 
 
 class OwnedBookBody(BaseModel):
@@ -1436,6 +1512,7 @@ def create_document(
     now = utc_now()
     metadata = {
         "document_id": doc_id,
+        "record_type": "source",
         "filename": filename,
         "file_type": file_type_for_path(filename) or "document",
         "title": (epub_title(stored_path) if file_type_for_path(filename) == "epub" else None)
@@ -1462,6 +1539,7 @@ def create_document(
         # PIPELINE_VERSION, since this document has no chunks yet at all.
         "pipeline_version": -1,
         "index_schema_version": 0,
+        "reading_status": "to_read",
     }
     try:
         return STORE.create(metadata)
@@ -1555,6 +1633,10 @@ def ingest_worker() -> None:
                 save_job(job)
 
             files = _library_pdfs(Path(folder))
+            with JOB_STATUS_LOCK:
+                job = JOB_STATUS[job_id]
+                job["total_files"] = len(files)
+                save_job(job)
             for pdf in files:
                 rel = str(pdf.relative_to(INGEST_ROOT))
                 with JOB_STATUS_LOCK:
@@ -2247,109 +2329,103 @@ async def get_documents():
     return {"documents": await asyncio.to_thread(list_metadata)}
 
 
-def _match_key(value: Optional[str]) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
-
-
-def _owned_book_match(book: dict, documents: list[dict]) -> Optional[dict]:
-    """Find a conservative title/author match for a PDF-less registry entry."""
-    wanted_title = _match_key(book.get("title"))
-    wanted_author = _match_key(book.get("author"))
-    if not wanted_title:
-        return None
-    best = None
-    for document in documents:
-        if document.get("indexing_status") == "error":
-            continue
-        filename = Path(document.get("filename") or "").stem
-        candidates = [document.get("title"), filename]
-        title_score = max(
-            (SequenceMatcher(None, wanted_title, _match_key(candidate)).ratio() for candidate in candidates if candidate),
-            default=0,
-        )
-        if wanted_title == _match_key(document.get("title")) or wanted_title == _match_key(filename):
-            title_score = 1.0
-        author_score = 1.0 if not wanted_author else max(
-            (SequenceMatcher(None, wanted_author, _match_key(document.get("author"))).ratio(),
-             SequenceMatcher(None, wanted_author, _match_key(filename)).ratio()),
-        )
-        score = title_score if not wanted_author else title_score * 0.8 + author_score * 0.2
-        if score >= (0.86 if wanted_author else 0.9) and (best is None or score > best[0]):
-            best = (score, document)
-    if best is None:
-        return None
-    document = best[1]
+def _catalogue_book_response(document: dict) -> dict:
+    """Document-shaped response plus the old keys for Release 1 clients."""
     return {
-        "document_id": document["document_id"],
-        "filename": document["filename"],
-        "title": document.get("title") or Path(document["filename"]).stem,
-        "indexing_status": document.get("indexing_status"),
-        "score": round(best[0], 3),
+        **document,
+        "book_id": document["document_id"],
+        "notes": document.get("review"),
+        "pdf_less": True,
+        "match": None,
+        "match_alert": False,
     }
 
 
-async def _owned_books_with_matches() -> list[dict]:
-    books, documents = await asyncio.gather(
-        asyncio.to_thread(OWNED_BOOKS.list_all),
-        asyncio.to_thread(list_metadata),
-    )
-    enriched = []
-    for book in books:
-        match = _owned_book_match(book, documents)
-        enriched.append({**book, "match": match, "match_alert": bool(book.get("pdf_less") and match)})
-    return enriched
+def _standalone_books() -> list[dict]:
+    return [
+        _catalogue_book_response(document)
+        for document in list_metadata()
+        if document.get("record_type") == "standalone"
+    ]
 
 
 @app.get("/owned-books")
 async def get_owned_books():
-    return {"books": await _owned_books_with_matches()}
+    return {"books": await asyncio.to_thread(_standalone_books)}
 
 
 @app.post("/owned-books")
 async def create_owned_book(body: OwnedBookBody):
     now = utc_now()
-    record = {
-        "book_id": secrets.token_hex(6),
-        "title": body.title.strip(),
-        "author": body.author.strip() if body.author else None,
-        "notes": body.notes.strip() if body.notes else None,
-        "pdf_less": int(body.pdf_less),
-        "created_at": now,
-        "updated_at": now,
-    }
-    if not record["title"]:
+    title = body.title.strip()
+    if not title:
         raise HTTPException(status_code=422, detail="title cannot be blank")
-    created = await asyncio.to_thread(OWNED_BOOKS.create, record)
-    match = _owned_book_match(created, await asyncio.to_thread(list_metadata))
-    return {"book": {**created, "match": match, "match_alert": bool(created.get("pdf_less") and match)}}
+    document_id = secrets.token_hex(6)
+    author = body.author.strip() if body.author else None
+    record = {
+        "document_id": document_id,
+        "record_type": "standalone",
+        "filename": title,
+        "file_type": "book",
+        "title": title,
+        "stored_filename": "",
+        "content_sha256": f"standalone:{document_id}",
+        "uploaded_at": now,
+        "updated_at": now,
+        "pages": 0,
+        "chunks": 0,
+        "retrieval_units": 0,
+        "indexing_status": "catalogued",
+        "vector_dim": 0,
+        "pipeline_version": 0,
+        "index_schema_version": 0,
+        "kind": "book",
+        "kind_override": "book",
+        "owned": 1,
+        "author": author,
+        "review": body.notes.strip() if body.notes else None,
+        "reading_status": "to_read",
+        "shelf_suggested": shelves.suggest_shelf("book", None, author),
+    }
+    created = await asyncio.to_thread(STORE.create, record)
+    return JSONResponse({"book": _catalogue_book_response(created)}, status_code=201)
 
 
 @app.patch("/owned-books/{book_id}")
 async def patch_owned_book(book_id: str, body: OwnedBookPatch):
     if not re.fullmatch(r"[a-f0-9]{12}", book_id):
         raise HTTPException(status_code=400, detail="invalid owned-book id")
-    changes = {key: value for key, value in body.model_dump().items() if key in body.model_fields_set}
-    if "title" in changes:
-        changes["title"] = changes["title"].strip()
-        if not changes["title"]:
+    document = await asyncio.to_thread(read_metadata, book_id)
+    if document.get("record_type") != "standalone":
+        raise HTTPException(status_code=404, detail="catalogue-only book not found")
+    supplied = body.model_fields_set
+    changes = {}
+    if "title" in supplied:
+        title = body.title.strip()
+        if not title:
             raise HTTPException(status_code=422, detail="title cannot be blank")
-    if "author" in changes and changes["author"]:
-        changes["author"] = changes["author"].strip()
-    if "notes" in changes and changes["notes"]:
-        changes["notes"] = changes["notes"].strip()
+        changes.update({"title": title, "filename": title})
+    if "author" in supplied:
+        changes["author"] = (body.author or "").strip() or None
+    if "notes" in supplied:
+        changes["review"] = (body.notes or "").strip() or None
     changes["updated_at"] = utc_now()
     try:
-        await asyncio.to_thread(OWNED_BOOKS.update, book_id, changes)
+        updated = await asyncio.to_thread(STORE.update, book_id, changes)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="owned book not found") from exc
-    return {"book": next(book for book in await _owned_books_with_matches() if book["book_id"] == book_id)}
+    return {"book": _catalogue_book_response(updated)}
 
 
 @app.delete("/owned-books/{book_id}")
 async def delete_owned_book(book_id: str):
     if not re.fullmatch(r"[a-f0-9]{12}", book_id):
         raise HTTPException(status_code=400, detail="invalid owned-book id")
-    await asyncio.to_thread(OWNED_BOOKS.delete, book_id)
+    document = await asyncio.to_thread(read_metadata, book_id)
+    if document.get("record_type") != "standalone":
+        raise HTTPException(status_code=404, detail="catalogue-only book not found")
+    await asyncio.to_thread((THUMBNAILS_DIR / f"{book_id}-custom.jpg").unlink, missing_ok=True)
+    await asyncio.to_thread(STORE.delete, book_id)
     return {"ok": True}
 
 
@@ -2454,6 +2530,8 @@ async def get_extracted_page(doc_id: str, page: int):
 
 def _stored_file_path(doc_id: str) -> Path:
     metadata = read_metadata(doc_id)
+    if metadata.get("record_type") == "standalone":
+        raise HTTPException(status_code=404, detail="this book has no source file")
     stored = pdf_path(metadata)
     if not stored.exists():
         raise HTTPException(status_code=404, detail="the source document is missing")
@@ -2656,6 +2734,8 @@ async def retry_document(doc_id: str):
     than blocking this request, so retrying several documents at once (a
     bulk reindex) actually overlaps instead of running one at a time."""
     metadata = await asyncio.to_thread(read_metadata, doc_id)
+    if metadata.get("record_type") == "standalone":
+        raise HTTPException(status_code=409, detail="catalogue-only books have no source to index")
     if metadata.get("indexing_status") in {"queued", "indexing"}:
         raise HTTPException(status_code=409, detail="document is already queued for indexing")
     stale_pipeline = metadata.get("pipeline_version") != PIPELINE_VERSION
@@ -2694,8 +2774,7 @@ async def approve_ocr(doc_id: str):
 
 @app.patch("/documents/{doc_id}")
 async def patch_document(doc_id: str, patch: DocumentPatch):
-    """The reader's own marks on a document: owned (for books), read, a
-    correction to the detected kind, and the shelf it sits on."""
+    """Update the reader's catalogue metadata and personal marks."""
     metadata = await asyncio.to_thread(read_metadata, doc_id)
     changes = {}
     sent = patch.model_fields_set
@@ -2703,17 +2782,74 @@ async def patch_document(doc_id: str, patch: DocumentPatch):
         changes["rating"] = patch.rating
     if "review" in sent:
         changes["review"] = (patch.review or "").strip() or None
-    for field in ("title", "author", "subject"):
+    text_fields = (
+        "title",
+        "author",
+        "subject",
+        "subtitle",
+        "description",
+        "publisher",
+        "language",
+        "isbn_10",
+        "isbn_13",
+        "acquisition_source",
+    )
+    for field in text_fields:
         if field in sent:
             value = (getattr(patch, field) or "").strip()
             if field == "title" and not value:
                 raise HTTPException(status_code=422, detail="title cannot be empty")
+            if field == "language":
+                value = value.lower()
             changes[field] = value or None
             changes["metadata_edited"] = 1
+    for field in ("published_year", "page_count"):
+        if field in sent:
+            changes[field] = getattr(patch, field)
+            changes["metadata_edited"] = 1
+    if "genres" in sent:
+        changes["genres_json"] = json.dumps(patch.genres or [], ensure_ascii=False) if patch.genres else None
+        changes["metadata_edited"] = 1
     if "owned" in sent:
         changes["owned"] = None if patch.owned is None else int(patch.owned)
-    if "read" in sent and patch.read is not None:
-        changes["read_at"] = utc_now() if patch.read else None
+    today = datetime.now(timezone.utc).date().isoformat()
+    if "read" in sent and patch.read is not None and "reading_status" not in sent:
+        # Backward compatibility for the quick Read toggle used outside the
+        # book editor. The richer control writes `reading_status` directly.
+        changes["reading_status"] = "read" if patch.read else "to_read"
+    if "reading_status" in sent:
+        changes["reading_status"] = patch.reading_status
+    for field in ("started_at", "finished_at"):
+        if field in sent:
+            changes[field] = getattr(patch, field)
+
+    if "reading_status" in changes:
+        status = changes["reading_status"]
+        if status is None:
+            changes.update({"read_at": None, "started_at": None, "finished_at": None})
+        elif status == "to_read":
+            changes.update({"read_at": None, "started_at": None, "finished_at": None})
+        elif status == "reading":
+            changes["read_at"] = None
+            changes["finished_at"] = None
+            if "started_at" not in sent and not metadata.get("started_at"):
+                changes["started_at"] = today
+        elif status == "read":
+            finished = changes.get("finished_at", metadata.get("finished_at")) or today
+            changes["finished_at"] = finished
+            changes["read_at"] = f"{finished}T00:00:00Z"
+        elif status == "abandoned":
+            changes["read_at"] = None
+            changes["finished_at"] = None
+
+    effective_started = changes.get("started_at", metadata.get("started_at"))
+    effective_finished = changes.get("finished_at", metadata.get("finished_at"))
+    if effective_started and effective_finished and effective_finished < effective_started:
+        raise HTTPException(status_code=422, detail="finished date cannot be before started date")
+    if changes.get("reading_status", metadata.get("reading_status")) == "read" and "finished_at" in sent:
+        finished = changes.get("finished_at") or today
+        changes["finished_at"] = finished
+        changes["read_at"] = f"{finished}T00:00:00Z"
     if "kind" in sent and patch.kind is not None:
         changes["kind_override"] = None if patch.kind == "auto" else patch.kind
         # The top-level shelf follows the kind (Books vs Papers); author and
@@ -2910,7 +3046,7 @@ async def delete_document(doc_id: str):
             artifacts.extend(THUMBNAILS_DIR.glob(f"{doc_id}-*.jpg"))
             # Only remove the PDF itself when we own it (an upload). A
             # referenced library file is left exactly where the reader put it.
-            if not (metadata.get("source_path") or "").strip():
+            if metadata.get("record_type") != "standalone" and not (metadata.get("source_path") or "").strip():
                 artifacts.append(DOCUMENTS_DIR / metadata["stored_filename"])
             for path in artifacts:
                 path.unlink(missing_ok=True)
@@ -3448,6 +3584,10 @@ def _start_folder_ingest(folder: Path, collection_id: Optional[str] = None) -> d
         "state": "queued",
         "folder": str(folder.relative_to(INGEST_ROOT)) if folder != INGEST_ROOT else ".",
         "collection_id": collection_id,
+        # ``None`` means the worker is still walking the folder. Once it has
+        # the stable file list this becomes the real denominator used by the
+        # UI's in-place progress indicators.
+        "total_files": None,
         "files": [],
         "created_at": now,
         "updated_at": now,

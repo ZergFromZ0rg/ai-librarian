@@ -94,6 +94,7 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
   }
   const source = (at, snippet) => ({ documentId, documentName: doc.title || doc.filename, page: at || 1, snippet });
   const markdown = (text) => <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={[katexPlugin]} skipHtml>{prepareMath(text)}</ReactMarkdown>;
+  const hasSource = doc?.record_type !== "standalone";
   return createPortal(
     <section className="book-page-overlay" role="dialog" aria-modal={!readerOpen} aria-hidden={readerOpen || undefined} inert={readerOpen || undefined} aria-labelledby="book-page-title">
       <div className="book-page">
@@ -105,8 +106,8 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
         {notice && <p className="notice" role="status">{notice}</p>}
         {!doc ? <h1 id="book-page-title">{error ? "Book unavailable" : "Opening book…"}</h1> : <>
           <header className="book-overview">
-            <div><div className="book-overview-kicker"><span className="eyebrow">Your personal library</span><span className="book-format">{doc.file_type?.toUpperCase()}</span></div><h1 id="book-page-title">{doc.title || displayTitle(doc.filename)}</h1>{doc.author && <p>{doc.author}</p>}</div>
-            <div className="book-page-actions"><button className="button primary" onClick={() => onRead(source(passage?.page))}>Read {doc.file_type === "epub" ? "EPUB" : doc.file_type === "pdf" ? "PDF" : "source"} ↗</button><button className="button" disabled={!askEnabled} title={!askEnabled ? "Enable an answering model in Settings" : undefined} onClick={() => { if (!dirty.current || window.confirm("Discard your unsaved changes?")) onAsk(source()); }}>Ask this book</button></div>
+            <div><div className="book-overview-kicker"><span className="eyebrow">Your personal library</span><span className="book-format">{hasSource ? doc.file_type?.toUpperCase() : "NO FILE"}</span></div><h1 id="book-page-title">{doc.title || displayTitle(doc.filename)}</h1>{doc.author && <p>{doc.author}</p>}</div>
+            {hasSource ? <div className="book-page-actions"><button className="button primary" onClick={() => onRead(source(passage?.page))}>Read {doc.file_type === "epub" ? "EPUB" : doc.file_type === "pdf" ? "PDF" : "source"} ↗</button><button className="button" disabled={!askEnabled} title={!askEnabled ? "Enable an answering model in Settings" : undefined} onClick={() => { if (!dirty.current || window.confirm("Discard your unsaved changes?")) onAsk(source()); }}>Ask this book</button></div> : <p className="book-record-label">Catalogue record · no digital file attached</p>}
           </header>
           <BookDetails doc={doc} apiBase={apiBase} onDocument={(updated) => { setDocument(updated); onChanged(); }} onDirty={setDetailsDirty} onCoverChanged={onCoverChanged} />
           <div className="book-page-notes">

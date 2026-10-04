@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import ActionProgress from "./ActionProgress.jsx";
 import Cover from "./Cover.jsx";
 import { CoverFlags, MarkControls } from "./DocMarks.jsx";
 import NotesPanel from "./NotesPanel.jsx";
 import OwnedBooks from "./OwnedBooks.jsx";
 import ShelfView from "./ShelfView.jsx";
+import { ingestActionProgress, isActiveIngestJob, reindexActionProgress } from "./actionProgress.js";
 import { displayTitle, loadStored, saveStored } from "./storage.js";
 
 const VIEW_KEY = "ai-librarian.stacks.view";
@@ -73,36 +75,34 @@ function CollectionBar({ collections, activeId, onSelect, onCreate, onUpdate, on
           </button>
         </div>
       </div>
-      <div className="collection-cards" role="tablist" aria-label="Choose collection">
+      <div className="collection-cards" role="group" aria-label="Choose collection">
         {collections.map((collection) => (
-          <button
-            type="button"
-            key={collection.id}
-            role="tab"
-            aria-selected={collection.id === activeId}
-            className={`collection-card${collection.id === activeId ? " active" : ""}`}
-            onClick={() => onSelect(collection.id)}
-          >
-            <span className="collection-card-name">{collection.name}</span>
-            <span className="collection-card-path">/{collection.path || ""}</span>
-            <span className="collection-card-meta">
-              {collection.document_count || 0} indexed · {collection.auto_scan ? "watching" : "paused"}
-            </span>
+          <div key={collection.id} className={`collection-card${collection.id === activeId ? " active" : ""}`}>
+            <button
+              type="button"
+              aria-pressed={collection.id === activeId}
+              className="collection-card-select"
+              onClick={() => onSelect(collection.id)}
+            >
+              <span className="collection-card-name">{collection.name}</span>
+              <span className="collection-card-path">/{collection.path || ""}</span>
+              <span className="collection-card-meta">
+                {collection.document_count || 0} indexed · {collection.auto_scan ? "watching" : "paused"}
+              </span>
+            </button>
             {!collection.legacy && (
-              <span
-                role="checkbox"
-                aria-checked={collection.auto_scan}
+              <button
+                type="button"
+                aria-pressed={collection.auto_scan}
+                aria-label={collection.auto_scan ? `Pause scanning ${collection.name}` : `Resume scanning ${collection.name}`}
                 className="collection-watch"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onUpdate(collection, { auto_scan: !collection.auto_scan });
-                }}
+                onClick={() => onUpdate(collection, { auto_scan: !collection.auto_scan })}
                 title={collection.auto_scan ? "Pause passive scanning" : "Resume passive scanning"}
               >
                 {collection.auto_scan ? "●" : "○"}
-              </span>
+              </button>
             )}
-          </button>
+          </div>
         ))}
       </div>
       {adding && (
@@ -122,7 +122,7 @@ function CollectionBar({ collections, activeId, onSelect, onCreate, onUpdate, on
 // copy) and, for a folder, kicks off a recursive ingest job. It opens on
 // `libraryRoot` (the folder auto-ingest watches) rather than the top of a
 // possibly much broader mount.
-function Shelves({ apiBase, documents, libraryRoot, collection, settingRoot, onSetLibraryFolder, onImported, onJob, onOpenDocument, view }) {
+function Shelves({ apiBase, documents, libraryRoot, collection, settingRoot, job, onSetLibraryFolder, onImported, onJob, onOpenDocument, view }) {
   const [path, setPath] = useState(null); // null = not yet resolved to the starting folder
   const [tree, setTree] = useState(null);
   const [status, setStatus] = useState("loading");
@@ -184,7 +184,7 @@ function Shelves({ apiBase, documents, libraryRoot, collection, settingRoot, onS
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
-        if (data.job_id) onJob?.(data);
+        if (data.job_id) onJob?.(data, { uiOrigin: "import", uiPath: entryPath });
         onImported?.();
       } catch (importError) {
         setError(importError.message);
@@ -210,6 +210,12 @@ function Shelves({ apiBase, documents, libraryRoot, collection, settingRoot, onS
   const files = entries.filter((entry) => entry.type === "file");
   const atLibraryRoot = path === libraryRoot;
   const joinPath = (name) => (path ? `${path}/${name}` : name);
+  const progressFor = (entryPath, origin) =>
+    job?.uiOrigin === origin && job?.uiPath === entryPath ? ingestActionProgress(job) : null;
+  const currentImportProgress = progressFor(path || ".", "import");
+  const currentRootProgress = job?.uiOrigin === "set-library" && [path, path || "."].includes(job?.uiPath)
+    ? ingestActionProgress(job)
+    : null;
 
   return (
     <div className="shelves">
@@ -229,15 +235,20 @@ function Shelves({ apiBase, documents, libraryRoot, collection, settingRoot, onS
           ))}
         </nav>
         <div className="shelves-bar-actions">
+          {currentRootProgress && <ActionProgress progress={currentRootProgress} compact />}
           {path !== null && !atLibraryRoot && (
-            <button type="button" className="text-button" disabled={settingRoot} onClick={() => setAsLibrary(path)} title="Make this the folder auto-ingest watches">
-              Set as library folder
+            <button type="button" className="text-button" disabled={settingRoot || isActiveIngestJob(job)} onClick={() => setAsLibrary(path)} title="Make this the folder auto-ingest watches">
+              {settingRoot ? "Setting…" : "Set as library folder"}
             </button>
           )}
-          {path !== null && files.some((file) => !file.indexed) && (
-            <button type="button" className="button" disabled={Boolean(busy[path || "."])} onClick={() => importEntry(path || ".")}>
-              {busy[path || "."] ? "Queueing…" : "Import this folder"}
-            </button>
+          {path !== null && (currentImportProgress || files.some((file) => !file.indexed)) && (
+            currentImportProgress ? (
+              <ActionProgress progress={currentImportProgress} compact />
+            ) : (
+              <button type="button" className="button" disabled={Boolean(busy[path || "."]) || isActiveIngestJob(job)} onClick={() => importEntry(path || ".")}>
+                {busy[path || "."] ? "Queueing…" : "Import this folder"}
+              </button>
+            )
           )}
         </div>
       </div>
@@ -250,6 +261,8 @@ function Shelves({ apiBase, documents, libraryRoot, collection, settingRoot, onS
         <div className="folders">
           {dirs.map((entry) => {
             const entryPath = joinPath(entry.name);
+            const importProgress = progressFor(entryPath, "import");
+            const rootProgress = progressFor(entryPath, "set-library");
             return (
               <div className="folder" key={`dir-${entry.name}`}>
                 <button type="button" className="folder-open" onClick={() => loadTree(entryPath)}>
@@ -260,12 +273,20 @@ function Shelves({ apiBase, documents, libraryRoot, collection, settingRoot, onS
                   </span>
                 </button>
                 <div className="folder-actions">
-                  <button type="button" className="text-button" disabled={Boolean(busy[entryPath])} onClick={() => importEntry(entryPath)}>
-                    {busy[entryPath] ? "Queueing…" : "Import all"}
-                  </button>
-                  <button type="button" className="text-button" disabled={settingRoot} onClick={() => setAsLibrary(entryPath)}>
-                    Set as library
-                  </button>
+                  {importProgress ? (
+                    <ActionProgress progress={importProgress} compact />
+                  ) : (
+                    <button type="button" className="text-button" disabled={Boolean(busy[entryPath]) || isActiveIngestJob(job)} onClick={() => importEntry(entryPath)}>
+                      {busy[entryPath] ? "Queueing…" : "Import all"}
+                    </button>
+                  )}
+                  {rootProgress ? (
+                    <ActionProgress progress={rootProgress} compact />
+                  ) : (
+                    <button type="button" className="text-button" disabled={settingRoot || isActiveIngestJob(job)} onClick={() => setAsLibrary(entryPath)}>
+                      {settingRoot ? "Setting…" : "Set as library"}
+                    </button>
+                  )}
                 </div>
               </div>
             );
@@ -323,7 +344,7 @@ function Shelves({ apiBase, documents, libraryRoot, collection, settingRoot, onS
 
 // Every indexed document (uploads included, which have no folder), as a
 // table: status, size, where it came from, and the maintenance actions.
-function Catalogue({ apiBase, documents, reindexing, onReindex, onRemove, onOpenDocument, onScope, onPatch, onApproveOcr }) {
+function Catalogue({ apiBase, documents, reindexing, reindexProgress, onReindex, onRemove, onOpenDocument, onScope, onPatch, onApproveOcr }) {
   const [filter, setFilter] = useState("");
   const [sort, setSort] = useState("recent");
   const [selected, setSelected] = useState(() => new Set());
@@ -362,6 +383,7 @@ function Catalogue({ apiBase, documents, reindexing, onReindex, onRemove, onOpen
   }
 
   const allSelected = rows.length > 0 && rows.every((doc) => selected.has(doc.document_id));
+  const reindexStatus = reindexActionProgress(reindexProgress);
 
   return (
     <div className="catalogue">
@@ -380,26 +402,32 @@ function Catalogue({ apiBase, documents, reindexing, onReindex, onRemove, onOpen
           <option value="status">Status</option>
         </select>
         <span className="catalogue-bar-spacer" />
-        <button
-          type="button"
-          className="text-button"
-          disabled={reindexing || selected.size === 0}
-          onClick={() => {
-            onReindex([...selected]);
-            setSelected(new Set());
-          }}
-        >
-          Reindex selected{selected.size ? ` (${selected.size})` : ""}
-        </button>
-        <button
-          type="button"
-          className="text-button"
-          disabled={reindexing}
-          onClick={() => onReindex(documents.map((doc) => doc.document_id))}
-          title="Re-extracts and re-chunks every document from its source PDF — worth doing after an extraction-quality fix."
-        >
-          Reindex all
-        </button>
+        {reindexStatus ? (
+          <ActionProgress progress={reindexStatus} compact />
+        ) : (
+          <>
+            <button
+              type="button"
+              className="text-button"
+              disabled={reindexing || selected.size === 0}
+              onClick={() => {
+                onReindex([...selected]);
+                setSelected(new Set());
+              }}
+            >
+              Reindex selected{selected.size ? ` (${selected.size})` : ""}
+            </button>
+            <button
+              type="button"
+              className="text-button"
+              disabled={reindexing}
+              onClick={() => onReindex(documents.map((doc) => doc.document_id))}
+              title="Re-extracts and re-chunks every document from its source PDF — worth doing after an extraction-quality fix."
+            >
+              Reindex all
+            </button>
+          </>
+        )}
       </div>
 
       <table className="catalogue-table">
@@ -431,6 +459,7 @@ function Catalogue({ apiBase, documents, reindexing, onReindex, onRemove, onOpen
             const hasError = Boolean(doc.indexing_error);
             const hasNotes = Boolean(doc.extraction_notes);
             const notesOpen = openNotes === doc.document_id;
+            const retrying = reindexing && reindexProgress?.requestedIds?.includes(doc.document_id);
             return (
               <React.Fragment key={doc.document_id}>
                 <tr className={selected.has(doc.document_id) ? "selected" : ""}>
@@ -485,11 +514,13 @@ function Catalogue({ apiBase, documents, reindexing, onReindex, onRemove, onOpen
                         Approve OCR ({doc.ocr_pages} pp.)
                       </button>
                     ) : (
-                      doc.indexing_status === "error" && (
+                      doc.indexing_status === "error" && (retrying ? (
+                        <span className="action-tip" role="status">Retrying…</span>
+                      ) : (
                         <button type="button" className="text-button" disabled={reindexing} onClick={() => onReindex([doc.document_id])}>
                           Retry
                         </button>
-                      )
+                      ))
                     )}
                     <button type="button" className="text-button danger" onClick={() => onRemove(doc)}>
                       Remove
@@ -519,7 +550,7 @@ function Catalogue({ apiBase, documents, reindexing, onReindex, onRemove, onOpen
 // everything already processed — plus the ways in (upload,
 // rescan, import) and the progress of whatever is being processed.
 export default function Stacks(props) {
-  const { apiBase, documents, collections: allCollections = [], onUpload, uploading, onRescan, onCreateCollection, onUpdateCollection, onDeleteCollection, onImported, onOpenDocument, onScopeShelf, attaching, notice, job, sectionRef } = props;
+  const { apiBase, documents, collections: allCollections = [], onUpload, uploading, onRescan, onCreateCollection, onUpdateCollection, onDeleteCollection, onImported, onOpenDocument, onScopeShelf, scanStarting, collectionBusy, notice, job, sectionRef } = props;
   // Built-in libraries (Notes) have no folder to scan, rename or remove.
   const collections = useMemo(() => allCollections.filter((collection) => !collection.builtin), [allCollections]);
   const noteCount = allCollections.find((collection) => collection.builtin)?.document_count || 0;
@@ -527,6 +558,11 @@ export default function Stacks(props) {
   const [view, setView] = useState(() => (loadStored(VIEW_KEY, "grid") === "list" ? "list" : "grid"));
   const [activeCollectionId, setActiveCollectionId] = useState("");
   const fileInput = useRef(null);
+  const sourceDocuments = useMemo(
+    () => documents.filter((document) => document.record_type !== "standalone"),
+    [documents],
+  );
+  const standaloneCount = documents.length - sourceDocuments.length;
 
   useEffect(() => saveStored(VIEW_KEY, view), [view]);
 
@@ -540,21 +576,19 @@ export default function Stacks(props) {
   const activeCollection = collections.find((collection) => collection.id === activeCollectionId) || collections[0] || null;
 
   const counts = useMemo(() => {
-    const out = { indexed: 0, pending: 0, error: 0, passages: 0 };
+    const out = { indexed: 0, pending: 0, error: 0, catalogued: 0, passages: 0 };
     for (const doc of documents) {
       if (doc.indexing_status === "indexed") out.indexed += 1;
       else if (doc.indexing_status === "error") out.error += 1;
+      else if (doc.indexing_status === "catalogued") out.catalogued += 1;
       else out.pending += 1;
       out.passages += doc.chunks || 0;
     }
     return out;
   }, [documents]);
 
-  const jobProgress = (() => {
-    if (!job?.files?.length || ["done", "partial", "error", "interrupted"].includes(job.state)) return null;
-    const done = job.files.filter((file) => ["indexed", "duplicate"].includes(file.status)).length;
-    return { done, total: job.files.length, percent: Math.round((done / job.files.length) * 100) };
-  })();
+  const jobProgress = ingestActionProgress(job);
+  const scanProgress = job?.uiOrigin === "scan" ? jobProgress : null;
 
   return (
     <section className="stacks" ref={sectionRef} id="stacks">
@@ -563,6 +597,7 @@ export default function Stacks(props) {
           <h2>Library</h2>
           <p className="stacks-stats">
             <span><strong>{counts.indexed}</strong> indexed</span>
+            {counts.catalogued > 0 && <span><strong>{counts.catalogued}</strong> catalogue-only</span>}
             {counts.pending > 0 && <span><strong>{counts.pending}</strong> in progress</span>}
             {counts.error > 0 && <span className="danger-text"><strong>{counts.error}</strong> failed</span>}
             <span><strong>{counts.passages.toLocaleString()}</strong> passages</span>
@@ -580,9 +615,13 @@ export default function Stacks(props) {
               event.target.value = "";
             }}
           />
-          <button type="button" className="text-button" disabled={attaching} onClick={() => onRescan(activeCollection)} title="Scan the selected collection now.">
-            {attaching ? "Scanning…" : "Scan now"}
-          </button>
+          {scanProgress ? (
+            <ActionProgress progress={scanProgress} compact />
+          ) : (
+            <button type="button" className="text-button" disabled={scanStarting || isActiveIngestJob(job)} onClick={() => onRescan(activeCollection)} title="Scan the selected collection now.">
+              {scanStarting ? "Starting scan…" : "Scan now"}
+            </button>
+          )}
           <button type="button" className="button primary" disabled={uploading} onClick={() => fileInput.current?.click()}>
             {uploading ? "Uploading…" : "Upload files"}
           </button>
@@ -596,23 +635,13 @@ export default function Stacks(props) {
         onCreate={onCreateCollection}
         onUpdate={onUpdateCollection}
         onDelete={onDeleteCollection}
-        busy={attaching}
+        busy={collectionBusy || isActiveIngestJob(job)}
       />
 
       {(notice?.text || jobProgress) && (
         <div className="stacks-status">
           {notice?.text && <div className={`notice ${notice.tone !== "neutral" ? notice.tone : ""}`}>{notice.text}</div>}
-          {jobProgress && (
-            <div className="progress">
-              <div className="progress-label">
-                <span>{jobProgress.done}/{jobProgress.total} files ready</span>
-                <span className="mono">{jobProgress.percent}%</span>
-              </div>
-              <div className="progress-track">
-                <div className="progress-fill" style={{ width: `${jobProgress.percent}%` }} />
-              </div>
-            </div>
-          )}
+          {jobProgress && <ActionProgress progress={jobProgress} />}
         </div>
       )}
 
@@ -628,10 +657,10 @@ export default function Stacks(props) {
             Notes <span className="tab-count">{noteCount}</span>
           </button>
           <button type="button" role="tab" aria-selected={tab === "owned"} className={tab === "owned" ? "active" : ""} onClick={() => setTab("owned")}>
-            Owned books
+            Without files <span className="tab-count">{standaloneCount}</span>
           </button>
           <button type="button" role="tab" aria-selected={tab === "catalogue"} className={tab === "catalogue" ? "active" : ""} onClick={() => setTab("catalogue")}>
-            Index <span className="tab-count">{documents.length}</span>
+            Index <span className="tab-count">{sourceDocuments.length}</span>
           </button>
         </div>
         {tab === "shelves" && (
@@ -649,8 +678,8 @@ export default function Stacks(props) {
       {tab === "shelves" && <Shelves {...props} collection={activeCollection} libraryRoot={activeCollection?.path ?? props.libraryRoot} view={view} />}
       {tab === "sorted" && <ShelfView apiBase={apiBase} documents={documents} onChanged={onImported} onOpenDocument={onOpenDocument} onScopeShelf={onScopeShelf} />}
       {tab === "notes" && <NotesPanel apiBase={apiBase} onChanged={onImported} onOpenSource={(id) => onOpenDocument({ document_id: id })} />}
-      {tab === "owned" && <OwnedBooks apiBase={apiBase} documents={documents} onOpenDocument={onOpenDocument} />}
-      {tab === "catalogue" && <Catalogue {...props} />}
+      {tab === "owned" && <OwnedBooks apiBase={apiBase} documents={documents} onOpenDocument={onOpenDocument} onChanged={onImported} />}
+      {tab === "catalogue" && <Catalogue {...props} documents={sourceDocuments} />}
     </section>
   );
 }

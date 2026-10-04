@@ -9,6 +9,7 @@ import Settings from "./Settings.jsx";
 import SourceViewer from "./SourceViewer.jsx";
 import BookPage from "./BookPage.jsx";
 import Stacks from "./Stacks.jsx";
+import { TERMINAL_JOB_STATES } from "./actionProgress.js";
 import {
   clearInquiries,
   loadInquiries,
@@ -27,7 +28,6 @@ import useAsk from "./useAsk.js";
 // dev server (`npm run dev`) leaves VITE_API_BASE unset and relies on
 // vite.config.js's own /api proxy to a standalone backend instead.
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
-const TERMINAL_JOB_STATES = new Set(["done", "partial", "error", "interrupted"]);
 const THEME_KEY = "ai-librarian.theme";
 const ACTIVE_CHAT_KEY = "ai-librarian.ask.active";
 const KEYS_KEY = "ai-librarian.ask.keys";
@@ -118,8 +118,9 @@ export default function App() {
   const [job, setJob] = useState(null);
   const [notice, setNotice] = useState({ text: "", tone: "neutral" });
   const [uploading, setUploading] = useState(false);
-  const [attaching, setAttaching] = useState(false);
-  const [reindexing, setReindexing] = useState(false);
+  const [scanStarting, setScanStarting] = useState(false);
+  const [collectionBusy, setCollectionBusy] = useState(false);
+  const [reindexProgress, setReindexProgress] = useState(null);
   const [dragActive, setDragActive] = useState(false);
   const dragCounter = useRef(0);
 
@@ -270,9 +271,12 @@ export default function App() {
   const refreshDocuments = useCallback(async () => {
     try {
       const data = await api("/documents");
-      setDocuments(data.documents || []);
+      const next = data.documents || [];
+      setDocuments(next);
+      return next;
     } catch (error) {
       say(error.message, "error");
+      return null;
     }
   }, [api, say]);
 
@@ -346,7 +350,12 @@ export default function App() {
     const timer = window.setInterval(async () => {
       try {
         const next = await api(`/admin/ingest-status/${job.job_id}`);
-        setJob(next);
+        setJob((current) => ({
+          ...next,
+          uiOrigin: current?.uiOrigin,
+          uiPath: current?.uiPath,
+          uiCollectionId: current?.uiCollectionId,
+        }));
         if (TERMINAL_JOB_STATES.has(next.state)) {
           say(`Folder ingestion finished with status: ${next.state}.`, next.state === "done" ? "success" : "error");
           refreshDocuments();
@@ -358,6 +367,41 @@ export default function App() {
     }, 2000);
     return () => window.clearInterval(timer);
   }, [api, job, refreshCollections, refreshDocuments, say]);
+
+  // Leave the finished state in place briefly so the control can confirm
+  // completion, then restore its normal action.
+  useEffect(() => {
+    if (!job || !TERMINAL_JOB_STATES.has(job.state)) return undefined;
+    const timer = window.setTimeout(() => setJob((current) => (current?.job_id === job.job_id ? null : current)), 4000);
+    return () => window.clearTimeout(timer);
+  }, [job]);
+
+  useEffect(() => {
+    if (reindexProgress?.phase !== "indexing") return;
+    const byId = new Map(documents.map((document) => [document.document_id, document]));
+    const pending = reindexProgress.queuedIds.filter((id) => ["pending", "queued", "indexing"].includes(byId.get(id)?.indexing_status));
+    const indexingFailures = reindexProgress.queuedIds.filter((id) => byId.get(id)?.indexing_status === "error").length;
+    const complete = reindexProgress.queuedIds.length - pending.length;
+    const failed = reindexProgress.queueFailures + indexingFailures;
+    const phase = pending.length ? "indexing" : "done";
+    if (phase === "done") {
+      say(
+        failed
+          ? `Reindex finished: ${complete} processed, ${failed} failed.`
+          : `Reindex complete: ${complete} document${complete === 1 ? "" : "s"} processed.`,
+        failed ? "error" : "success",
+      );
+    }
+    if (complete !== reindexProgress.complete || failed !== reindexProgress.failed || phase !== reindexProgress.phase) {
+      setReindexProgress((current) => (current?.runId === reindexProgress.runId ? { ...current, complete, failed, phase } : current));
+    }
+  }, [documents, reindexProgress, say]);
+
+  useEffect(() => {
+    if (reindexProgress?.phase !== "done") return undefined;
+    const timer = window.setTimeout(() => setReindexProgress((current) => (current?.runId === reindexProgress.runId ? null : current)), 4000);
+    return () => window.clearTimeout(timer);
+  }, [reindexProgress]);
 
   // ---- conversations -------------------------------------------------------
 
@@ -603,7 +647,7 @@ export default function App() {
   // Passive discovery is deliberately slow while the machine is idle. This
   // action makes a chosen collection current immediately.
   async function rescanLibraryFolder(collection) {
-    setAttaching(true);
+    setScanStarting(true);
     say(`Scanning ${collection?.name || "the library"}…`);
     try {
       const result = await api("/library/import", {
@@ -611,24 +655,24 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: collection?.path || libraryRoot || ".", ...(collection?.legacy ? {} : { collection_id: collection?.id }) }),
       });
-      setJob(result);
+      setJob({ ...result, uiOrigin: "scan", uiCollectionId: collection?.id || null });
       say(`Scan job ${result.job_id} is queued.`);
     } catch (error) {
       say(error.message, "error");
     } finally {
-      setAttaching(false);
+      setScanStarting(false);
     }
   }
 
   async function createCollection({ name, path, autoScan }) {
-    setAttaching(true);
+    setCollectionBusy(true);
     try {
       const result = await api("/collections", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, path, auto_scan: autoScan }),
       });
-      setJob(result.job || null);
+      setJob(result.job ? { ...result.job, uiOrigin: "collection", uiCollectionId: result.collection.id } : null);
       await refreshCollections();
       say(`“${result.collection.name}” was added and is being indexed.`, "success");
       return result.collection;
@@ -636,7 +680,7 @@ export default function App() {
       say(error.message, "error");
       return null;
     } finally {
-      setAttaching(false);
+      setCollectionBusy(false);
     }
   }
 
@@ -708,7 +752,7 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: data.path || "." }),
       });
-      setJob(importResult);
+      setJob({ ...importResult, uiOrigin: "set-library", uiPath: data.path || "." });
       return { ok: true, path: data.path || "" };
     } catch (error) {
       setRootError(error.message);
@@ -724,27 +768,46 @@ export default function App() {
   // what picking up an extraction fix needs — so this just calls it for each
   // document without one failure stopping the rest of the batch.
   async function reindexDocuments(ids) {
-    if (!ids.length || reindexing) return;
-    setReindexing(true);
-    let succeeded = 0;
-    let failed = 0;
-    for (const id of ids) {
-      say(`Reindexing… (${succeeded + failed + 1}/${ids.length})`);
+    const requestedIds = [...new Set(ids)];
+    if (!requestedIds.length || (reindexProgress && reindexProgress.phase !== "done")) return;
+    const runId = `${Date.now()}`;
+    const queuedIds = [];
+    let queueFailures = 0;
+    setReindexProgress({ runId, phase: "queueing", requestedIds, attempted: 0, queuedIds: [], queueFailures: 0, complete: 0, failed: 0 });
+    for (const id of requestedIds) {
       try {
         await api(`/documents/${id}/retry`, { method: "POST" });
-        succeeded += 1;
+        queuedIds.push(id);
       } catch (_error) {
-        failed += 1;
+        queueFailures += 1;
       }
+      setReindexProgress((current) =>
+        current?.runId === runId
+          ? { ...current, attempted: current.attempted + 1, queuedIds: [...queuedIds], queueFailures, failed: queueFailures }
+          : current,
+      );
     }
     say(
-      failed
-        ? `Reindexed ${succeeded} document${succeeded === 1 ? "" : "s"}; ${failed} failed.`
-        : `Queued ${succeeded} document${succeeded === 1 ? "" : "s"} for reindexing.`,
-      failed ? "error" : "success",
+      queueFailures
+        ? `Queued ${queuedIds.length} document${queuedIds.length === 1 ? "" : "s"}; ${queueFailures} could not start.`
+        : `Queued ${queuedIds.length} document${queuedIds.length === 1 ? "" : "s"} for reindexing.`,
+      queueFailures ? "error" : "success",
     );
-    setReindexing(false);
-    refreshDocuments();
+    const latest = (await refreshDocuments()) || [];
+    const byId = new Map(latest.map((document) => [document.document_id, document]));
+    const pending = queuedIds.filter((id) => ["pending", "queued", "indexing"].includes(byId.get(id)?.indexing_status));
+    const indexingFailures = queuedIds.filter((id) => byId.get(id)?.indexing_status === "error").length;
+    setReindexProgress((current) =>
+      current?.runId === runId
+        ? {
+            ...current,
+            phase: pending.length ? "indexing" : "done",
+            queuedIds,
+            complete: queuedIds.length - pending.length,
+            failed: queueFailures + indexingFailures,
+          }
+        : current,
+    );
   }
 
   // The reader's go-ahead for a large scan's OCR run (the server parks any
@@ -766,7 +829,14 @@ export default function App() {
     const before = documents.find((doc) => doc.document_id === id);
     if (!before) return;
     const optimistic = { ...before };
-    if ("read" in changes) optimistic.read_at = changes.read ? new Date().toISOString() : null;
+    if ("read" in changes) {
+      optimistic.read_at = changes.read ? new Date().toISOString() : null;
+      optimistic.reading_status = changes.read ? "read" : "to_read";
+    }
+    if ("reading_status" in changes) {
+      optimistic.reading_status = changes.reading_status;
+      optimistic.read_at = changes.reading_status === "read" ? new Date().toISOString() : null;
+    }
     if ("owned" in changes) optimistic.owned = changes.owned == null ? null : Number(changes.owned);
     if ("kind" in changes) optimistic.kind_override = changes.kind === "auto" ? null : changes.kind;
     const replace = (doc) => setDocuments((list) => list.map((d) => (d.document_id === id ? doc : d)));
@@ -786,10 +856,11 @@ export default function App() {
   }
 
   async function removeDocument(document) {
-    if (!window.confirm(`Remove “${document.filename}” from the library?`)) return;
+    const label = document.title || document.filename;
+    if (!window.confirm(`Remove “${label}” from the library?`)) return;
     try {
       await api(`/documents/${document.document_id}`, { method: "DELETE" });
-      say(`${document.filename} was removed.`);
+      say(`${label} was removed.`);
       if (scope?.documentId === document.document_id) setScope(null);
       refreshDocuments();
     } catch (error) {
@@ -798,6 +869,8 @@ export default function App() {
   }
 
   // ---- render --------------------------------------------------------------
+
+  const reindexing = Boolean(reindexProgress && reindexProgress.phase !== "done");
 
   return (
     <div inert={Boolean(bookId)} className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}`} onDragEnter={handleDragEnter} onDragLeave={handleDragLeave} onDrop={handleDrop}>
@@ -858,9 +931,10 @@ export default function App() {
                 rootNotice={rootNotice}
                 rootError={rootError}
                 onSetLibraryFolder={setLibraryFolder}
-                documentCount={documents.length}
-                reindexing={reindexing}
-                onReindexAll={() => reindexDocuments(documents.map((d) => d.document_id))}
+                job={job}
+                documentCount={documents.filter((document) => document.record_type !== "standalone").length}
+                reindexProgress={reindexProgress}
+                onReindexAll={() => reindexDocuments(documents.filter((document) => document.record_type !== "standalone").map((document) => document.document_id))}
                 onClose={() => setSettingsOpen(false)}
               />
             )}
@@ -993,7 +1067,7 @@ export default function App() {
               refreshDocuments();
               refreshCollections();
             }}
-            onJob={setJob}
+            onJob={(nextJob, context = {}) => setJob({ ...nextJob, ...context })}
             onOpenDocument={(doc) => openDocument(doc)}
             onScope={(doc) => scopeTo(doc.document_id, doc.filename)}
             onScopeShelf={scopeToShelf}
@@ -1004,8 +1078,10 @@ export default function App() {
             onUpdateCollection={updateCollection}
             onDeleteCollection={deleteCollection}
             onApproveOcr={approveOcr}
-            attaching={attaching}
+            scanStarting={scanStarting}
+            collectionBusy={collectionBusy}
             reindexing={reindexing}
+            reindexProgress={reindexProgress}
             onReindex={reindexDocuments}
             onRemove={removeDocument}
             onPatch={patchDocument}

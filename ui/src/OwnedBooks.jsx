@@ -1,47 +1,18 @@
-import React, { useEffect, useState } from "react";
+import React, { useMemo, useState } from "react";
 
-function MatchAlert({ book, documents, onOpenDocument }) {
-  if (!book.match_alert || !book.match) return null;
-  const document = documents.find((item) => item.document_id === book.match.document_id);
-  return (
-    <div className="owned-book-alert">
-      <span aria-hidden="true">✓</span>
-      PDF match found
-      {document && (
-        <button type="button" className="text-button" onClick={() => onOpenDocument(document)}>
-          Open PDF
-        </button>
-      )}
-    </div>
-  );
-}
+import Cover from "./Cover.jsx";
+import { CoverFlags } from "./DocMarks.jsx";
 
-export default function OwnedBooks({ apiBase, documents, onOpenDocument }) {
-  const [books, setBooks] = useState([]);
+export default function OwnedBooks({ apiBase, documents, onOpenDocument, onChanged }) {
   const [title, setTitle] = useState("");
   const [author, setAuthor] = useState("");
   const [notes, setNotes] = useState("");
-  const [pdfLess, setPdfLess] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const documentSignature = documents
-    .map((document) => `${document.document_id}:${document.indexing_status}:${document.filename}`)
-    .join("|");
-
-  async function load() {
-    try {
-      const response = await fetch(`${apiBase}/owned-books`);
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || "Could not load owned books");
-      setBooks(data.books || []);
-    } catch (loadError) {
-      setError(loadError.message);
-    }
-  }
-
-  useEffect(() => {
-    load();
-  }, [apiBase, documentSignature]);
+  const books = useMemo(
+    () => documents.filter((document) => document.record_type === "standalone"),
+    [documents],
+  );
 
   async function addBook(event) {
     event.preventDefault();
@@ -52,15 +23,20 @@ export default function OwnedBooks({ apiBase, documents, onOpenDocument }) {
       const response = await fetch(`${apiBase}/owned-books`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: title.trim(), author: author.trim() || null, notes: notes.trim() || null, pdf_less: pdfLess }),
+        body: JSON.stringify({
+          title: title.trim(),
+          author: author.trim() || null,
+          notes: notes.trim() || null,
+          pdf_less: true,
+        }),
       });
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.detail || "Could not save this book");
-      setBooks((current) => [data.book, ...current.filter((item) => item.book_id !== data.book.book_id)]);
       setTitle("");
       setAuthor("");
       setNotes("");
-      setPdfLess(true);
+      await onChanged?.();
+      onOpenDocument?.(data.book);
     } catch (addError) {
       setError(addError.message);
     } finally {
@@ -68,55 +44,57 @@ export default function OwnedBooks({ apiBase, documents, onOpenDocument }) {
     }
   }
 
-  async function removeBook(bookId) {
+  async function removeBook(book) {
+    if (!window.confirm(`Remove “${book.title}” from your catalogue?`)) return;
+    setError("");
     try {
-      await fetch(`${apiBase}/owned-books/${bookId}`, { method: "DELETE" });
-      setBooks((current) => current.filter((book) => book.book_id !== bookId));
+      const response = await fetch(`${apiBase}/owned-books/${book.document_id}`, { method: "DELETE" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || "Could not remove this book");
+      await onChanged?.();
     } catch (removeError) {
       setError(removeError.message);
     }
   }
 
   return (
-    <section className="owned-books" aria-label="Owned books">
+    <section className="owned-books" aria-label="Books without files">
       <div className="owned-books-intro">
         <div>
-          <span className="eyebrow">Owned books</span>
-          <h3>Keep a list of books you have, even without a PDF.</h3>
-          <p>When a matching PDF arrives, it will be flagged here automatically.</p>
+          <span className="eyebrow">Catalogue books</span>
+          <h3>Add a book even when you do not have a digital file.</h3>
+          <p>It gets the same details, cover, shelves, reading status, review, and notes as every other book.</p>
         </div>
-        <span className="owned-books-count mono">{books.length} logged</span>
+        <span className="owned-books-count mono">{books.length} without files</span>
       </div>
 
       <form className="owned-book-form" onSubmit={addBook}>
         <input className="input" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Book title" aria-label="Book title" />
         <input className="input" value={author} onChange={(event) => setAuthor(event.target.value)} placeholder="Author (optional)" aria-label="Author" />
-        <input className="input" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Where you have it or a note (optional)" aria-label="Notes" />
-        <label className="owned-book-check">
-          <input type="checkbox" checked={pdfLess} onChange={(event) => setPdfLess(event.target.checked)} />
-          PDF-less for now
-        </label>
-        <button type="submit" className="button primary" disabled={busy || !title.trim()}>{busy ? "Saving…" : "Add book"}</button>
+        <input className="input" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Initial review or note (optional)" aria-label="Initial review or note" />
+        <button type="submit" className="button primary" disabled={busy || !title.trim()}>{busy ? "Adding…" : "Add to catalogue"}</button>
       </form>
 
       {error && <div className="notice error">{error}</div>}
       {books.length === 0 ? (
-        <p className="owned-books-empty muted">Nothing logged yet. Add a title above to start your personal list.</p>
+        <p className="owned-books-empty muted">No fileless books yet. Add a title above, then fill in its metadata and cover.</p>
       ) : (
         <div className="owned-book-list">
           {books.map((book) => (
-            <article className={`owned-book-card${book.match_alert ? " has-match" : ""}`} key={book.book_id}>
-              <div className="owned-book-card-main">
-                <h4>{book.title}</h4>
-                {book.author && <p className="owned-book-author">{book.author}</p>}
-                {book.notes && <p className="owned-book-notes">{book.notes}</p>}
-              </div>
-              <div className="owned-book-card-side">
-                <span className={`owned-book-status${book.match_alert ? " matched" : ""}`}>
-                  {book.match_alert ? "PDF found" : book.pdf_less ? "PDF-less" : "Has PDF"}
+            <article className="owned-book-card" key={book.document_id}>
+              <button type="button" className="owned-book-open" onClick={() => onOpenDocument(book)}>
+                <Cover apiBase={apiBase} documentId={book.document_id} filename={book.title} fileType="book" width={160} className="cover-mini">
+                  <CoverFlags doc={book} />
+                </Cover>
+                <span className="owned-book-card-main">
+                  <strong>{book.title}</strong>
+                  {book.author && <span className="owned-book-author">{book.author}</span>}
+                  <span className="owned-book-notes">Open book record</span>
                 </span>
-                <MatchAlert book={book} documents={documents} onOpenDocument={onOpenDocument} />
-                <button type="button" className="text-button danger" onClick={() => removeBook(book.book_id)}>Remove</button>
+              </button>
+              <div className="owned-book-card-side">
+                <span className="owned-book-status">No file</span>
+                <button type="button" className="text-button danger" onClick={() => removeBook(book)}>Remove</button>
               </div>
             </article>
           ))}

@@ -2,6 +2,11 @@
 
 AI Librarian is a self-hosted, local-first knowledge library for PDF documents. It extracts layout-aware Markdown, parses typed document blocks, builds structure-aware token-budgeted passages, and combines semantic and BM25 keyword retrieval in Qdrant before reranking passages with page-level source references.
 
+Development of the book-catalogue and reading features follows the
+[Bookplate-inspired upgrade path](docs/BOOKPLATE_UPGRADE_PATH.md). It records
+release boundaries, dependencies, acceptance criteria, architectural decisions,
+and the current handoff so work can continue consistently across chats.
+
 No hosted AI API is required for extraction or search: once the container images and search models are downloaded, document processing and retrieval stay on your server. The optional [Ask mode](#ask-mode) adds LLM-written answers over the retrieved passages — from a local [Ollama](https://ollama.com) model (fully offline) or, if you add a key, a cloud API (OpenAI or Gemini).
 
 ## What it does
@@ -161,8 +166,10 @@ Until the first collection is added, the single library folder above stands in a
 
 Open a book from the library to see its own page, with a stable `#book/<id>` link.
 Use **Read source** to open the document, **Ask this book** to scope a question,
-and the visible **Book details** form to correct its title, author, subject, or library type.
-Set **Owned / Not owned** and **Read / Unread**, then save your changes.
+and the visible **Book details** form to correct its title, subtitle, author,
+subject, genres, description, publication details, ISBNs, source, or library
+type. Set **Owned / Not owned** and track the reading lifecycle as **To read**,
+**Reading**, **Read**, or **Abandoned**, with editable started and finished dates.
 **Your review** holds an optional written review and a one-to-five-star rating
 (with a clear-rating action); both persist with the document. Corrections
 stay in the app and survive automatic shelf classification; source files are
@@ -183,9 +190,13 @@ You can also drop or paste an image into the cover panel.
 The source card shows the actual file format (PDF, EPUB, etc.) and links to that file. Include `data/app/thumbnails/*-custom.jpg` in backups: these
 are reader-uploaded covers, unlike the regenerable page-thumbnail cache.
 
-These pages currently belong to imported documents; the separate PDF-less
-owned-book registry continues to work as before. Metadata editing is manual,
-and note editing uses Markdown with a preview rather than an inline rich-text editor.
+The **Without files** tab creates catalogue-only books that use this same page
+and editor. Existing PDF-less entries migrate into the main catalogue on the
+next start without losing their IDs or notes. Fileless books support custom
+covers, metadata, shelves, reading state, ratings, reviews, and linked notes;
+source reading and Ask appear only when a digital file exists. Metadata editing
+is manual, and note editing uses Markdown with a preview rather than an inline
+rich-text editor.
 
 ### Supported formats and OCR
 

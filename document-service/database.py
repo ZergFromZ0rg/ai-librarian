@@ -16,6 +16,8 @@ from typing import List, Optional
 # callers. Every value the pipeline records about a document is a real column.
 COLUMNS = (
     "document_id",
+    # A source-backed document or a catalogue-only book with no file yet.
+    "record_type",
     "filename",
     "file_type",
     "title",
@@ -67,6 +69,23 @@ COLUMNS = (
     "note_text",
     "rating",
     "review",
+    # Reader-managed catalogue metadata. Provider suggestions are applied only
+    # after review; `metadata_source*` records the accepted provenance.
+    "isbn_10",
+    "isbn_13",
+    "subtitle",
+    "description",
+    "publisher",
+    "published_year",
+    "page_count",
+    "language",
+    "genres_json",
+    "acquisition_source",
+    "reading_status",
+    "started_at",
+    "finished_at",
+    "metadata_source",
+    "metadata_source_id",
 )
 UPDATABLE_COLUMNS = frozenset(COLUMNS) - {"document_id"}
 
@@ -82,6 +101,7 @@ INT_COLUMNS = (
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS documents (
     document_id           TEXT PRIMARY KEY,
+    record_type           TEXT NOT NULL DEFAULT 'source',
     filename              TEXT NOT NULL,
     file_type             TEXT NOT NULL DEFAULT 'pdf',
     title                 TEXT,
@@ -111,7 +131,29 @@ CREATE TABLE IF NOT EXISTS documents (
     author                TEXT,
     subject               TEXT,
     shelf                 TEXT,
-    shelf_suggested       TEXT
+    shelf_suggested       TEXT,
+    metadata_edited       INTEGER,
+    source_document_id    TEXT,
+    source_page           INTEGER,
+    source_quote          TEXT,
+    note_text             TEXT,
+    rating                INTEGER,
+    review                TEXT,
+    isbn_10               TEXT,
+    isbn_13               TEXT,
+    subtitle              TEXT,
+    description           TEXT,
+    publisher             TEXT,
+    published_year        INTEGER,
+    page_count            INTEGER,
+    language              TEXT,
+    genres_json           TEXT,
+    acquisition_source    TEXT,
+    reading_status        TEXT,
+    started_at            TEXT,
+    finished_at           TEXT,
+    metadata_source       TEXT,
+    metadata_source_id    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_documents_content_sha256 ON documents (content_sha256);
 CREATE INDEX IF NOT EXISTS idx_documents_uploaded_at ON documents (uploaded_at DESC);
@@ -162,6 +204,7 @@ class MetadataStore:
             row["name"] for row in self._conn.execute("PRAGMA table_info(documents)")
         }
         for column, ddl in (
+            ("record_type", "TEXT"),
             ("extraction_notes", "TEXT"),
             ("source_path", "TEXT"),
             ("collection_id", "TEXT"),
@@ -182,6 +225,21 @@ class MetadataStore:
             ("note_text", "TEXT"),
             ("rating", "INTEGER"),
             ("review", "TEXT"),
+            ("isbn_10", "TEXT"),
+            ("isbn_13", "TEXT"),
+            ("subtitle", "TEXT"),
+            ("description", "TEXT"),
+            ("publisher", "TEXT"),
+            ("published_year", "INTEGER"),
+            ("page_count", "INTEGER"),
+            ("language", "TEXT"),
+            ("genres_json", "TEXT"),
+            ("acquisition_source", "TEXT"),
+            ("reading_status", "TEXT"),
+            ("started_at", "TEXT"),
+            ("finished_at", "TEXT"),
+            ("metadata_source", "TEXT"),
+            ("metadata_source_id", "TEXT"),
         ):
             if column not in existing:
                 self._conn.execute(
@@ -191,6 +249,35 @@ class MetadataStore:
         # they would fail on a pre-existing table that lacks the column.
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_documents_collection_id ON documents (collection_id)"
+        )
+        self._conn.execute(
+            "UPDATE documents SET record_type = 'source' WHERE record_type IS NULL"
+        )
+        # Compatibility bridge from the original Read/Unread mark. Keep
+        # `read_at` for older clients while the richer lifecycle rolls out.
+        self._conn.execute(
+            "UPDATE documents SET reading_status = CASE "
+            "WHEN read_at IS NOT NULL THEN 'read' ELSE 'to_read' END "
+            "WHERE reading_status IS NULL"
+        )
+        self._conn.execute(
+            "UPDATE documents SET finished_at = substr(read_at, 1, 10) "
+            "WHERE finished_at IS NULL AND read_at IS NOT NULL"
+        )
+        # Release 1 kept books without files in a side table. Copy each one
+        # into the main catalogue so it inherits covers, shelves, notes,
+        # reviews, and reading state. The legacy rows remain as a rollback
+        # bridge; INSERT OR IGNORE makes every startup idempotent.
+        self._conn.execute(
+            "INSERT OR IGNORE INTO documents ("
+            "document_id, record_type, filename, file_type, title, stored_filename, "
+            "content_sha256, uploaded_at, updated_at, pages, chunks, retrieval_units, "
+            "indexing_status, vector_dim, pipeline_version, index_schema_version, "
+            "kind, kind_override, owned, author, review, reading_status, shelf_suggested"
+            ") SELECT book_id, 'standalone', title, 'book', title, '', "
+            "'standalone:' || book_id, created_at, updated_at, 0, 0, 0, "
+            "'catalogued', 0, 0, 0, 'book', 'book', 1, author, notes, 'to_read', 'Books' "
+            "FROM owned_books"
         )
 
     def close(self) -> None:
@@ -223,6 +310,7 @@ class MetadataStore:
 
     # ----------------------------------------------------------------- writes
     def create(self, metadata: dict) -> dict:
+        metadata = {**metadata, "record_type": metadata.get("record_type") or "source"}
         values = tuple(metadata.get(column) for column in COLUMNS)
         placeholders = ", ".join("?" for _ in COLUMNS)
         with self._lock:
@@ -265,6 +353,12 @@ class MetadataStore:
             self._conn.execute(
                 "DELETE FROM documents WHERE document_id = ?", (document_id,)
             )
+            # A standalone record may have originated in the Release 1 side
+            # table. Remove that compatibility row as well so the idempotent
+            # startup migration cannot resurrect a book the reader deleted.
+            self._conn.execute(
+                "DELETE FROM owned_books WHERE book_id = ?", (document_id,)
+            )
             self._conn.commit()
 
     # --------------------------------------------------------- indexing queue
@@ -306,15 +400,16 @@ class MetadataStore:
     def import_legacy(self, metadata_dir) -> int:
         """One-time import of ``<metadata_dir>/*.json`` records.
 
-        Runs only while the table is empty, so it is a safe no-op on every
-        start after the first. The JSON files are left in place for rollback.
+        Runs only while there are no source-backed records, so migrated
+        catalogue-only books cannot prevent an older JSON library from being
+        imported. The JSON files are left in place for rollback.
         """
         metadata_dir = Path(metadata_dir)
         if not metadata_dir.is_dir():
             return 0
         with self._lock:
             already_populated = self._conn.execute(
-                "SELECT 1 FROM documents LIMIT 1"
+                "SELECT 1 FROM documents WHERE record_type != 'standalone' LIMIT 1"
             ).fetchone()
         if already_populated:
             return 0
@@ -329,6 +424,7 @@ class MetadataStore:
             if not document_id:
                 continue
             record = {column: data.get(column) for column in COLUMNS}
+            record["record_type"] = record["record_type"] or "source"
             record["file_type"] = record["file_type"] or "pdf"
             record["filename"] = record["filename"] or document_id
             record["stored_filename"] = (

@@ -85,6 +85,7 @@ def test_import_a_folder_recurses(service, tmp_path):
             break
         time.sleep(0.05)
     assert job["state"] == "done"
+    assert job["total_files"] == 2
     assert {entry["file"] for entry in job["files"]} == {"a/top.pdf", "a/b/deep.pdf"}
 
 
@@ -111,6 +112,7 @@ def test_import_dot_attaches_the_whole_library_root(service, tmp_path):
             break
         time.sleep(0.05)
     assert job["state"] == "done"
+    assert job["total_files"] == 2
     assert {entry["file"] for entry in job["files"]} == {"top.pdf", "Nested/deep.pdf"}
 
 

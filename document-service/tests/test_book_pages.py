@@ -113,3 +113,125 @@ def test_rating_review_and_ownership_persist_and_can_be_cleared(service):
     assert response.json()["rating"] is None
     assert response.json()["review"] is None
     assert response.json()["owned"] == 0
+
+
+def test_richer_metadata_and_reading_lifecycle(service):
+    _, client, _ = service
+    doc = upload(client)
+    path = f"/documents/{doc['document_id']}"
+    metadata = {
+        "subtitle": "A reader's edition",
+        "description": "A concise catalogue description.",
+        "publisher": "Example Press",
+        "published_year": 2024,
+        "page_count": 312,
+        "language": "EN",
+        "isbn_10": "0-306-40615-2",
+        "isbn_13": "978-0-306-40615-7",
+        "genres": ["Philosophy", "Essays", "philosophy"],
+        "acquisition_source": "second_hand",
+        "reading_status": "reading",
+        "started_at": "2026-09-01",
+    }
+    response = client.patch(path, json=metadata)
+    assert response.status_code == 200, response.text
+    saved = response.json()
+    assert saved["isbn_10"] == "0306406152"
+    assert saved["isbn_13"] == "9780306406157"
+    assert saved["language"] == "en"
+    assert saved["genres_json"] == '["Philosophy", "Essays"]'
+    assert saved["reading_status"] == "reading"
+    assert saved["started_at"] == "2026-09-01"
+    assert saved["finished_at"] is None and saved["read_at"] is None
+
+    finished = client.patch(
+        path,
+        json={"reading_status": "read", "finished_at": "2026-10-02"},
+    )
+    assert finished.status_code == 200
+    assert finished.json()["finished_at"] == "2026-10-02"
+    assert finished.json()["read_at"].startswith("2026-10-02")
+
+    rereading = client.patch(path, json={"reading_status": "reading"}).json()
+    assert rereading["finished_at"] is None and rereading["read_at"] is None
+    assert rereading["started_at"] == "2026-09-01"
+    cleared = client.patch(path, json={"language": "", "acquisition_source": ""})
+    assert cleared.status_code == 200
+    assert cleared.json()["language"] is None
+    assert cleared.json()["acquisition_source"] is None
+
+
+def test_richer_metadata_validation(service):
+    _, client, _ = service
+    doc = upload(client)
+    path = f"/documents/{doc['document_id']}"
+    invalid = [
+        {"isbn_10": "0306406153"},
+        {"isbn_13": "9780306406158"},
+        {"published_year": "2024"},
+        {"page_count": 0},
+        {"language": "not a language"},
+        {"acquisition_source": "somewhere"},
+        {"reading_status": "paused"},
+        {"started_at": "2026-02-30"},
+    ]
+    for payload in invalid:
+        assert client.patch(path, json=payload).status_code == 422, payload
+    assert client.patch(
+        path,
+        json={
+            "reading_status": "read",
+            "started_at": "2026-10-02",
+            "finished_at": "2026-09-01",
+        },
+    ).status_code == 422
+
+
+def test_book_without_a_file_uses_the_main_catalogue(service):
+    module, client, _ = service
+    created = client.post(
+        "/owned-books",
+        json={
+            "title": "The Dispossessed",
+            "author": "Ursula K. Le Guin",
+            "notes": "Start with the paperback edition.",
+            "pdf_less": True,
+        },
+    )
+    assert created.status_code == 201
+    book = created.json()["book"]
+    book_id = book["document_id"]
+    assert book["book_id"] == book_id
+    assert book["record_type"] == "standalone"
+    assert book["indexing_status"] == "catalogued"
+    assert book["owned"] == 1
+    assert book["review"] == "Start with the paperback edition."
+
+    documents = client.get("/documents").json()["documents"]
+    assert next(item for item in documents if item["document_id"] == book_id)["title"] == "The Dispossessed"
+    assert client.get(f"/documents/{book_id}/file").status_code == 404
+    assert client.post(f"/documents/{book_id}/retry").status_code == 409
+
+    updated = client.patch(
+        f"/documents/{book_id}",
+        json={"rating": 5, "reading_status": "reading", "genres": ["Science Fiction"]},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["rating"] == 5
+    assert updated.json()["reading_status"] == "reading"
+
+    note = client.post(
+        "/notes",
+        json={"text": "Compare its two social systems.", "source_document_id": book_id},
+    )
+    assert note.status_code == 201
+    linked = client.get("/notes", params={"source_document_id": book_id}).json()["notes"]
+    assert linked[0]["text"] == "Compare its two social systems."
+
+    assert client.delete(f"/documents/{book_id}").status_code == 200
+    assert client.get(f"/documents/{book_id}").status_code == 404
+    reopened = MetadataStore(module.STORE._path)
+    try:
+        assert reopened.get(book_id) is None
+    finally:
+        reopened.close()

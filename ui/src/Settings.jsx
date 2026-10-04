@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 
+import ActionProgress from "./ActionProgress.jsx";
+import { ingestActionProgress, reindexActionProgress } from "./actionProgress.js";
 import { CLOUD_PROVIDERS } from "./useAsk.js";
 
 // A single popover for the handful of things that are configured once and
@@ -18,8 +20,9 @@ export default function Settings({
   rootNotice,
   rootError,
   onSetLibraryFolder,
+  job,
   documentCount,
-  reindexing,
+  reindexProgress,
   onReindexAll,
   onClose,
 }) {
@@ -29,6 +32,9 @@ export default function Settings({
   );
   const [keyDraft, setKeyDraft] = useState({});
   const [ollamaDraft, setOllamaDraft] = useState("");
+  const rootJobProgress = job?.uiOrigin === "set-library" ? ingestActionProgress(job) : null;
+  const reindexStatus = reindexActionProgress(reindexProgress);
+  const reindexing = Boolean(reindexProgress && reindexProgress.phase !== "done");
 
   useEffect(() => {
     setPathInput(libraryRoot ? (hostPath ? `${hostPath}/${libraryRoot}` : libraryRoot) : "");
@@ -118,9 +124,13 @@ export default function Settings({
             placeholder={hostPath ? `${hostPath}/Books` : "Books/PDFs"}
             disabled={settingRoot}
           />
-          <button className="primary" type="submit" disabled={settingRoot}>
-            {settingRoot ? "Setting…" : "Set"}
-          </button>
+          {rootJobProgress ? (
+            <ActionProgress progress={rootJobProgress} compact />
+          ) : (
+            <button className="primary" type="submit" disabled={settingRoot}>
+              {settingRoot ? "Setting…" : "Set"}
+            </button>
+          )}
         </form>
         <p className="settings-note">
           Must be inside {hostPath ? <strong>{hostPath}</strong> : "the folder mounted at /library"}{" "}
@@ -133,7 +143,7 @@ export default function Settings({
           {libraryRoot && (
             <>
               {" · "}
-              <button type="button" className="link" onClick={() => onSetLibraryFolder("")}>
+              <button type="button" className="link" disabled={settingRoot || Boolean(rootJobProgress)} onClick={() => onSetLibraryFolder("")}>
                 reset to whole mount
               </button>
             </>
@@ -150,9 +160,13 @@ export default function Settings({
           extraction-quality fix, so already-indexed documents pick it up too. To reindex only
           specific documents, select them in Library → Index instead.
         </p>
-        <button type="button" className="secondary" disabled={reindexing || !documentCount} onClick={onReindexAll}>
-          {reindexing ? "Reindexing…" : `Reindex all documents${documentCount ? ` (${documentCount})` : ""}`}
-        </button>
+        {reindexStatus ? (
+          <ActionProgress progress={reindexStatus} />
+        ) : (
+          <button type="button" className="secondary" disabled={reindexing || !documentCount} onClick={onReindexAll}>
+            {`Reindex all documents${documentCount ? ` (${documentCount})` : ""}`}
+          </button>
+        )}
       </section>
 
       <section className="settings-section">

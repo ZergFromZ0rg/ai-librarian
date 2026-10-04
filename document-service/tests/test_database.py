@@ -132,8 +132,29 @@ def test_migration_adds_later_columns_to_an_older_database(tmp_path):
         assert "idx_documents_collection_id" in indexes
         row = store.get("aaaaaaaaaaaa")
         assert all(row[column] is None for column in later)
+        assert row["reading_status"] == "to_read"
     finally:
         store.close()
+
+
+def test_migration_backfills_reading_lifecycle_from_read_at(tmp_path):
+    db_path = tmp_path / "reading.db"
+    store = MetadataStore(db_path)
+    store.create(make_record(read_at="2025-06-07T12:30:00Z"))
+    with store._lock:
+        store._conn.execute(
+            "UPDATE documents SET reading_status = NULL, finished_at = NULL"
+        )
+        store._conn.commit()
+    store.close()
+
+    reopened = MetadataStore(db_path)
+    try:
+        row = reopened.get("abc123abc123")
+        assert row["reading_status"] == "read"
+        assert row["finished_at"] == "2025-06-07"
+    finally:
+        reopened.close()
 
 
 def test_import_legacy_loads_json_once(tmp_path):
@@ -182,3 +203,72 @@ def test_owned_book_registry_round_trip(tmp_path):
         assert owned.list_all() == []
     finally:
         store.close()
+
+
+def test_owned_book_registry_migrates_into_the_main_catalogue(tmp_path):
+    db_path = tmp_path / "library.db"
+    store = MetadataStore(db_path)
+    owned = OwnedBookStore(store._conn)
+    owned.create(
+        {
+            "book_id": "abc123abc123",
+            "title": "The Dispossessed",
+            "author": "Ursula K. Le Guin",
+            "notes": "Paperback shelf",
+            "pdf_less": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-02-01T00:00:00Z",
+        }
+    )
+    store.close()
+
+    migrated = MetadataStore(db_path)
+    try:
+        book = migrated.get("abc123abc123")
+        assert book["record_type"] == "standalone"
+        assert book["file_type"] == "book"
+        assert book["indexing_status"] == "catalogued"
+        assert book["title"] == "The Dispossessed"
+        assert book["author"] == "Ursula K. Le Guin"
+        assert book["review"] == "Paperback shelf"
+        assert book["owned"] == 1
+        assert book["reading_status"] == "to_read"
+        # Reopening stays idempotent and retains the canonical record.
+        assert len([row for row in migrated.list_all() if row["document_id"] == "abc123abc123"]) == 1
+        migrated.delete("abc123abc123")
+    finally:
+        migrated.close()
+
+    reopened = MetadataStore(db_path)
+    try:
+        assert reopened.get("abc123abc123") is None
+    finally:
+        reopened.close()
+
+
+def test_standalone_migration_does_not_block_legacy_document_import(tmp_path):
+    db_path = tmp_path / "library.db"
+    metadata_dir = tmp_path / "metadata"
+    metadata_dir.mkdir()
+    (metadata_dir / "def456def456.json").write_text(json.dumps(make_record("def456def456")))
+    store = MetadataStore(db_path)
+    OwnedBookStore(store._conn).create(
+        {
+            "book_id": "abc123abc123",
+            "title": "A paper book",
+            "author": None,
+            "notes": None,
+            "pdf_less": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+        }
+    )
+    store.close()
+
+    reopened = MetadataStore(db_path)
+    try:
+        assert reopened.import_legacy(metadata_dir) == 1
+        assert reopened.get("abc123abc123")["record_type"] == "standalone"
+        assert reopened.get("def456def456")["record_type"] == "source"
+    finally:
+        reopened.close()

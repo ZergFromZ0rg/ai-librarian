@@ -27,7 +27,7 @@ export default function Cover({ apiBase, documentId, filename, fileType = "pdf",
         />
       ) : (
         <>
-          <span className="cover-blank-kind">{({ epub: "EPUB", word: "WORD", excel: "EXCEL", powerpoint: "SLIDES", markdown: "MD", text: "TEXT", csv: "CSV" })[fileType] || "PDF"}</span>
+          <span className="cover-blank-kind">{({ book: "BOOK", epub: "EPUB", word: "WORD", excel: "EXCEL", powerpoint: "SLIDES", markdown: "MD", text: "TEXT", csv: "CSV" })[fileType] || "PDF"}</span>
           <span className="cover-blank-title">{displayTitle(filename)}</span>
         </>
       )}
