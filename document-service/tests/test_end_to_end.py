@@ -91,6 +91,45 @@ def test_upload_index_search_deduplicate_and_delete(service):
     assert not indexed
 
 
+def test_index_activity_reports_file_details_and_live_worker_progress(service):
+    module, client, _indexed = service
+    pdf = make_pdf("A compact queue should report real indexing work.", pages=3)
+    upload = client.post(
+        "/documents",
+        files={"file": ("activity.pdf", pdf, "application/pdf")},
+    )
+    doc_id = upload.json()["document_id"]
+    indexed = wait_for_status(client, doc_id, "indexed")
+
+    snapshot = client.get("/index-activity")
+    assert snapshot.status_code == 200
+    item = next(entry for entry in snapshot.json()["items"] if entry["document_id"] == doc_id)
+    assert item["stage"] == "complete"
+    assert item["progress"] == 100
+    assert item["size_bytes"] == len(pdf)
+    assert item["pages"] == 3
+    assert item["retrieval_units"] == indexed["retrieval_units"]
+
+    # Durable status and ephemeral worker detail combine into one live row.
+    module.update_metadata(doc_id, indexing_status="indexing", indexing_error=None)
+    module.set_index_activity(
+        doc_id,
+        "embedding",
+        progress=72,
+        completed_units=11,
+        total_units=20,
+    )
+    active = client.get("/index-activity").json()
+    item = next(entry for entry in active["items"] if entry["document_id"] == doc_id)
+    assert item["stage"] == "embedding"
+    assert item["progress"] == 72
+    assert item["completed_units"] == 11
+    assert item["total_units"] == 20
+    assert item["started_at"]
+    assert active["summary"]["active"] == 1
+    assert active["summary"]["active_bytes"] == len(pdf)
+
+
 def test_search_is_logged_with_scored_hits(service):
     module, client, _indexed = service
     upload = client.post(

@@ -608,6 +608,7 @@ reopen without new evidence.
 | 2026-10-03 | Use `documents` as the canonical table for both source-backed and fileless books, distinguished by `record_type`. | It gives every book one editor and feature set while a non-queued `catalogued` state keeps fileless records out of extraction. |
 | 2026-10-03 | Specify portable export before shipping pasted note images. | User-created images need a supported recovery path from their first release. |
 | 2026-10-04 | Keep long-running library actions attached to the control that started them, with exact folder totals and document-level reindex progress. | A global notice alone made Scan, Import, Set as library, and Reindex appear finished while work was still running. |
+| 2026-10-04 | Show indexing work in a dedicated Activity tab using durable document states plus ephemeral worker stages. | The library needs a compact, trustworthy queue; extraction remains indeterminate until the parser can report real page progress, while embedding reports exact completed passages. |
 
 ## Current handoff
 
@@ -629,7 +630,12 @@ fileless books now share the canonical document record and book page.
 library, and Reindex actions now replace their initiating controls with live,
 accessible progress until the underlying work settles. Folder jobs expose a
 stable `total_files` denominator, bulk reindex follows each queued document,
-and collection scan toggles use real keyboard-accessible buttons.
+and collection scan toggles use real keyboard-accessible buttons. The Library
+also has a Steam-style Activity tab with processing, queued, attention, and
+finished groups; filters; file size and format; pages and passages; real worker
+stages; queue position; completed history; retry; and OCR approval. Extraction
+uses an indeterminate bar because the parser does not yet expose page-level
+progress; embedding progress is based on actual indexed passage batches.
 
 **First recommended slice:** implement a provider-neutral catalogue adapter and
 an Open Library search endpoint using mocked fixtures, bounded timeouts, a

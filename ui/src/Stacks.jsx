@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import ActionProgress from "./ActionProgress.jsx";
 import Cover from "./Cover.jsx";
 import { CoverFlags, MarkControls } from "./DocMarks.jsx";
+import IndexActivity from "./IndexActivity.jsx";
 import NotesPanel from "./NotesPanel.jsx";
 import OwnedBooks from "./OwnedBooks.jsx";
 import ShelfView from "./ShelfView.jsx";
@@ -659,6 +660,9 @@ export default function Stacks(props) {
           <button type="button" role="tab" aria-selected={tab === "owned"} className={tab === "owned" ? "active" : ""} onClick={() => setTab("owned")}>
             Without files <span className="tab-count">{standaloneCount}</span>
           </button>
+          <button type="button" role="tab" aria-selected={tab === "activity"} className={tab === "activity" ? "active" : ""} onClick={() => setTab("activity")}>
+            Activity <span className="tab-count">{counts.pending + counts.error}</span>
+          </button>
           <button type="button" role="tab" aria-selected={tab === "catalogue"} className={tab === "catalogue" ? "active" : ""} onClick={() => setTab("catalogue")}>
             Index <span className="tab-count">{sourceDocuments.length}</span>
           </button>
@@ -679,6 +683,7 @@ export default function Stacks(props) {
       {tab === "sorted" && <ShelfView apiBase={apiBase} documents={documents} onChanged={onImported} onOpenDocument={onOpenDocument} onScopeShelf={onScopeShelf} />}
       {tab === "notes" && <NotesPanel apiBase={apiBase} onChanged={onImported} onOpenSource={(id) => onOpenDocument({ document_id: id })} />}
       {tab === "owned" && <OwnedBooks apiBase={apiBase} documents={documents} onOpenDocument={onOpenDocument} onChanged={onImported} />}
+      {tab === "activity" && <IndexActivity apiBase={apiBase} onOpenDocument={onOpenDocument} onRetry={props.onReindex} onApproveOcr={props.onApproveOcr} onChanged={onImported} />}
       {tab === "catalogue" && <Catalogue {...props} documents={sourceDocuments} />}
     </section>
   );

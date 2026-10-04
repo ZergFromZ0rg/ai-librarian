@@ -655,6 +655,12 @@ class IndexTask:
 INDEX_SIGNAL = queue.Queue(maxsize=1)
 INGEST_QUEUE = queue.Queue(maxsize=INGEST_QUEUE_SIZE)
 SHUTDOWN = threading.Event()
+# Fine-grained, ephemeral progress for the live indexing activity view. The
+# durable source of truth remains ``documents.indexing_status``; these details
+# simply describe which worker stage an active document is in and how far its
+# chunk embedding pass has advanced.
+INDEX_ACTIVITY = {}
+INDEX_ACTIVITY_LOCK = threading.Lock()
 # document_id -> (ingest_job_id, ingest_file_index) for documents that came in
 # through a folder-ingest job, so the worker can report progress back to it.
 INGEST_LINKS = {}
@@ -670,6 +676,27 @@ DOCUMENT_LOCKS_LOCK = threading.Lock()
 WORKER_THREADS = []
 RERANK_EXECUTOR = None
 EXTRACTION_EXECUTOR = None
+
+
+def set_index_activity(document_id: str, stage: str, **details) -> None:
+    now = utc_now()
+    with INDEX_ACTIVITY_LOCK:
+        current = INDEX_ACTIVITY.get(document_id, {})
+        started_at = current.get("started_at")
+        if stage != "queued" and not started_at:
+            started_at = now
+        INDEX_ACTIVITY[document_id] = {
+            **current,
+            "stage": stage,
+            "updated_at": now,
+            **({"started_at": started_at} if started_at else {}),
+            **details,
+        }
+
+
+def clear_index_activity(document_id: str) -> None:
+    with INDEX_ACTIVITY_LOCK:
+        INDEX_ACTIVITY.pop(document_id, None)
 
 
 def _lower_worker_priority() -> None:
@@ -1049,6 +1076,7 @@ def enqueue_index(task: IndexTask) -> None:
     if task.ingest_job_id is not None and task.ingest_file_index is not None:
         with INGEST_LINKS_LOCK:
             INGEST_LINKS[task.document_id] = (task.ingest_job_id, task.ingest_file_index)
+    set_index_activity(task.document_id, "queued", progress=0)
     update_metadata(task.document_id, indexing_status="queued", indexing_error=None)
     signal_index_worker()
 
@@ -1064,6 +1092,7 @@ def _fail_indexing(doc_id: str, message: str) -> None:
     except Exception:
         logger.exception("Could not persist indexing error for %s", doc_id)
     update_ingest_entry(doc_id, "error", message)
+    clear_index_activity(doc_id)
 
 
 def _describe_duration(seconds: int) -> str:
@@ -1198,6 +1227,14 @@ def _embed_and_finish(doc_id: str) -> None:
         try:
             update_ingest_entry(doc_id, "indexing")
             chunks = read_json(CHUNKS_DIR / f"{doc_id}.json")
+            total_chunks = len(chunks)
+            set_index_activity(
+                doc_id,
+                "embedding",
+                progress=45,
+                completed_units=0,
+                total_units=total_chunks,
+            )
             delete_document_vectors(doc_id)
             vector_dim = 0
             for start in range(0, len(chunks), EMBEDDING_BATCH_SIZE):
@@ -1207,6 +1244,15 @@ def _embed_and_finish(doc_id: str) -> None:
                 if indexed_batch:
                     vector_dim = len(indexed_batch[0]["embedding"])
                     upsert_chunks(indexed_batch)
+                completed = min(start + len(batch), total_chunks)
+                set_index_activity(
+                    doc_id,
+                    "embedding",
+                    progress=45 + round((completed / max(1, total_chunks)) * 45),
+                    completed_units=completed,
+                    total_units=total_chunks,
+                )
+            set_index_activity(doc_id, "finalizing", progress=95)
             metadata = read_metadata(doc_id)
             kind = "book" if metadata.get("file_type") == "epub" else _detect_document_kind(doc_id, metadata.get("pages") or 0)
             # One update: a document is never seen as indexed without its shelf.
@@ -1222,6 +1268,7 @@ def _embed_and_finish(doc_id: str) -> None:
                 **_shelf_fields(metadata, metadata.get("kind_override") or kind),
             )
             update_ingest_entry(doc_id, "indexed")
+            clear_index_activity(doc_id)
         except Exception as exc:
             _fail_indexing(doc_id, str(exc) or exc.__class__.__name__)
 
@@ -1272,6 +1319,7 @@ def index_worker() -> None:
                     _fail_indexing(doc_id, str(exc) or exc.__class__.__name__)
                     continue
                 last_extraction = time.monotonic()
+                set_index_activity(doc_id, "extracting", progress=None)
                 if EXTRACTION_EXECUTOR is None:  # shut down while idle
                     EXTRACTION_EXECUTOR = _new_extraction_executor()
                 try:
@@ -1345,6 +1393,13 @@ def index_worker() -> None:
                     index_schema_version=0,
                     indexing_error=None,
                     extraction_notes=extraction_notes,
+                )
+                set_index_activity(
+                    doc_id,
+                    "embedding",
+                    progress=45,
+                    completed_units=0,
+                    total_units=len(chunks),
                 )
             except Exception as exc:
                 _fail_indexing(doc_id, str(exc) or exc.__class__.__name__)
@@ -2329,6 +2384,113 @@ async def get_documents():
     return {"documents": await asyncio.to_thread(list_metadata)}
 
 
+def _index_activity_snapshot() -> dict:
+    """Return durable queue history enriched with live worker-stage details."""
+    documents = [
+        document
+        for document in list_metadata()
+        if document.get("record_type") != "standalone"
+    ]
+    queued = sorted(
+        (document for document in documents if document.get("indexing_status") == "queued"),
+        key=lambda document: document.get("updated_at") or document.get("uploaded_at") or "",
+    )
+    queue_positions = {
+        document["document_id"]: position for position, document in enumerate(queued, start=1)
+    }
+    with INDEX_ACTIVITY_LOCK:
+        runtime = {document_id: dict(details) for document_id, details in INDEX_ACTIVITY.items()}
+
+    items = []
+    for document in documents:
+        document_id = document["document_id"]
+        status = document.get("indexing_status") or "queued"
+        live = runtime.get(document_id, {})
+        awaiting_ocr = bool(
+            status == "error"
+            and document.get("ocr_pages")
+            and not document.get("ocr_approved")
+        )
+        if status == "indexed":
+            stage, progress = "complete", 100
+        elif awaiting_ocr:
+            stage, progress = "awaiting_ocr", None
+        elif status == "error":
+            stage, progress = "failed", None
+        elif status == "queued":
+            stage, progress = live.get("stage", "queued"), live.get("progress", 0)
+        elif status == "indexing":
+            stage, progress = live.get("stage", "extracting"), live.get("progress")
+        else:
+            stage, progress = status, None
+
+        try:
+            size_bytes = pdf_path(document).stat().st_size
+        except (OSError, ValueError):
+            size_bytes = None
+
+        items.append(
+            {
+                "document_id": document_id,
+                "title": document.get("title"),
+                "author": document.get("author"),
+                "filename": document.get("filename"),
+                "file_type": document.get("file_type"),
+                "source_path": document.get("source_path"),
+                "collection_id": document.get("collection_id"),
+                "indexing_status": status,
+                "indexing_error": document.get("indexing_error"),
+                "stage": stage,
+                "progress": progress,
+                "completed_units": live.get("completed_units"),
+                "total_units": live.get("total_units"),
+                "queue_position": queue_positions.get(document_id),
+                "size_bytes": size_bytes,
+                "uploaded_at": document.get("uploaded_at"),
+                "started_at": live.get("started_at"),
+                "updated_at": live.get("updated_at") or document.get("updated_at"),
+                "indexed_at": document.get("indexed_at"),
+                "pages": document.get("pages"),
+                "chunks": document.get("chunks"),
+                "retrieval_units": document.get("retrieval_units"),
+                "ocr_pages": document.get("ocr_pages"),
+                "ocr_approved": bool(document.get("ocr_approved")),
+            }
+        )
+
+    rank = {"indexing": 0, "queued": 1, "error": 2, "indexed": 3}
+    items.sort(
+        key=lambda item: (
+            rank.get(item["indexing_status"], 4),
+            item.get("queue_position") or 0,
+            item.get("indexed_at") or item.get("updated_at") or "",
+        ),
+        reverse=False,
+    )
+    counts = {
+        status: sum(item["indexing_status"] == status for item in items)
+        for status in ("indexing", "queued", "indexed", "error")
+    }
+    active_items = [
+        item for item in items if item["indexing_status"] in {"indexing", "queued"}
+    ]
+    return {
+        "items": items,
+        "summary": {
+            **counts,
+            "active": counts["indexing"] + counts["queued"],
+            "active_bytes": sum(item.get("size_bytes") or 0 for item in active_items),
+            "total": len(items),
+        },
+        "updated_at": utc_now(),
+    }
+
+
+@app.get("/index-activity")
+async def get_index_activity():
+    return await asyncio.to_thread(_index_activity_snapshot)
+
+
 def _catalogue_book_response(document: dict) -> dict:
     """Document-shaped response plus the old keys for Release 1 clients."""
     return {
@@ -3051,6 +3213,7 @@ async def delete_document(doc_id: str):
             for path in artifacts:
                 path.unlink(missing_ok=True)
             STORE.delete(doc_id)
+            clear_index_activity(doc_id)
         with DOCUMENT_LOCKS_LOCK:
             DOCUMENT_LOCKS.pop(doc_id, None)
 
