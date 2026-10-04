@@ -21,7 +21,7 @@ function saveOnShortcut(event, save) {
 
 // Quick notes: jot an idea or a phrase; it is saved in the app (never in the
 // read-only library folder), indexed, and searchable as the "Notes" library.
-export default function NotesPanel({ apiBase, onChanged }) {
+export default function NotesPanel({ apiBase, onChanged, onOpenSource }) {
   const [notes, setNotes] = useState(null);
   const [draft, setDraft] = useState("");
   const [editing, setEditing] = useState(null); // { id, text }
@@ -152,7 +152,9 @@ export default function NotesPanel({ apiBase, onChanged }) {
                   </div>
                 </div>
               ) : (
-                <p className="note-text">{note.text.trim()}</p>
+                <div><p className="note-text">{note.text.trim()}</p>
+                  {note.source_quote && <blockquote>{note.source_quote}</blockquote>}
+                  {note.source_document_id && onOpenSource && <button className="text-button" onClick={() => onOpenSource(note.source_document_id)}>Open linked book{note.source_page ? ` · location ${note.source_page}` : ""}</button>}</div>
               )}
             </li>
           ))}

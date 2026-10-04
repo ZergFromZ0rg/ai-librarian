@@ -7,6 +7,7 @@ import Notebook from "./Notebook.jsx";
 import SearchResults from "./SearchResults.jsx";
 import Settings from "./Settings.jsx";
 import SourceViewer from "./SourceViewer.jsx";
+import BookPage from "./BookPage.jsx";
 import Stacks from "./Stacks.jsx";
 import {
   clearInquiries,
@@ -164,6 +165,25 @@ export default function App() {
   const [recents, setRecents] = useState(loadRecents);
   const [inquiries, setInquiries] = useState(loadInquiries);
   const [source, setSource] = useState(null);
+  const [bookId, setBookId] = useState(() => window.location.hash.match(/^#book\/([a-zA-Z0-9-]+)$/)?.[1] || null);
+  const [bookPassage, setBookPassage] = useState(null);
+  useEffect(() => {
+    const changed = () => { setBookId(window.location.hash.match(/^#book\/([a-zA-Z0-9-]+)$/)?.[1] || null); setBookPassage(null); };
+    window.addEventListener("hashchange", changed);
+    return () => window.removeEventListener("hashchange", changed);
+  }, []);
+  function openBook(id, passage = null) {
+    window.history.pushState(null, "", `#book/${id}`);
+    setBookId(id); setBookPassage(passage); setSource(null);
+  }
+  function closeBook() {
+    window.history.pushState(null, "", window.location.pathname + window.location.search);
+    setBookId(null); setBookPassage(null);
+  }
+  function viewSource(next) {
+    if (next.savePassage) openBook(next.documentId, next);
+    else setSource(next);
+  }
 
   const api = useCallback(async (path, options = {}) => {
     const response = await fetch(`${API_BASE}${path}`, options);
@@ -508,7 +528,8 @@ export default function App() {
   // ---- documents -----------------------------------------------------------
 
   const openDocument = useCallback((doc, page) => {
-    setSource({ documentId: doc.document_id, documentName: doc.filename, page: page || 1 });
+    if (doc.collection_id === "notes") setSource({ documentId: doc.document_id, documentName: doc.title || doc.filename, page: page || 1 });
+    else openBook(doc.document_id, { page: page || 1 });
   }, []);
 
   const notePage = useCallback((documentId, page) => {
@@ -566,7 +587,7 @@ export default function App() {
     // browser — anything from the desktop can land here.
     const dropped = Array.from(event.dataTransfer.files || []);
     if (!dropped.length) return;
-    const supported = dropped.filter((file) => /\.(pdf|docx|xlsx|pptx|txt|md|csv)$/i.test(file.name));
+    const supported = dropped.filter((file) => /\.(pdf|epub|docx|xlsx|pptx|txt|md|csv)$/i.test(file.name));
     if (supported.length < dropped.length) {
       say(
         dropped.length === 1 ? "That file type is not supported." : `Skipped ${dropped.length - supported.length} unsupported file(s).`,
@@ -779,7 +800,7 @@ export default function App() {
   // ---- render --------------------------------------------------------------
 
   return (
-    <div className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}`} onDragEnter={handleDragEnter} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+    <div inert={Boolean(bookId)} className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}`} onDragEnter={handleDragEnter} onDragLeave={handleDragLeave} onDrop={handleDrop}>
       <aside className="app-sidebar" aria-label="Workspace navigation">
         <div className="sidebar-head">
           <div className="sidebar-brand">
@@ -938,7 +959,7 @@ export default function App() {
                   {ask.error && <div className="notice error">{ask.error}</div>}
                   <AskThread
                     conversation={ask.conversation}
-                    onViewSource={setSource}
+                    onViewSource={viewSource}
                     onToggleCitation={ask.toggleCitation}
                     modelLabel={ask.modelLabel}
                     noModels={ask.noModels}
@@ -952,7 +973,7 @@ export default function App() {
                 apiBase={API_BASE}
                 run={searchRun}
                 libraries={libraries}
-                onViewSource={setSource}
+                onViewSource={viewSource}
                 onScope={(result) => scopeTo(result.document_id, result.document)}
               />
             )}
@@ -1008,15 +1029,24 @@ export default function App() {
         onClearInquiries={() => setInquiries(clearInquiries())}
       />
 
+      {bookId && (
+        <BookPage key={bookId + (bookPassage?.snippet || "")} apiBase={API_BASE} documentId={bookId} passage={bookPassage} readerOpen={Boolean(source)} askEnabled={askEnabled}
+          onClose={closeBook} onRead={setSource} onChanged={refreshDocuments}
+          onCoverChanged={() => window.dispatchEvent(new Event("book-cover-changed"))}
+          onAsk={({ documentId, documentName }) => { closeBook(); setMode("ask"); scopeTo(documentId, documentName); }} />
+      )}
       {source && (
         <SourceViewer
           apiBase={API_BASE}
+          key={`${source.documentId}:${source.page}`}
           source={source}
           doc={documents.find((doc) => doc.document_id === source.documentId)}
           onPatch={(changes) => patchDocument(source.documentId, changes)}
           onClose={() => setSource(null)}
           onPage={notePage}
-          onScope={({ documentId, documentName }) => scopeTo(documentId, documentName)}
+          onBook={documents.find((doc) => doc.document_id === source.documentId)?.collection_id === "notes" ? undefined : () => bookId === source.documentId ? setSource(null) : openBook(source.documentId)}
+          onSavePassage={bookId || documents.find((doc) => doc.document_id === source.documentId)?.collection_id === "notes" ? undefined : (next) => openBook(next.documentId, next)}
+          onScope={bookId ? undefined : ({ documentId, documentName }) => scopeTo(documentId, documentName)}
         />
       )}
 

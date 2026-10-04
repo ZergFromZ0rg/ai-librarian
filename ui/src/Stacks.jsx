@@ -332,9 +332,9 @@ function Catalogue({ apiBase, documents, reindexing, onReindex, onRemove, onOpen
   const needle = filter.trim().toLowerCase();
   const rows = useMemo(() => {
     const list = documents.filter(
-      (doc) => !needle || doc.filename.toLowerCase().includes(needle) || (doc.source_path || "").toLowerCase().includes(needle),
+      (doc) => !needle || [doc.title, doc.author, doc.subject, doc.filename].some((value) => (value || "").toLowerCase().includes(needle)) || (doc.source_path || "").toLowerCase().includes(needle),
     );
-    if (sort === "name") list.sort((a, b) => a.filename.localeCompare(b.filename));
+    if (sort === "name") list.sort((a, b) => (a.title || a.filename).localeCompare(b.title || b.filename));
     else if (sort === "status") list.sort((a, b) => a.indexing_status.localeCompare(b.indexing_status));
     else list.sort((a, b) => String(b.indexed_at || b.updated_at || "").localeCompare(String(a.indexed_at || a.updated_at || "")));
     return list;
@@ -446,7 +446,8 @@ function Catalogue({ apiBase, documents, reindexing, onReindex, onRemove, onOpen
                     <button type="button" className="catalogue-title" onClick={() => onOpenDocument(doc)} title={doc.filename}>
                       <Cover apiBase={apiBase} documentId={doc.document_id} filename={doc.filename} fileType={doc.file_type} width={160} className="cover-mini" />
                       <span>
-                        <span className="catalogue-name">{displayTitle(doc.filename)}</span>
+                        <span className="catalogue-name">{doc.title || displayTitle(doc.filename)}</span>
+                        <span className="catalogue-book-meta">{[doc.file_type?.toUpperCase(), doc.rating ? `★ ${doc.rating}/5` : null, doc.owned == null ? null : doc.owned ? "Owned" : "Not owned"].filter(Boolean).join(" · ")}</span>
                         <span className="catalogue-path">{doc.source_path ? `↪ ${doc.source_path}` : "uploaded"}</span>
                       </span>
                     </button>
@@ -573,7 +574,7 @@ export default function Stacks(props) {
             type="file"
             multiple
             hidden
-            accept=".pdf,.docx,.xlsx,.pptx,.txt,.md,.csv"
+            accept=".pdf,.epub,.docx,.xlsx,.pptx,.txt,.md,.csv"
             onChange={(event) => {
               onUpload(event.target.files);
               event.target.value = "";
@@ -647,7 +648,7 @@ export default function Stacks(props) {
 
       {tab === "shelves" && <Shelves {...props} collection={activeCollection} libraryRoot={activeCollection?.path ?? props.libraryRoot} view={view} />}
       {tab === "sorted" && <ShelfView apiBase={apiBase} documents={documents} onChanged={onImported} onOpenDocument={onOpenDocument} onScopeShelf={onScopeShelf} />}
-      {tab === "notes" && <NotesPanel apiBase={apiBase} onChanged={onImported} />}
+      {tab === "notes" && <NotesPanel apiBase={apiBase} onChanged={onImported} onOpenSource={(id) => onOpenDocument({ document_id: id })} />}
       {tab === "owned" && <OwnedBooks apiBase={apiBase} documents={documents} onOpenDocument={onOpenDocument} />}
       {tab === "catalogue" && <Catalogue {...props} />}
     </section>

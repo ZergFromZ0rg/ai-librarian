@@ -157,9 +157,39 @@ A collection is a named folder inside the mount — *Books*, *Work*, *Reference*
 
 Until the first collection is added, the single library folder above stands in as one implicit *Library* collection, so an existing installation behaves exactly as before. Once real collections exist, the passive scan walks only their folders.
 
+### Book pages, notes, and covers
+
+Open a book from the library to see its own page, with a stable `#book/<id>` link.
+Use **Read source** to open the document, **Ask this book** to scope a question,
+and the visible **Book details** form to correct its title, author, subject, or library type.
+Set **Owned / Not owned** and **Read / Unread**, then save your changes.
+**Your review** holds an optional written review and a one-to-five-star rating
+(with a clear-rating action); both persist with the document. Corrections
+stay in the app and survive automatic shelf classification; source files are
+never renamed or rewritten. Catalogue metadata lookup is not required.
+
+**Save passage to notes** on a search result or an expanded Ask citation opens
+that book's note editor with the quotation and source location attached. Write
+your own commentary in Markdown and preview headings, lists, tables, and math
+before saving. Notes are indexed in the **Notes** library, can be edited or
+deleted, and keep their original quotation separate from your commentary.
+**Open source** jumps back to the saved location. Removing a source document
+keeps its notes and quoted text; the original source link then becomes unavailable.
+
+**Change cover** accepts JPEG, PNG, or WebP images (up to 8 MB and 20 megapixels),
+stores a resized JPEG, and updates the shelves. **Use this cover** applies the preview; **Cancel** discards it.
+You can also drop or paste an image into the cover panel.
+**Restore original cover** restores the original thumbnail.
+The source card shows the actual file format (PDF, EPUB, etc.) and links to that file. Include `data/app/thumbnails/*-custom.jpg` in backups: these
+are reader-uploaded covers, unlike the regenerable page-thumbnail cache.
+
+These pages currently belong to imported documents; the separate PDF-less
+owned-book registry continues to work as before. Metadata editing is manual,
+and note editing uses Markdown with a preview rather than an inline rich-text editor.
+
 ### Supported formats and OCR
 
-Besides PDF, the library accepts Word (`.docx`), Excel (`.xlsx`), PowerPoint (`.pptx`), plain text (`.txt`), Markdown (`.md`) and CSV. Office files have no reliable page model, so each is split into "pages" that make sense for the format — a Word section, a spreadsheet sheet, a slide — and large text files into bounded blocks. The source viewer shows these as extracted text; the page-image view, highlights and covers are PDF-only.
+Besides PDF, the library accepts EPUB (`.epub`), Word (`.docx`), Excel (`.xlsx`), PowerPoint (`.pptx`), plain text (`.txt`), Markdown (`.md`) and CSV. EPUBs are indexed as books, with their embedded title and author when available. Their pages and cover are rendered from a stable layout; PDF page highlighting is not available for EPUBs. Office files have no reliable page model, so each is split into "pages" that make sense for the format — a Word section, a spreadsheet sheet, a slide — and large text files into bounded blocks. The source viewer shows those formats as extracted text.
 
 Every format is searchable and askable the same way: search results, Ask citations and the local model's context all label a passage by what it is — "p. 12" for a PDF, "slide 3", "sheet 2", "section 1" for Word and text files.
 

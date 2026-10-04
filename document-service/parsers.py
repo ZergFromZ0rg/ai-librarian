@@ -14,6 +14,8 @@ import re
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import pymupdf
+
 from extraction import extract_pages
 from ocr import ocr_pages
 
@@ -22,10 +24,11 @@ from ocr import ocr_pages
 # page count follows the marker.
 OCR_APPROVAL_MARKER = "ocr-approval-required:"
 
-SUPPORTED_EXTENSIONS = frozenset({".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md", ".csv"})
+SUPPORTED_EXTENSIONS = frozenset({".pdf", ".epub", ".docx", ".xlsx", ".pptx", ".txt", ".md", ".csv"})
 
 FILE_TYPES = {
     ".pdf": "pdf",
+    ".epub": "epub",
     ".docx": "word",
     ".xlsx": "excel",
     ".pptx": "powerpoint",
@@ -36,6 +39,7 @@ FILE_TYPES = {
 
 MEDIA_TYPES = {
     "pdf": "application/pdf",
+    "epub": "application/epub+zip",
     "word": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "excel": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "powerpoint": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -193,6 +197,32 @@ def _extract_word(path: Path) -> List[Dict]:
     return _pages_from_text("\n\n".join(sections))
 
 
+def _extract_epub(path: Path) -> List[Dict]:
+    """Read the same fixed-layout pages that the cover and reader render.
+
+    EPUB normally reflows to the reader's viewport. PyMuPDF uses a stable
+    default layout when opening the file, so page numbers in search results
+    refer to the same pages served by the page-image endpoint.
+    """
+    pages = []
+    with pymupdf.open(str(path)) as book:
+        if book.needs_pass:
+            raise ValueError("password-protected EPUBs are not supported")
+        for index in range(book.page_count):
+            paragraphs = [
+                " ".join(block[4].split())
+                for block in book[index].get_text("blocks", sort=True)
+                if block[6] == 0 and block[4].strip()
+            ]
+            pages.append({
+                "page": index + 1,
+                "text": "\n\n".join(paragraphs),
+                "format": "text",
+                "needs_ocr": False,
+            })
+    return pages
+
+
 def _extract_excel(path: Path) -> List[Dict]:
     try:
         from openpyxl import load_workbook
@@ -337,6 +367,8 @@ def extract_source_pages(
             approved=ocr_approved,
             approval_pages=ocr_approval_pages,
         )
+    if kind == "epub":
+        return _extract_epub(source), False
     if kind == "word":
         return _extract_word(source), False
     if kind == "excel":
@@ -355,7 +387,7 @@ def document_author(path: str | Path) -> str | None:
     path = Path(path)
     kind = file_type_for_path(path)
     try:
-        if kind == "pdf":
+        if kind in {"pdf", "epub"}:
             import fitz
 
             with fitz.open(str(path)) as document:
@@ -379,3 +411,12 @@ def document_author(path: str | Path) -> str | None:
     except Exception:
         return None
     return None
+
+
+def epub_title(path: str | Path) -> str | None:
+    """The book title in an EPUB's package metadata, when present."""
+    try:
+        with pymupdf.open(str(path)) as book:
+            return ((book.metadata or {}).get("title") or "").strip() or None
+    except Exception:
+        return None
