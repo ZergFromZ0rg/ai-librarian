@@ -609,6 +609,7 @@ reopen without new evidence.
 | 2026-10-03 | Specify portable export before shipping pasted note images. | User-created images need a supported recovery path from their first release. |
 | 2026-10-04 | Keep long-running library actions attached to the control that started them, with exact folder totals and document-level reindex progress. | A global notice alone made Scan, Import, Set as library, and Reindex appear finished while work was still running. |
 | 2026-10-04 | Show indexing work in a dedicated Activity tab using durable document states plus ephemeral worker stages. | The library needs a compact, trustworthy queue; extraction remains indeterminate until the parser can report real page progress, while embedding reports exact completed passages. |
+| 2026-10-04 | Make Library a persistent sidebar destination with its own main surface. | Keeping the full catalogue below every empty chat made the research workspace feel like a long landing page and obscured the boundary between conversations and library management. |
 
 ## Current handoff
 
@@ -635,7 +636,10 @@ also has a Steam-style Activity tab with processing, queued, attention, and
 finished groups; filters; file size and format; pages and passages; real worker
 stages; queue position; completed history; retry; and OCR approval. Extraction
 uses an indeterminate bar because the parser does not yet expose page-level
-progress; embedding progress is based on actual indexed passage batches.
+progress; embedding progress is based on actual indexed passage batches. The
+Library now opens as a dedicated, persistent sidebar destination instead of
+being appended below an empty Search/Ask workspace; chat and search actions
+return to the research surface while book overlays return to their origin.
 
 **First recommended slice:** implement a provider-neutral catalogue adapter and
 an Open Library search endpoint using mocked fixtures, bounded timeouts, a

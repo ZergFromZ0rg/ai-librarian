@@ -4747,6 +4747,9 @@ select.input {
   display: flex;
   align-items: center;
   gap: 10px;
+  width: auto;
+  border: 0;
+  background: none;
   padding: 0 10px 4px;
   color: var(--ink);
   font-size: 14px;
@@ -4897,6 +4900,16 @@ select.input {
 .masthead,
 main {
   margin-left: 252px;
+}
+
+.library-main {
+  min-height: calc(100svh - var(--mast-h));
+  background: var(--bg);
+}
+
+.library-surface .stacks {
+  border-top: 0;
+  padding-top: 32px;
 }
 
 /* Navigation is intentionally owned by the left rail. Keep this explicit so

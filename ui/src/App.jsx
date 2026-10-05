@@ -1,8 +1,7 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import AskThread, { AskRail } from "./AskThread.jsx";
 import Console from "./Console.jsx";
-import BookRow, { SHELF_SIZE } from "./BookRow.jsx";
 import Notebook from "./Notebook.jsx";
 import SearchResults from "./SearchResults.jsx";
 import Settings from "./Settings.jsx";
@@ -13,12 +12,9 @@ import { TERMINAL_JOB_STATES } from "./actionProgress.js";
 import {
   clearInquiries,
   loadInquiries,
-  loadRecents,
   loadStored,
   recordInquiry,
-  recordOpen,
   saveStored,
-  shelfItems,
 } from "./storage.js";
 import useAsk from "./useAsk.js";
 
@@ -37,6 +33,7 @@ const SEARCH_PARAMS_KEY = "ai-librarian.search.params";
 const ASK_PARAMS_KEY = "ai-librarian.ask.params";
 const LIBRARY_KEY = "ai-librarian.library";
 const SIDEBAR_COLLAPSED_KEY = "ai-librarian.sidebar.collapsed";
+const SURFACE_KEY = "ai-librarian.surface";
 const LEGACY_THOROUGH_KEY = "ai-librarian.ask.thorough";
 
 // Server defaults until /config says otherwise (RERANK_MIN_SCORE and
@@ -113,6 +110,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [notebookOpen, setNotebookOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => loadStored(SIDEBAR_COLLAPSED_KEY, "") === "1");
+  const [surface, setSurface] = useState(() => (loadStored(SURFACE_KEY, "workspace") === "library" ? "library" : "workspace"));
 
   // Collection maintenance: uploads, rescans, folder-import jobs, reindexing.
   const [job, setJob] = useState(null);
@@ -163,7 +161,6 @@ export default function App() {
   const stacksRef = useRef(null);
   const heroRef = useRef(null);
 
-  const [recents, setRecents] = useState(loadRecents);
   const [inquiries, setInquiries] = useState(loadInquiries);
   const [source, setSource] = useState(null);
   const [bookId, setBookId] = useState(() => window.location.hash.match(/^#book\/([a-zA-Z0-9-]+)$/)?.[1] || null);
@@ -202,6 +199,7 @@ export default function App() {
   useEffect(() => saveStored(SEARCH_PARAMS_KEY, searchParams), [searchParams]);
   useEffect(() => saveStored(ASK_PARAMS_KEY, askParams), [askParams]);
   useEffect(() => saveStored(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? "1" : "0"), [sidebarCollapsed]);
+  useEffect(() => saveStored(SURFACE_KEY, surface), [surface]);
 
   const setActiveChatId = useCallback((id) => {
     setActiveChatIdState(id);
@@ -238,6 +236,7 @@ export default function App() {
   }, []);
 
   const focusConsole = useCallback(() => {
+    setSurface("workspace");
     window.scrollTo({ top: 0, behavior: "smooth" });
     // After the scroll starts, so focusing doesn't fight it.
     window.setTimeout(() => consoleInput.current?.focus(), 50);
@@ -409,6 +408,7 @@ export default function App() {
   // switches (the Ask hook loads it and drops anything still in flight for
   // the old one).
   function selectChat(id) {
+    setSurface("workspace");
     if (id !== activeChatId) setActiveChatId(id);
     setMode("ask");
     setNotebookOpen(false);
@@ -416,6 +416,7 @@ export default function App() {
   }
 
   function newChat() {
+    setSurface("workspace");
     ask.newChat();
     setMode("ask");
     setNotebookOpen(false);
@@ -505,6 +506,7 @@ export default function App() {
   // the box instead, since sending it spends a model call and would land in
   // whichever conversation happens to be open.
   function runInquiry(entry) {
+    setSurface("workspace");
     setNotebookOpen(false);
     if (entry.mode === "ask" && askEnabled) {
       setMode("ask");
@@ -560,14 +562,14 @@ export default function App() {
   useLayoutEffect(() => {
     const root = document.documentElement;
     const el = heroRef.current;
-    if (!workspaceActive || !el || typeof ResizeObserver === "undefined") {
+    if (surface !== "workspace" || !workspaceActive || !el || typeof ResizeObserver === "undefined") {
       root.style.setProperty("--dock-h", "0px");
       return undefined;
     }
     const observer = new ResizeObserver(() => root.style.setProperty("--dock-h", `${el.offsetHeight}px`));
     observer.observe(el);
     return () => observer.disconnect();
-  }, [workspaceActive]);
+  }, [surface, workspaceActive]);
 
   // ---- documents -----------------------------------------------------------
 
@@ -575,12 +577,6 @@ export default function App() {
     if (doc.collection_id === "notes") setSource({ documentId: doc.document_id, documentName: doc.title || doc.filename, page: page || 1 });
     else openBook(doc.document_id, { page: page || 1 });
   }, []);
-
-  const notePage = useCallback((documentId, page) => {
-    setRecents((list) => recordOpen(list, documentId, page));
-  }, []);
-
-  const shelf = useMemo(() => shelfItems(recents, documents, SHELF_SIZE), [recents, documents]);
 
   async function uploadFiles(fileList) {
     const files = Array.from(fileList || []);
@@ -876,10 +872,10 @@ export default function App() {
     <div inert={Boolean(bookId)} className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}`} onDragEnter={handleDragEnter} onDragLeave={handleDragLeave} onDrop={handleDrop}>
       <aside className="app-sidebar" aria-label="Workspace navigation">
         <div className="sidebar-head">
-          <div className="sidebar-brand">
+          <button type="button" className="sidebar-brand" onClick={() => { setSurface("workspace"); window.scrollTo({ top: 0 }); }} title="Search and Ask">
             <span className="brand-mark" aria-hidden="true" />
             <span>AI Librarian</span>
-          </div>
+          </button>
           <button type="button" className="sidebar-collapse" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}>
             <span aria-hidden="true">{sidebarCollapsed ? "›" : "‹"}</span>
           </button>
@@ -891,7 +887,7 @@ export default function App() {
           </button>
         )}
         <nav className="sidebar-nav" aria-label="Primary">
-          <button type="button" className="sidebar-link" onClick={() => stacksRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })} aria-label="Library" title="Library">
+          <button type="button" className={`sidebar-link${surface === "library" ? " active" : ""}`} onClick={() => { setSurface("library"); setNotebookOpen(false); setSettingsOpen(false); window.scrollTo({ top: 0 }); }} aria-current={surface === "library" ? "page" : undefined} aria-label="Library" title="Library">
             <LibraryIcon />
             Library
           </button>
@@ -904,7 +900,7 @@ export default function App() {
           <div className="sidebar-history">
             <div className="sidebar-section-label">Recent chats</div>
             {chats.slice(0, 8).map((chat) => (
-              <button type="button" className={`sidebar-chat${chat.id === activeChatId ? " active" : ""}`} key={chat.id} onClick={() => selectChat(chat.id)} title={chat.title}>
+              <button type="button" className={`sidebar-chat${surface === "workspace" && chat.id === activeChatId ? " active" : ""}`} key={chat.id} onClick={() => selectChat(chat.id)} title={chat.title}>
                 <span aria-hidden="true">¶</span>
                 <span>{chat.title || "Untitled chat"}</span>
               </button>
@@ -948,7 +944,11 @@ export default function App() {
             <span className="brand-mark" aria-hidden="true" />
             <span className="brand-name">AI Librarian</span>
           </div>
-          {askEnabled && (
+          {surface === "library" ? (
+            <div className="chat-crumb current">
+              <span className="chat-crumb-title">Library</span>
+            </div>
+          ) : askEnabled && (
             <div className={`chat-crumb${isAsk ? " current" : ""}`}>
               <span className="chat-crumb-title">{activeChatTitle}</span>
             </div>
@@ -956,8 +956,8 @@ export default function App() {
         </div>
       </header>
 
-      <main>
-        <section className={`hero${workspaceActive ? " docked" : ""}${workspaceActive && isAsk ? " chat-bottom" : ""}`} ref={heroRef}>
+      <main className={surface === "library" ? "library-main" : "workspace-main"}>
+        {surface === "workspace" && <section className={`hero${workspaceActive ? " docked" : ""}${workspaceActive && isAsk ? " chat-bottom" : ""}`} ref={heroRef}>
           <div className="hero-center">
             {!workspaceActive && (
               <div className="hero-intro">
@@ -1014,18 +1014,10 @@ export default function App() {
                 </div>
               </div>
             )}
-            {!workspaceActive && (
-              <BookRow apiBase={API_BASE} items={shelf} onOpen={(item) => openDocument(item.doc, item.page)} />
-            )}
           </div>
-          {!workspaceActive && (
-            <button type="button" className="scroll-cue" onClick={() => stacksRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}>
-              Library <span aria-hidden="true">↓</span>
-            </button>
-          )}
-        </section>
+        </section>}
 
-        {workspaceActive && (
+        {surface === "workspace" && workspaceActive && (
           <section className="workspace">
             {isAsk ? (
               <div className="findings-layout">
@@ -1054,40 +1046,42 @@ export default function App() {
           </section>
         )}
 
-        {!workspaceActive && (
-          <Stacks
-            sectionRef={stacksRef}
-            apiBase={API_BASE}
-            documents={documents}
-            collections={collections}
-            libraryRoot={libraryRoot}
-            settingRoot={settingRoot}
-            onSetLibraryFolder={setLibraryFolder}
-            onImported={() => {
-              refreshDocuments();
-              refreshCollections();
-            }}
-            onJob={(nextJob, context = {}) => setJob({ ...nextJob, ...context })}
-            onOpenDocument={(doc) => openDocument(doc)}
-            onScope={(doc) => scopeTo(doc.document_id, doc.filename)}
-            onScopeShelf={scopeToShelf}
-            onUpload={uploadFiles}
-            uploading={uploading}
-            onRescan={rescanLibraryFolder}
-            onCreateCollection={createCollection}
-            onUpdateCollection={updateCollection}
-            onDeleteCollection={deleteCollection}
-            onApproveOcr={approveOcr}
-            scanStarting={scanStarting}
-            collectionBusy={collectionBusy}
-            reindexing={reindexing}
-            reindexProgress={reindexProgress}
-            onReindex={reindexDocuments}
-            onRemove={removeDocument}
-            onPatch={patchDocument}
-            notice={notice}
-            job={job}
-          />
+        {surface === "library" && (
+          <div className="library-surface">
+            <Stacks
+              sectionRef={stacksRef}
+              apiBase={API_BASE}
+              documents={documents}
+              collections={collections}
+              libraryRoot={libraryRoot}
+              settingRoot={settingRoot}
+              onSetLibraryFolder={setLibraryFolder}
+              onImported={() => {
+                refreshDocuments();
+                refreshCollections();
+              }}
+              onJob={(nextJob, context = {}) => setJob({ ...nextJob, ...context })}
+              onOpenDocument={(doc) => openDocument(doc)}
+              onScope={(doc) => scopeTo(doc.document_id, doc.filename)}
+              onScopeShelf={scopeToShelf}
+              onUpload={uploadFiles}
+              uploading={uploading}
+              onRescan={rescanLibraryFolder}
+              onCreateCollection={createCollection}
+              onUpdateCollection={updateCollection}
+              onDeleteCollection={deleteCollection}
+              onApproveOcr={approveOcr}
+              scanStarting={scanStarting}
+              collectionBusy={collectionBusy}
+              reindexing={reindexing}
+              reindexProgress={reindexProgress}
+              onReindex={reindexDocuments}
+              onRemove={removeDocument}
+              onPatch={patchDocument}
+              notice={notice}
+              job={job}
+            />
+          </div>
         )}
       </main>
 
@@ -1119,7 +1113,6 @@ export default function App() {
           doc={documents.find((doc) => doc.document_id === source.documentId)}
           onPatch={(changes) => patchDocument(source.documentId, changes)}
           onClose={() => setSource(null)}
-          onPage={notePage}
           onBook={documents.find((doc) => doc.document_id === source.documentId)?.collection_id === "notes" ? undefined : () => bookId === source.documentId ? setSource(null) : openBook(source.documentId)}
           onSavePassage={bookId || documents.find((doc) => doc.document_id === source.documentId)?.collection_id === "notes" ? undefined : (next) => openBook(next.documentId, next)}
           onScope={bookId ? undefined : ({ documentId, documentName }) => scopeTo(documentId, documentName)}
