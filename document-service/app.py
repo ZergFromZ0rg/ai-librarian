@@ -518,6 +518,8 @@ class DocumentPatch(BaseModel):
     reading_status: Optional[str] = Field(default=None, pattern=r"^(?:to_read|reading|read|abandoned)$")
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
+    current_page: Optional[int] = Field(default=None, ge=1, le=1_000_000, strict=True)
+    reading_progress: Optional[int] = Field(default=None, ge=0, le=100, strict=True)
     # Only the fields sent are changed. `owned` may be null to clear it;
     # `kind` "auto" drops the reader's override and goes back to the guess.
     owned: Optional[bool] = None
@@ -588,6 +590,16 @@ class NoteBody(BaseModel):
     source_page: Optional[int] = Field(default=None, ge=1)
     source_quote: Optional[str] = Field(default=None, max_length=20_000)
     text: str = Field(min_length=1, max_length=20_000)
+
+
+class VocabularyBody(BaseModel):
+    word: str = Field(min_length=1, max_length=120)
+    definition: str = Field(min_length=1, max_length=4_000)
+    part_of_speech: Optional[str] = Field(default=None, max_length=80)
+    example: Optional[str] = Field(default=None, max_length=2_000)
+    document_id: Optional[str] = None
+    source_page: Optional[int] = Field(default=None, ge=1, le=1_000_000)
+    source_quote: Optional[str] = Field(default=None, max_length=4_000)
 
 
 class ShelfAccept(BaseModel):
@@ -2985,6 +2997,21 @@ async def patch_document(doc_id: str, patch: DocumentPatch):
         if field in sent:
             changes[field] = getattr(patch, field)
 
+    if {"current_page", "reading_progress"} & sent:
+        total_pages = metadata.get("pages") or metadata.get("page_count") or 0
+        if "current_page" in sent:
+            if patch.current_page is not None and total_pages and patch.current_page > total_pages:
+                raise HTTPException(status_code=422, detail="current page is beyond the end of this book")
+            changes["current_page"] = patch.current_page
+        if "reading_progress" in sent:
+            changes["reading_progress"] = patch.reading_progress or 0
+        elif patch.current_page is not None and total_pages:
+            changes["reading_progress"] = min(100, round(patch.current_page / total_pages * 100))
+        changes["last_read_at"] = utc_now()
+        effective_progress = changes.get("reading_progress", metadata.get("reading_progress") or 0)
+        if "reading_status" not in sent and effective_progress > 0 and (metadata.get("reading_status") or "to_read") == "to_read":
+            changes["reading_status"] = "reading"
+
     if "reading_status" in changes:
         status = changes["reading_status"]
         if status is None:
@@ -3145,6 +3172,73 @@ async def update_note(doc_id: str, body: NoteBody):
         return _note_response(read_metadata(doc_id))
 
     return await asyncio.to_thread(update)
+
+
+def _vocabulary_record(body: VocabularyBody) -> dict:
+    word = " ".join(body.word.split())
+    definition = body.definition.strip()
+    if not word or not definition:
+        raise HTTPException(status_code=422, detail="a word and definition are required")
+    if body.document_id:
+        source = read_metadata(body.document_id)
+        if source.get("collection_id") == NOTES_COLLECTION_ID:
+            raise HTTPException(status_code=422, detail="link vocabulary to a source document, not a note")
+        total_pages = source.get("pages") or source.get("page_count") or 0
+        if body.source_page and total_pages and body.source_page > total_pages:
+            raise HTTPException(status_code=422, detail="source page out of range")
+    elif body.source_page or body.source_quote:
+        raise HTTPException(status_code=422, detail="a source document is required")
+    return {
+        "word": word,
+        "normalized_word": word.casefold(),
+        "definition": definition,
+        "part_of_speech": (body.part_of_speech or "").strip() or None,
+        "example": (body.example or "").strip() or None,
+        "document_id": body.document_id,
+        "source_page": body.source_page,
+        "source_quote": (body.source_quote or "").strip() or None,
+        "definition_source": "manual",
+    }
+
+
+@app.get("/vocabulary")
+async def list_vocabulary(document_id: Optional[str] = None, q: Optional[str] = Query(default=None, max_length=120)):
+    def listed() -> dict:
+        words = STORE.list_vocabulary(document_id)
+        needle = (q or "").strip().casefold()
+        if needle:
+            words = [item for item in words if needle in item["normalized_word"] or needle in item["definition"].casefold()]
+        return {"words": words}
+    return await asyncio.to_thread(listed)
+
+
+@app.post("/vocabulary", status_code=201)
+async def create_vocabulary(body: VocabularyBody):
+    record = await asyncio.to_thread(_vocabulary_record, body)
+    now = utc_now()
+    return await asyncio.to_thread(
+        STORE.create_vocabulary,
+        {"word_id": generate_id(), **record, "created_at": now, "updated_at": now},
+    )
+
+
+@app.put("/vocabulary/{word_id}")
+async def update_vocabulary(word_id: str, body: VocabularyBody):
+    changes = await asyncio.to_thread(_vocabulary_record, body)
+    changes["updated_at"] = utc_now()
+    try:
+        return await asyncio.to_thread(STORE.update_vocabulary, word_id, changes)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="vocabulary entry not found") from exc
+
+
+@app.delete("/vocabulary/{word_id}")
+async def delete_vocabulary(word_id: str):
+    try:
+        await asyncio.to_thread(STORE.delete_vocabulary, word_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="vocabulary entry not found") from exc
+    return {"ok": True}
 
 
 @app.post("/shelves/accept")

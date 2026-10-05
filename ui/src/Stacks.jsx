@@ -4,9 +4,12 @@ import ActionProgress from "./ActionProgress.jsx";
 import Cover from "./Cover.jsx";
 import { CoverFlags, MarkControls } from "./DocMarks.jsx";
 import IndexActivity from "./IndexActivity.jsx";
+import LibraryExplore from "./LibraryExplore.jsx";
+import LibraryStats from "./LibraryStats.jsx";
 import NotesPanel from "./NotesPanel.jsx";
 import OwnedBooks from "./OwnedBooks.jsx";
 import ShelfView from "./ShelfView.jsx";
+import VocabularyPanel from "./VocabularyPanel.jsx";
 import { ingestActionProgress, isActiveIngestJob, reindexActionProgress } from "./actionProgress.js";
 import { displayTitle, loadStored, saveStored } from "./storage.js";
 
@@ -555,7 +558,8 @@ export default function Stacks(props) {
   // Built-in libraries (Notes) have no folder to scan, rename or remove.
   const collections = useMemo(() => allCollections.filter((collection) => !collection.builtin), [allCollections]);
   const noteCount = allCollections.find((collection) => collection.builtin)?.document_count || 0;
-  const [tab, setTab] = useState("shelves");
+  const [tab, setTab] = useState("browse");
+  const [browsePreset, setBrowsePreset] = useState(null);
   const [view, setView] = useState(() => (loadStored(VIEW_KEY, "grid") === "list" ? "list" : "grid"));
   const [activeCollectionId, setActiveCollectionId] = useState("");
   const fileInput = useRef(null);
@@ -648,6 +652,9 @@ export default function Stacks(props) {
 
       <div className="stacks-tabs">
         <div className="tabs" role="tablist">
+          <button type="button" role="tab" aria-selected={tab === "browse"} className={tab === "browse" ? "active" : ""} onClick={() => setTab("browse")}>
+            Browse
+          </button>
           <button type="button" role="tab" aria-selected={tab === "shelves"} className={tab === "shelves" ? "active" : ""} onClick={() => setTab("shelves")}>
             Folders
           </button>
@@ -656,6 +663,12 @@ export default function Stacks(props) {
           </button>
           <button type="button" role="tab" aria-selected={tab === "notes"} className={tab === "notes" ? "active" : ""} onClick={() => setTab("notes")}>
             Notes <span className="tab-count">{noteCount}</span>
+          </button>
+          <button type="button" role="tab" aria-selected={tab === "vocabulary"} className={tab === "vocabulary" ? "active" : ""} onClick={() => setTab("vocabulary")}>
+            Vocabulary
+          </button>
+          <button type="button" role="tab" aria-selected={tab === "statistics"} className={tab === "statistics" ? "active" : ""} onClick={() => setTab("statistics")}>
+            Statistics
           </button>
           <button type="button" role="tab" aria-selected={tab === "owned"} className={tab === "owned" ? "active" : ""} onClick={() => setTab("owned")}>
             Without files <span className="tab-count">{standaloneCount}</span>
@@ -679,9 +692,12 @@ export default function Stacks(props) {
         )}
       </div>
 
+      {tab === "browse" && <LibraryExplore apiBase={apiBase} documents={documents} collections={allCollections} onOpenDocument={onOpenDocument} preset={browsePreset} />}
       {tab === "shelves" && <Shelves {...props} collection={activeCollection} libraryRoot={activeCollection?.path ?? props.libraryRoot} view={view} />}
       {tab === "sorted" && <ShelfView apiBase={apiBase} documents={documents} onChanged={onImported} onOpenDocument={onOpenDocument} onScopeShelf={onScopeShelf} />}
       {tab === "notes" && <NotesPanel apiBase={apiBase} onChanged={onImported} onOpenSource={(id) => onOpenDocument({ document_id: id })} />}
+      {tab === "vocabulary" && <VocabularyPanel apiBase={apiBase} documents={documents} onOpenDocument={onOpenDocument} />}
+      {tab === "statistics" && <LibraryStats documents={documents} collections={allCollections} onExplore={(preset) => { setBrowsePreset({ ...preset }); setTab("browse"); }} />}
       {tab === "owned" && <OwnedBooks apiBase={apiBase} documents={documents} onOpenDocument={onOpenDocument} onChanged={onImported} />}
       {tab === "activity" && <IndexActivity apiBase={apiBase} onOpenDocument={onOpenDocument} onRetry={props.onReindex} onApproveOcr={props.onApproveOcr} onChanged={onImported} />}
       {tab === "catalogue" && <Catalogue {...props} documents={sourceDocuments} />}

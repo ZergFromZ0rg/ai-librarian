@@ -84,6 +84,9 @@ COLUMNS = (
     "reading_status",
     "started_at",
     "finished_at",
+    "current_page",
+    "reading_progress",
+    "last_read_at",
     "metadata_source",
     "metadata_source_id",
 )
@@ -96,6 +99,7 @@ INT_COLUMNS = (
     "vector_dim",
     "pipeline_version",
     "index_schema_version",
+    "reading_progress",
 )
 
 SCHEMA = """
@@ -152,6 +156,9 @@ CREATE TABLE IF NOT EXISTS documents (
     reading_status        TEXT,
     started_at            TEXT,
     finished_at           TEXT,
+    current_page          INTEGER,
+    reading_progress      INTEGER NOT NULL DEFAULT 0,
+    last_read_at          TEXT,
     metadata_source       TEXT,
     metadata_source_id    TEXT
 );
@@ -169,6 +176,23 @@ CREATE TABLE IF NOT EXISTS owned_books (
     updated_at            TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_owned_books_title ON owned_books (title);
+
+CREATE TABLE IF NOT EXISTS vocabulary (
+    word_id               TEXT PRIMARY KEY,
+    word                  TEXT NOT NULL,
+    normalized_word       TEXT NOT NULL,
+    definition            TEXT NOT NULL,
+    part_of_speech        TEXT,
+    example               TEXT,
+    document_id           TEXT,
+    source_page           INTEGER,
+    source_quote          TEXT,
+    definition_source     TEXT NOT NULL DEFAULT 'manual',
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_vocabulary_word ON vocabulary (normalized_word);
+CREATE INDEX IF NOT EXISTS idx_vocabulary_document ON vocabulary (document_id);
 """
 
 
@@ -238,6 +262,9 @@ class MetadataStore:
             ("reading_status", "TEXT"),
             ("started_at", "TEXT"),
             ("finished_at", "TEXT"),
+            ("current_page", "INTEGER"),
+            ("reading_progress", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_read_at", "TEXT"),
             ("metadata_source", "TEXT"),
             ("metadata_source_id", "TEXT"),
         ):
@@ -310,7 +337,11 @@ class MetadataStore:
 
     # ----------------------------------------------------------------- writes
     def create(self, metadata: dict) -> dict:
-        metadata = {**metadata, "record_type": metadata.get("record_type") or "source"}
+        metadata = {
+            **metadata,
+            "record_type": metadata.get("record_type") or "source",
+            "reading_progress": metadata.get("reading_progress") or 0,
+        }
         values = tuple(metadata.get(column) for column in COLUMNS)
         placeholders = ", ".join("?" for _ in COLUMNS)
         with self._lock:
@@ -359,6 +390,61 @@ class MetadataStore:
             self._conn.execute(
                 "DELETE FROM owned_books WHERE book_id = ?", (document_id,)
             )
+            self._conn.execute(
+                "UPDATE vocabulary SET document_id = NULL, source_page = NULL, "
+                "source_quote = NULL WHERE document_id = ?", (document_id,)
+            )
+            self._conn.commit()
+
+    # ------------------------------------------------------------ vocabulary
+    def list_vocabulary(self, document_id: Optional[str] = None) -> List[dict]:
+        with self._lock:
+            if document_id:
+                rows = self._conn.execute(
+                    "SELECT * FROM vocabulary WHERE document_id = ? "
+                    "ORDER BY normalized_word, created_at DESC", (document_id,)
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM vocabulary ORDER BY normalized_word, created_at DESC"
+                ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def create_vocabulary(self, record: dict) -> dict:
+        columns = tuple(record)
+        with self._lock:
+            self._conn.execute(
+                f"INSERT INTO vocabulary ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                tuple(record[column] for column in columns),
+            )
+            row = self._conn.execute(
+                "SELECT * FROM vocabulary WHERE word_id = ?", (record["word_id"],)
+            ).fetchone()
+            self._conn.commit()
+        return _row_to_dict(row)
+
+    def update_vocabulary(self, word_id: str, changes: dict) -> dict:
+        allowed = {"word", "normalized_word", "definition", "part_of_speech", "example", "document_id", "source_page", "source_quote", "definition_source", "updated_at"}
+        if set(changes) - allowed:
+            raise ValueError("unknown vocabulary columns")
+        with self._lock:
+            cursor = self._conn.execute(
+                f"UPDATE vocabulary SET {', '.join(f'{column} = ?' for column in changes)} WHERE word_id = ?",
+                (*changes.values(), word_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(word_id)
+            row = self._conn.execute(
+                "SELECT * FROM vocabulary WHERE word_id = ?", (word_id,)
+            ).fetchone()
+            self._conn.commit()
+        return _row_to_dict(row)
+
+    def delete_vocabulary(self, word_id: str) -> None:
+        with self._lock:
+            cursor = self._conn.execute("DELETE FROM vocabulary WHERE word_id = ?", (word_id,))
+            if cursor.rowcount == 0:
+                raise KeyError(word_id)
             self._conn.commit()
 
     # --------------------------------------------------------- indexing queue

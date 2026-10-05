@@ -851,6 +851,17 @@ export default function App() {
     }
   }
 
+  const rememberReadingPage = useCallback((id, page) => {
+    fetch(`${API_BASE}/documents/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ current_page: page }),
+    })
+      .then((response) => response.ok ? response.json() : null)
+      .then((updated) => updated && setDocuments((list) => list.map((doc) => doc.document_id === id ? updated : doc)))
+      .catch(() => {});
+  }, []);
+
   async function removeDocument(document) {
     const label = document.title || document.filename;
     if (!window.confirm(`Remove “${label}” from the library?`)) return;
@@ -1112,6 +1123,7 @@ export default function App() {
           source={source}
           doc={documents.find((doc) => doc.document_id === source.documentId)}
           onPatch={(changes) => patchDocument(source.documentId, changes)}
+          onPage={documents.find((doc) => doc.document_id === source.documentId)?.collection_id === "notes" ? undefined : rememberReadingPage}
           onClose={() => setSource(null)}
           onBook={documents.find((doc) => doc.document_id === source.documentId)?.collection_id === "notes" ? undefined : () => bookId === source.documentId ? setSource(null) : openBook(source.documentId)}
           onSavePassage={bookId || documents.find((doc) => doc.document_id === source.documentId)?.collection_id === "notes" ? undefined : (next) => openBook(next.documentId, next)}

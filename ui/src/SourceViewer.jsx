@@ -34,7 +34,8 @@ export default function SourceViewer({ apiBase, source, doc, onPatch, onClose, o
   }, [apiBase, documentId]);
 
   useEffect(() => {
-    onPage?.(documentId, page);
+    const timer = window.setTimeout(() => onPage?.(documentId, page), 650);
+    return () => window.clearTimeout(timer);
   }, [documentId, page, onPage]);
 
   const step = useCallback(

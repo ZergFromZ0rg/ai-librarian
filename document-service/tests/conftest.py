@@ -152,3 +152,7 @@ def service(tmp_path, monkeypatch):
 
     module.STORE.close()
     module.CONVERSATIONS.close()
+    # Do not leave a cached application module pointing at the closed
+    # per-test SQLite connections. Tests that import `app` without this
+    # fixture must receive a live module of their own, regardless of order.
+    sys.modules.pop("app", None)

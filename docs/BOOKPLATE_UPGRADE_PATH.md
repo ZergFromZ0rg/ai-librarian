@@ -92,9 +92,9 @@ Known architectural debt:
 | --- | --- | --- | --- |
 | 1. Book identity | Book pages, metadata, covers, reviews, ownership, linked notes | DONE | — |
 | 2A. Book model | Unified metadata and reading lifecycle | DONE | Release 1 |
-| 2B. Catalogue assist | Open Library lookup, ISBN import, cover candidates | ACTIVE | 2A schema |
+| 2B. Catalogue assist | Open Library lookup, ISBN import, cover candidates | READY | 2A schema |
 | 2C. Cover studio | 2:3 crop, compression, catalogue fallback | READY | 2B |
-| 3A. Library controls | Faceted filters, sorting, notes markers | READY | 2A |
+| 3A. Library controls | Faceted filters, sorting, notes markers | ACTIVE | 2A |
 | 3B. Ledger | Dense sortable catalogue table | READY | 3A |
 | 3C. Statistics | Drill-down reading and collection analytics | READY | 2A, 3A |
 | 4A. Reading progress | Started/finished dates and resumable positions | READY | 2A |
@@ -610,6 +610,9 @@ reopen without new evidence.
 | 2026-10-04 | Keep long-running library actions attached to the control that started them, with exact folder totals and document-level reindex progress. | A global notice alone made Scan, Import, Set as library, and Reindex appear finished while work was still running. |
 | 2026-10-04 | Show indexing work in a dedicated Activity tab using durable document states plus ephemeral worker stages. | The library needs a compact, trustworthy queue; extraction remains indeterminate until the parser can report real page progress, while embedding reports exact completed passages. |
 | 2026-10-04 | Make Library a persistent sidebar destination with its own main surface. | Keeping the full catalogue below every empty chat made the research workspace feel like a long landing page and obscured the boundary between conversations and library management. |
+| 2026-10-04 | Keep saved library views in browser storage while document metadata, progress, notes, and vocabulary remain server-owned. | Views are UI preferences; reader-created records need durable SQLite storage and cross-browser access through the local server. |
+| 2026-10-04 | Opening a page updates resumable progress and moves `to_read` to `reading`, but reaching 100% does not mark a book finished. | Completion and its date are reader assertions, while page position can be recorded automatically. |
+| 2026-10-04 | Store vocabulary in a dedicated table linked to an optional book and page. | A word may recur in several books with different context, and deleting a source must not erase the reader's definition. |
 
 ## Current handoff
 
@@ -622,7 +625,8 @@ To resume in another chat, use this prompt:
 > checks, and update the roadmap status, decision log, and current handoff before
 > stopping.
 
-**Next milestone:** Release 2B — catalogue metadata assistance.
+**Next milestone:** finish Release 3A with URL-encoded filter state, linked-note
+markers/search, and shared result semantics for the future Ledger view.
 
 **Completed release:** Release 2A. Rich metadata, reading lifecycle, and
 fileless books now share the canonical document record and book page.
@@ -641,11 +645,30 @@ Library now opens as a dedicated, persistent sidebar destination instead of
 being appended below an empty Search/Ask workspace; chat and search actions
 return to the research surface while book overlays return to their origin.
 
-**First recommended slice:** implement a provider-neutral catalogue adapter and
-an Open Library search endpoint using mocked fixtures, bounded timeouts, a
-descriptive user agent, and a local cache. Do not build the apply UI until the
-normalized candidate shape and outage behavior are tested.
+**Bookplate slices completed after 2A:** the Library now opens on a faceted
+Browse tab with title/author/ISBN/description/review/genre search, status,
+ownership, rating, format, collection, genre, and indexing filters; stable
+sorting; result counts; progress indicators; and browser-persisted named views.
+The Statistics tab provides clickable lifecycle, rating, format, genre, author,
+acquisition, collection, year, page, and average-rating summaries that drill
+back into Browse. Book records store durable current page, percent, and update
+time; the source viewer records the last page after a debounce, book pages
+resume there, and starting progress transitions a to-read book to reading
+without asserting completion. The existing linked Markdown notes are presented
+as the Reading notebook. A durable, offline Vocabulary registry supports CRUD,
+word/definition search, book filtering, optional source page/quote context, and
+per-book vocabulary on the book page. These are useful vertical slices; their
+parent releases remain incomplete where their full acceptance criteria still
+call for URL state, note markers, images/highlight types, export/import, or
+dictionary integration.
+
+**First recommended slice:** finish the active shared filter model by adding
+linked-note presence to document summaries, URL state, and note markers in
+Browse, then reuse that exact model for the Release 3B Ledger.
 
 **Validation baseline:** Release 2A has migration, compatibility API, fileless
 book lifecycle, and shelf regression coverage in addition to the full backend
-suite, UI tests, Ruff, production build, and browser smoke checks.
+suite, UI tests, Ruff, production build, and browser smoke checks. The 3A/3C/4
+vertical slices pass 276 backend tests and 43 UI tests, build in the production
+container, migrate the attached 146-document library in place, and expose a
+healthy live service with the durable vocabulary and progress schema.

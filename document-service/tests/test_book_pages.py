@@ -187,6 +187,59 @@ def test_richer_metadata_validation(service):
     ).status_code == 422
 
 
+def test_reading_progress_tracks_page_and_lifecycle(service):
+    module, client, _ = service
+    doc = upload(client)
+    path = f"/documents/{doc['document_id']}"
+    module.STORE.update(doc["document_id"], {"pages": 10})
+    progress = client.patch(path, json={"current_page": 4})
+    assert progress.status_code == 200
+    assert progress.json()["current_page"] == 4
+    assert progress.json()["reading_progress"] == 40
+    assert progress.json()["reading_status"] == "reading"
+    assert progress.json()["started_at"]
+    assert progress.json()["last_read_at"]
+    finished = client.patch(path, json={"current_page": 10})
+    assert finished.status_code == 200
+    assert finished.json()["reading_progress"] == 100
+    assert finished.json()["reading_status"] == "reading"
+    assert finished.json()["finished_at"] is None
+    assert client.patch(path, json={"current_page": 11}).status_code == 422
+    reopened = MetadataStore(module.STORE._path)
+    try:
+        assert reopened.get(doc["document_id"])["current_page"] == 10
+    finally:
+        reopened.close()
+
+
+def test_vocabulary_crud_and_source_validation(service):
+    _, client, _ = service
+    doc = upload(client)
+    payload = {
+        "word": "  Aporetic  ",
+        "definition": "Marked by an irresolvable contradiction.",
+        "part_of_speech": "adjective",
+        "example": "An aporetic conclusion.",
+        "document_id": doc["document_id"],
+        "source_page": 1,
+        "source_quote": "The absurd and freedom.",
+    }
+    created = client.post("/vocabulary", json=payload)
+    assert created.status_code == 201, created.text
+    word = created.json()
+    assert word["word"] == "Aporetic"
+    assert word["normalized_word"] == "aporetic"
+    listed = client.get("/vocabulary", params={"document_id": doc["document_id"]}).json()["words"]
+    assert [item["word_id"] for item in listed] == [word["word_id"]]
+    payload["definition"] = "Presenting a deliberate impasse."
+    updated = client.put(f"/vocabulary/{word['word_id']}", json=payload)
+    assert updated.status_code == 200
+    assert updated.json()["definition"] == payload["definition"]
+    assert client.post("/vocabulary", json={**payload, "source_page": 20}).status_code == 422
+    assert client.delete(f"/vocabulary/{word['word_id']}").status_code == 200
+    assert client.get("/vocabulary").json()["words"] == []
+
+
 def test_book_without_a_file_uses_the_main_catalogue(service):
     module, client, _ = service
     created = client.post(
