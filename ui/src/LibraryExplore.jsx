@@ -54,7 +54,7 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
     <div className="explore-result-head"><strong>{results.length.toLocaleString()}</strong> book{results.length === 1 ? "" : "s"}<span className="muted">Open a row to edit metadata, progress, notes, and vocabulary.</span></div>
     <div className="explore-results">
       {results.map((doc) => <button type="button" className="explore-book" key={doc.document_id} onClick={() => onOpenDocument(doc)}>
-        <Cover apiBase={apiBase} documentId={doc.record_type === "standalone" ? null : doc.document_id} filename={doc.title || doc.filename} fileType={doc.file_type} width={90}><CoverFlags doc={doc} /></Cover>
+        <Cover apiBase={apiBase} documentId={doc.document_id} filename={doc.title || doc.filename} author={doc.author} fileType={doc.file_type} width={90}><CoverFlags doc={doc} /></Cover>
         <span className="explore-book-copy"><strong>{doc.title || displayTitle(doc.filename)}</strong><span>{doc.author || "Unknown author"}</span><small>{doc.file_type?.toUpperCase() || "BOOK"} · {doc.reading_status?.replace("_", " ") || "to read"}{doc.rating ? ` · ${"★".repeat(doc.rating)}` : ""}</small></span>
         <span className="explore-progress"><span style={{ width: `${doc.reading_progress || 0}%` }} />{doc.reading_progress || 0}%</span>
       </button>)}

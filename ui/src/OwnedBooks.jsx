@@ -1,7 +1,9 @@
 import React, { useMemo, useState } from "react";
 
+import { fullBody } from "./catalogueMatch.js";
 import Cover from "./Cover.jsx";
 import { CoverFlags } from "./DocMarks.jsx";
+import LookupPanel from "./LookupPanel.jsx";
 
 export default function OwnedBooks({ apiBase, documents, onOpenDocument, onChanged }) {
   const [title, setTitle] = useState("");
@@ -9,6 +11,7 @@ export default function OwnedBooks({ apiBase, documents, onOpenDocument, onChang
   const [notes, setNotes] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [lookupOpen, setLookupOpen] = useState(false);
   const books = useMemo(
     () => documents.filter((document) => document.record_type === "standalone"),
     [documents],
@@ -44,6 +47,38 @@ export default function OwnedBooks({ apiBase, documents, onOpenDocument, onChang
     }
   }
 
+  // Create a book from an Open Library match: details and cover come with it.
+  async function addFromMatch(candidate) {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch(`${apiBase}/owned-books`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: candidate.title, author: candidate.author, pdf_less: true }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || "Could not save this book");
+      let book = data.book;
+      const applied = await fetch(`${apiBase}/documents/${book.document_id}/metadata-apply`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(fullBody(candidate)),
+      });
+      if (applied.ok) book = { ...book, ...(await applied.json()) };
+      else setError("The book was added, but its details could not be filled in. You can look it up again from its page.");
+      setLookupOpen(false);
+      window.dispatchEvent(new Event("book-cover-changed"));
+      await onChanged?.();
+      onOpenDocument?.(book);
+    } catch (addError) {
+      setError(addError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function removeBook(book) {
     if (!window.confirm(`Remove “${book.title}” from your catalogue?`)) return;
     setError("");
@@ -68,6 +103,11 @@ export default function OwnedBooks({ apiBase, documents, onOpenDocument, onChang
         <span className="owned-books-count mono">{books.length} without files</span>
       </div>
 
+      <div className="owned-lookup">
+        <button type="button" className="button" aria-expanded={lookupOpen} onClick={() => setLookupOpen((open) => !open)}>{lookupOpen ? "Close lookup" : "Find by ISBN or title"}</button>
+        {lookupOpen && <LookupPanel apiBase={apiBase} onPick={addFromMatch} pickLabel={busy ? "Adding…" : "Add this book"} />}
+      </div>
+
       <form className="owned-book-form" onSubmit={addBook}>
         <input className="input" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Book title" aria-label="Book title" />
         <input className="input" value={author} onChange={(event) => setAuthor(event.target.value)} placeholder="Author (optional)" aria-label="Author" />
@@ -83,7 +123,7 @@ export default function OwnedBooks({ apiBase, documents, onOpenDocument, onChang
           {books.map((book) => (
             <article className="owned-book-card" key={book.document_id}>
               <button type="button" className="owned-book-open" onClick={() => onOpenDocument(book)}>
-                <Cover apiBase={apiBase} documentId={book.document_id} filename={book.title} fileType="book" width={160} className="cover-mini">
+                <Cover apiBase={apiBase} documentId={book.document_id} filename={book.title} author={book.author} fileType="book" width={160} className="cover-mini">
                   <CoverFlags doc={book} />
                 </Cover>
                 <span className="owned-book-card-main">

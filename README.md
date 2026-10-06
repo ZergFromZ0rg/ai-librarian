@@ -82,6 +82,34 @@ To fetch both up front instead of on the first request:
 docker compose run --rm document-service python warm_models.py
 ```
 
+### Finding book information, covers, and backups
+
+**Find book information** on a book page searches Open Library by ISBN, or by
+title and author (prefilled from the book). Pick a match and the app shows a
+field-by-field comparison: fields the book has no value for are ticked, fields
+that already have one are not, and only what you tick is applied (the cover
+too, if you tick it). Ratings, reviews, notes, and reading state can never be
+written from a match. The **Without files** tab has the same lookup, so a
+physical book can be added from an ISBN in one step. Lookups go through the
+server (the browser never contacts Open Library or its image host), send only
+the text you typed, are cached for an hour, and fail gracefully: when Open
+Library is unreachable, or `OFFLINE=1` is set, manual editing is unaffected.
+Set `CATALOGUE_USER_AGENT` to identify your installation to Open Library.
+
+Books without a cover get a cloth binding in one of twelve colours. The colour
+comes from the book's ID, so it never changes when you sort or filter.
+
+**Settings → Backup** exports everything you created as one ZIP of plain
+JSON and Markdown: book details, reading state, ratings and reviews, notes
+(also as `notes/<id>.md`), vocabulary, and custom covers, with a manifest and a
+SHA-256 for every file. Source books are not included. To restore into a fresh
+install, scan your library first, then **Import from file**: books are matched
+by content hash, so renamed or moved files are still found. Import always shows
+what would change first, keeps values you have already set unless you choose
+"Use the file's values", never deletes anything, and skips (and reports)
+books whose file is not in the library. Archives are validated before anything
+changes: format version, checksums, file names, sizes, and compression ratio.
+
 ### Offline / air-gapped
 
 Build with the models baked into the image, then set `OFFLINE=1` so the huggingface libraries never try to reach the network:
@@ -173,7 +201,7 @@ type. Set **Owned / Not owned** and track the reading lifecycle as **To read**,
 **Your review** holds an optional written review and a one-to-five-star rating
 (with a clear-rating action); both persist with the document. Corrections
 stay in the app and survive automatic shelf classification; source files are
-never renamed or rewritten. Catalogue metadata lookup is not required.
+never renamed or rewritten. Catalogue lookup is optional (see below).
 
 **Save passage to notes** on a search result or an expanded Ask citation opens
 that book's note editor with the quotation and source location attached. Write
@@ -461,6 +489,9 @@ Important endpoints:
 - `POST /documents` — upload a document (PDF, Word, Excel, PowerPoint, text, Markdown or CSV)
 - `GET /documents` — list documents and indexing states
 - `GET /documents/{id}` — inspect one document's state
+- `GET /catalogue/search?q=`, `GET /catalogue/isbn/{isbn}`, `GET /catalogue/cover?id=` — optional Open Library lookup (502 when unreachable)
+- `POST /documents/{id}/metadata-apply` — apply only the selected catalogue fields (and optionally a catalogue cover)
+- `GET /export` — download the reader's data as a ZIP; `POST /import?dry_run=true|false&conflict=keep|replace` — check or apply one
 - `POST /documents/{id}/retry` — retry failed indexing
 - `DELETE /documents/{id}` — delete stored files and vectors
 - `POST /search` — semantic retrieval (set `rerank: true` to reorder and relevance-gate; `rerank_min_score`, `fusion`, and `dense_weight` override the server defaults per request; `collection_id` limits it to one library). Each result carries `file_type` and a human `location` ("p. 3", "slide 2")

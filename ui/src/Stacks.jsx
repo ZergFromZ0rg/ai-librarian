@@ -313,7 +313,7 @@ function Shelves({ apiBase, documents, libraryRoot, collection, settingRoot, job
               return (
                 <div className={`cover-card${openable ? "" : " unindexed"}`} key={`file-${entry.name}`}>
                   <button type="button" className="cover-card-open" disabled={!openable} onClick={() => onOpenDocument(doc)} title={entry.name}>
-                    <Cover apiBase={apiBase} documentId={doc ? doc.document_id : null} filename={entry.name} fileType={doc?.file_type || entry.file_type} width={320}>
+                    <Cover apiBase={apiBase} documentId={doc ? doc.document_id : null} filename={entry.name} fileType={doc?.file_type || entry.file_type} author={doc?.author} width={320}>
                       {doc && <CoverFlags doc={doc} />}
                     </Cover>
                   </button>

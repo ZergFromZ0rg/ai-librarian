@@ -288,3 +288,11 @@ def test_book_without_a_file_uses_the_main_catalogue(service):
         assert reopened.get(book_id) is None
     finally:
         reopened.close()
+
+
+def test_restart_leaves_catalogue_only_books_alone(service):
+    module, client, _ = service
+    book = client.post("/owned-books", json={"title": "Paper Book"}).json()["book"]["document_id"]
+    module.recover_interrupted_work()
+    saved = client.get(f"/documents/{book}").json()
+    assert saved["indexing_status"] == "catalogued" and saved["indexing_error"] is None

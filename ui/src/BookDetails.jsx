@@ -1,4 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
+import { applyBody, matchRows } from "./catalogueMatch.js";
+import { clothColor } from "./clothCovers.js";
+import LookupPanel from "./LookupPanel.jsx";
 import { displayTitle } from "./storage.js";
 
 const labels = ["Not for me", "It was okay", "I liked it", "Really good", "A favourite"];
@@ -63,6 +66,11 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
   const [coverError, setCoverError] = useState("");
   const [coverMessage, setCoverMessage] = useState("");
   const [dragging, setDragging] = useState(false);
+  const [lookupOpen, setLookupOpen] = useState(false);
+  const [match, setMatch] = useState(null);
+  const [ticked, setTicked] = useState({});
+  const [withCover, setWithCover] = useState(false);
+  const [applying, setApplying] = useState(false);
   const input = useRef(null);
   const changed = JSON.stringify(fields) !== JSON.stringify(values(doc));
   useEffect(() => { onDirty(changed || Boolean(file)); }, [changed, file, onDirty]);
@@ -104,6 +112,21 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
     } catch (failure) { setError(failure.message); }
     finally { setSaving(false); }
   }
+  const matchRowsNow = match ? matchRows(doc, match) : [];
+  function pickMatch(candidate) {
+    setMatch(candidate); setTicked({}); setError(""); setMessage("");
+    setWithCover(Boolean(candidate.cover_id) && doc.record_type === "standalone");
+  }
+  async function applyMatch() {
+    setApplying(true); setError(""); setMessage("");
+    try {
+      const updated = await request("/metadata-apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(applyBody(matchRowsNow, ticked, match, withCover)) });
+      setFields(values(updated)); onDocument(updated);
+      if (withCover) { setRevision(Date.now()); setCoverFailed(false); onCoverChanged(); }
+      setMatch(null); setLookupOpen(false); setMessage("Details from Open Library applied.");
+    } catch (failure) { setError(failure.message); }
+    finally { setApplying(false); }
+  }
   function choose(next) {
     if (!next || coverBusy) return;
     setCoverError(""); setCoverMessage("");
@@ -131,7 +154,7 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
         onDragLeave={() => setDragging(false)}
         onDrop={(event) => { event.preventDefault(); event.stopPropagation(); setDragging(false); choose(event.dataTransfer.files[0]); }}
         onPaste={(event) => { const pasted = [...event.clipboardData.items].find((item) => item.type.startsWith("image/")); if (pasted) { event.preventDefault(); choose(pasted.getAsFile()); } }}>
-        {preview || !coverFailed ? <img key={preview || revision} src={preview || `${apiBase}/documents/${doc.document_id}/thumbnail?w=480&v=${revision}`} alt={file ? "New cover preview" : `Cover of ${doc.title}`} onError={() => { if (!file) setCoverFailed(true); else setCoverError("This image could not be previewed. Please choose another."); }} /> : <div className="book-cloth-cover"><span>YOUR LIBRARY</span><strong>{doc.title || displayTitle(doc.filename)}</strong><small>{doc.author || ""}</small></div>}
+        {preview || !coverFailed ? <img key={preview || revision} src={preview || `${apiBase}/documents/${doc.document_id}/thumbnail?w=480&v=${revision}`} alt={file ? "New cover preview" : `Cover of ${doc.title}`} onError={() => { if (!file) setCoverFailed(true); else setCoverError("This image could not be previewed. Please choose another."); }} /> : <div className="book-cloth-cover" style={{ background: clothColor(doc.document_id).bg, borderLeftColor: clothColor(doc.document_id).edge }}><span>YOUR LIBRARY</span><strong>{doc.title || displayTitle(doc.filename)}</strong><small>{doc.author || ""}</small></div>}
         {file && <span className="cover-preview-label">PREVIEW · NOT SAVED</span>}
       </div>
       <input ref={input} hidden type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { choose(event.target.files[0]); event.target.value = ""; }} />
@@ -144,6 +167,26 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
     </aside>
     <form className="book-editor" onSubmit={save}>
       <fieldset disabled={saving} className="book-editor-fields">
+        <section className="book-editor-card book-lookup-card" aria-labelledby="lookup-heading">
+          <div className="book-card-heading"><h2 id="lookup-heading">Find book information</h2><button type="button" className="text-button" aria-expanded={lookupOpen} onClick={() => { setLookupOpen((open) => !open); setMatch(null); }}>{lookupOpen ? "Close" : "Look up"}</button></div>
+          {!lookupOpen && <p className="muted">Fill in the author, year, pages, ISBN and a cover from Open Library. You choose what to keep.</p>}
+          {lookupOpen && changed && <p className="book-inline-error" role="alert">Save or discard your unsaved edits first, so applying a match cannot overwrite them.</p>}
+          {lookupOpen && !match && <LookupPanel apiBase={apiBase} initialQuery={[fields.title, fields.author].filter(Boolean).join(" ")} onPick={pickMatch} pickLabel="Compare" />}
+          {lookupOpen && match && <div className="lookup-compare">
+            <p className="lookup-compare-title"><strong>{match.title}</strong>{match.author ? ` · ${match.author}` : ""} <button type="button" className="text-button" onClick={() => setMatch(null)}>Back to results</button></p>
+            {matchRowsNow.length === 0 && !match.cover_id ? <p className="muted">This match has nothing new to add.</p> : <table className="lookup-table">
+              <caption className="sr-only">Choose which values to apply</caption>
+              <thead><tr><th scope="col">Apply</th><th scope="col">Field</th><th scope="col">Yours</th><th scope="col">Open Library</th></tr></thead>
+              <tbody>{matchRowsNow.map((row) => <tr key={row.key}>
+                <td><input type="checkbox" aria-label={`Apply ${row.label}`} checked={ticked[row.key] ?? row.checked} onChange={(event) => setTicked((current) => ({ ...current, [row.key]: event.target.checked }))} /></td>
+                <th scope="row">{row.label}</th><td className={row.current ? "" : "muted"}>{row.current || "empty"}</td><td>{row.suggested}</td>
+              </tr>)}
+              {match.cover_id && <tr><td><input type="checkbox" aria-label="Apply cover" checked={withCover} onChange={(event) => setWithCover(event.target.checked)} /></td><th scope="row">Cover</th><td className="muted">your current cover</td><td><img className="lookup-compare-cover" src={`${apiBase}/catalogue/cover?id=${match.cover_id}`} alt="Catalogue cover" /></td></tr>}
+              </tbody>
+            </table>}
+            <div className="cover-preview-actions"><button type="button" className="button primary small" disabled={applying || changed} onClick={applyMatch}>{applying ? "Applying…" : "Apply selected"}</button><button type="button" className="text-button" onClick={() => setMatch(null)}>Cancel</button></div>
+          </div>}
+        </section>
         <section className="book-editor-card" aria-labelledby="metadata-heading">
           <div className="book-card-heading"><h2 id="metadata-heading">Book details</h2><span className="muted">Make it yours</span></div>
           <label className="book-field book-title-field">Title<input className="input" required maxLength={300} value={fields.title} onChange={(event) => set("title", event.target.value)} /></label>

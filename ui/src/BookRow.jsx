@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import Cover from "./Cover.jsx";
+import { clothColor } from "./clothCovers.js";
 import { CoverFlags } from "./DocMarks.jsx";
 import { displayTitle, timeAgo } from "./storage.js";
 
 export const SHELF_SIZE = 12;
 
-const SPINE_COLORS = ["#354d66", "#80584d", "#496358", "#73614d", "#665672", "#465d69", "#815c5c", "#53634b"];
 const SPINE_HEIGHTS = [232, 218, 244, 224, 238, 210, 230, 220, 240, 215, 234, 222];
 
 export default function BookRow({ apiBase, items, onOpen }) {
@@ -86,7 +86,7 @@ export default function BookRow({ apiBase, items, onOpen }) {
         <div className={`bookcase-preview${active ? " is-active" : ""}`}>
           {active ? (
             <button type="button" key={active.doc.document_id} className="bookcase-preview-open" onClick={() => onOpen(active)} aria-label={`Open ${active.doc.title || displayTitle(active.doc.filename)}`}>
-              <Cover apiBase={apiBase} documentId={active.doc.document_id} filename={active.doc.filename} fileType={active.doc.file_type} width={480}>
+              <Cover apiBase={apiBase} documentId={active.doc.document_id} filename={active.doc.filename} author={active.doc.author} fileType={active.doc.file_type} width={480}>
                 <CoverFlags doc={active.doc} />
               </Cover>
               <span className="bookcase-preview-title">{active.doc.title || displayTitle(active.doc.filename)}</span>
@@ -114,7 +114,7 @@ export default function BookRow({ apiBase, items, onOpen }) {
                     else nodes.current.delete(doc.document_id);
                   }}
                   className={`spine-book${activeId === doc.document_id ? " is-active" : ""}`}
-                  style={{ "--i": index, "--spine-color": SPINE_COLORS[index % SPINE_COLORS.length], "--spine-height": `${SPINE_HEIGHTS[index % SPINE_HEIGHTS.length]}px` }}
+                  style={{ "--i": index, "--spine-color": clothColor(doc.document_id).bg, "--spine-height": `${SPINE_HEIGHTS[index % SPINE_HEIGHTS.length]}px` }}
                   onPointerEnter={(event) => { if (event.pointerType !== "touch") setActiveId(doc.document_id); }}
                   onPointerDown={(event) => { pointerType.current = event.pointerType; }}
                   onFocus={() => { if (pointerType.current !== "touch") setActiveId(doc.document_id); }}

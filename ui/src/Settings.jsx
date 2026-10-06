@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 
 import ActionProgress from "./ActionProgress.jsx";
+import BackupSection from "./BackupSection.jsx";
 import { ingestActionProgress, reindexActionProgress } from "./actionProgress.js";
 import { CLOUD_PROVIDERS } from "./useAsk.js";
 
@@ -8,6 +9,8 @@ import { CLOUD_PROVIDERS } from "./useAsk.js";
 // then forgotten, rather than touched every session: theme, cloud API keys,
 // and which folder auto-ingest watches. Closes on Escape or an outside click.
 export default function Settings({
+  apiBase,
+  onLibraryChanged,
   theme,
   onThemeChange,
   apiKeys,
@@ -168,6 +171,8 @@ export default function Settings({
           </button>
         )}
       </section>
+
+      <BackupSection apiBase={apiBase} onImported={onLibraryChanged} />
 
       <section className="settings-section">
         <h3>Local (Ollama)</h3>

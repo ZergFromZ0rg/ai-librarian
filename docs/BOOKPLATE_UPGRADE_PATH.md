@@ -92,15 +92,15 @@ Known architectural debt:
 | --- | --- | --- | --- |
 | 1. Book identity | Book pages, metadata, covers, reviews, ownership, linked notes | DONE | — |
 | 2A. Book model | Unified metadata and reading lifecycle | DONE | Release 1 |
-| 2B. Catalogue assist | Open Library lookup, ISBN import, cover candidates | READY | 2A schema |
-| 2C. Cover studio | 2:3 crop, compression, catalogue fallback | READY | 2B |
+| 2B. Catalogue assist | Open Library lookup, ISBN import, cover candidates | ACTIVE (lookup, apply, ISBN add and covers done; iTunes fallback and multiple cover candidates remain) | 2A schema |
+| 2C. Cover studio | 2:3 crop, compression, catalogue fallback | READY (generated cloth covers done) | 2B |
 | 3A. Library controls | Faceted filters, sorting, notes markers | ACTIVE | 2A |
 | 3B. Ledger | Dense sortable catalogue table | READY | 3A |
 | 3C. Statistics | Drill-down reading and collection analytics | READY | 2A, 3A |
 | 4A. Reading progress | Started/finished dates and resumable positions | READY | 2A |
 | 4B. Reading notebook | Inline notes, images, highlights | READY | export foundation |
 | 4C. Vocabulary | Definitions linked to books and passages | READY | 4B |
-| 5. Portability | Versioned ZIP export/import and restore validation | READY | 2A; before note images |
+| 5. Portability | Versioned ZIP export/import and restore validation | ACTIVE (v1 archive, dry-run import and recovery done; note images, streaming import, backup verification remain) | 2A; before note images |
 | 6. Operations | Release images, health, migrations, backup UX | READY | 5 |
 | 7. Accounts/sync | Optional multi-user isolation and cross-device state | LATER | explicit product decision |
 
@@ -613,6 +613,10 @@ reopen without new evidence.
 | 2026-10-04 | Keep saved library views in browser storage while document metadata, progress, notes, and vocabulary remain server-owned. | Views are UI preferences; reader-created records need durable SQLite storage and cross-browser access through the local server. |
 | 2026-10-04 | Opening a page updates resumable progress and moves `to_read` to `reading`, but reaching 100% does not mark a book finished. | Completion and its date are reader assertions, while page position can be recorded automatically. |
 | 2026-10-04 | Store vocabulary in a dedicated table linked to an optional book and page. | A word may recur in several books with different context, and deleting a source must not erase the reader's definition. |
+| 2026-10-05 | Catalogue matches are compared in the browser and applied through `POST /documents/{id}/metadata-apply` using the editor's own validation, restricted to catalogue fields. A separate `metadata-preview` endpoint was not built. | The browser already holds both records; one validated write path is simpler than two. |
+| 2026-10-05 | Export archive v1 holds only reader-created data (books.json, notes.json plus notes/*.md, vocabulary.json, custom covers) with per-file SHA-256s. Import matches source books by content hash and standalone books by ID, keeps existing values unless `conflict=replace`, and never deletes. | Source files and indexes are regenerable; matching by hash survives renamed or moved files. Data is plain files so it is recoverable without this app. |
+| 2026-10-05 | Catalogue-only books are excluded from startup recovery. | Their empty stored path resolved to the documents directory, so every restart queued them and left them in an indexing error. |
+| 2026-10-05 | Cloth cover colour is derived from the book ID (twelve fixed bindings), never list position. | A book keeps its colour when sorted or filtered. |
 
 ## Current handoff
 
@@ -624,6 +628,8 @@ To resume in another chat, use this prompt:
 > changes, implement one complete vertical slice, run the roadmap's relevant
 > checks, and update the roadmap status, decision log, and current handoff before
 > stopping.
+
+**Done 2026-10-05:** Open Library lookup with field-by-field apply (book page and Without-files ISBN add), cloth covers on every card, and a Settings → Backup export/import (archive v1, dry-run, keep/replace). Remaining for 2B/5: iTunes cover fallback, multiple cover candidates, note images in the archive, streaming import, Verify backup.
 
 **Next milestone:** finish Release 3A with URL-encoded filter state, linked-note
 markers/search, and shared result semantics for the future Ledger view.

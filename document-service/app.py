@@ -12,6 +12,7 @@ import os
 import queue
 import re
 import secrets
+import tempfile
 import threading
 import time
 import uuid
@@ -26,10 +27,13 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
+from starlette.background import BackgroundTask
 from starlette.datastructures import Headers, MutableHeaders
 
+import catalogue
 import generation
+import portability
 import shelves
 from chunking import (
     build_semantic_groups,
@@ -1813,7 +1817,9 @@ def recover_interrupted_work() -> None:
     requeued = 0
     for metadata in list_metadata():
         doc_id = metadata.get("document_id")
-        if not doc_id:
+        # Catalogue-only books have no source to index; without this their
+        # empty stored path resolves to the documents directory, which exists.
+        if not doc_id or metadata.get("record_type") == "standalone":
             continue
         try:
             stale_pipeline = metadata.get("pipeline_version") != PIPELINE_VERSION
@@ -2528,15 +2534,10 @@ async def get_owned_books():
     return {"books": await asyncio.to_thread(_standalone_books)}
 
 
-@app.post("/owned-books")
-async def create_owned_book(body: OwnedBookBody):
+def _new_standalone_record(document_id: str, title: str, author: Optional[str]) -> dict:
+    """A fileless catalogue book that the indexing workers never claim."""
     now = utc_now()
-    title = body.title.strip()
-    if not title:
-        raise HTTPException(status_code=422, detail="title cannot be blank")
-    document_id = secrets.token_hex(6)
-    author = body.author.strip() if body.author else None
-    record = {
+    return {
         "document_id": document_id,
         "record_type": "standalone",
         "filename": title,
@@ -2557,10 +2558,20 @@ async def create_owned_book(body: OwnedBookBody):
         "kind_override": "book",
         "owned": 1,
         "author": author,
-        "review": body.notes.strip() if body.notes else None,
         "reading_status": "to_read",
         "shelf_suggested": shelves.suggest_shelf("book", None, author),
     }
+
+
+@app.post("/owned-books")
+async def create_owned_book(body: OwnedBookBody):
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="title cannot be blank")
+    document_id = secrets.token_hex(6)
+    author = body.author.strip() if body.author else None
+    record = _new_standalone_record(document_id, title, author)
+    record["review"] = body.notes.strip() if body.notes else None
     created = await asyncio.to_thread(STORE.create, record)
     return JSONResponse({"book": _catalogue_book_response(created)}, status_code=201)
 
@@ -2768,6 +2779,24 @@ def _thumbnail_width(requested: int) -> int:
     return min((160, 320, 480), key=lambda size: abs(size - requested))
 
 
+def _save_custom_cover(doc_id: str, data: bytes) -> None:
+    """Validate, normalise and store a reader-chosen cover (blocking)."""
+    from PIL import Image, ImageOps, UnidentifiedImageError
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            if image.format not in {"JPEG", "PNG", "WEBP"} or image.width * image.height > 20_000_000:
+                raise ValueError("unsupported or oversized image")
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            image.thumbnail((600, 900))
+            THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
+            target = THUMBNAILS_DIR / f"{doc_id}-custom.jpg"
+            temporary = target.with_suffix(f".{uuid.uuid4().hex}.tmp")
+            image.save(temporary, format="JPEG", quality=85)
+            os.replace(temporary, target)
+    except (ValueError, OSError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
+        raise HTTPException(status_code=422, detail="choose a JPEG, PNG or WebP image under 20 megapixels") from exc
+
+
 @app.put("/documents/{doc_id}/cover")
 async def upload_document_cover(doc_id: str, file: UploadFile = File(...)):
     await asyncio.to_thread(read_metadata, doc_id)
@@ -2775,23 +2804,7 @@ async def upload_document_cover(doc_id: str, file: UploadFile = File(...)):
     await file.close()
     if len(data) > 8 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="cover must be smaller than 8 MB")
-
-    def save():
-        from PIL import Image, ImageOps, UnidentifiedImageError
-        try:
-            with Image.open(io.BytesIO(data)) as image:
-                if image.format not in {"JPEG", "PNG", "WEBP"} or image.width * image.height > 20_000_000:
-                    raise ValueError("unsupported or oversized image")
-                image = ImageOps.exif_transpose(image).convert("RGB")
-                image.thumbnail((600, 900))
-                THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
-                target = THUMBNAILS_DIR / f"{doc_id}-custom.jpg"
-                temporary = target.with_suffix(f".{uuid.uuid4().hex}.tmp")
-                image.save(temporary, format="JPEG", quality=85)
-                os.replace(temporary, target)
-        except (ValueError, OSError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
-            raise HTTPException(status_code=422, detail="choose a JPEG, PNG or WebP image under 20 megapixels") from exc
-    await asyncio.to_thread(save)
+    await asyncio.to_thread(_save_custom_cover, doc_id, data)
     return {"saved": True}
 
 
@@ -3089,6 +3102,35 @@ def _note_response(doc: dict) -> dict:
     }
 
 
+def _create_note_record(
+    text: str,
+    source_document_id: Optional[str],
+    source_page: Optional[int],
+    source_quote: Optional[str],
+    created_at: Optional[str] = None,
+) -> dict:
+    """Store a note as an indexed Markdown document (blocking)."""
+    doc_id = generate_id()
+    stored = DOCUMENTS_DIR / f"{doc_id}.md"
+    stored.write_text(_note_index_text(text, source_quote), encoding="utf-8")
+    stamp = utc_now()[:16].replace(":", "")
+    create_document(
+        stored,
+        f"note-{stamp}.md",
+        hashlib.sha256(stored.read_bytes()).hexdigest(),
+        doc_id=doc_id,
+        collection_id=NOTES_COLLECTION_ID,
+    )
+    changes = {"title": _note_title(text), "kind_override": "note",
+               "source_document_id": source_document_id,
+               "source_page": source_page, "source_quote": source_quote, "note_text": text}
+    if created_at:
+        changes["uploaded_at"] = created_at
+    STORE.update(doc_id, changes)
+    enqueue_index(IndexTask(doc_id))
+    return _note_response(read_metadata(doc_id))
+
+
 @app.post("/notes", status_code=201)
 async def create_note(body: NoteBody):
     """Jot a note. It is saved as a Markdown file in the app's own data (never
@@ -3107,25 +3149,9 @@ async def create_note(body: NoteBody):
     elif body.source_page or body.source_quote:
         raise HTTPException(status_code=422, detail="a source document is required")
 
-    def create() -> dict:
-        doc_id = generate_id()
-        stored = DOCUMENTS_DIR / f"{doc_id}.md"
-        stored.write_text(_note_index_text(text, body.source_quote), encoding="utf-8")
-        stamp = utc_now()[:16].replace(":", "")
-        create_document(
-            stored,
-            f"note-{stamp}.md",
-            hashlib.sha256(stored.read_bytes()).hexdigest(),
-            doc_id=doc_id,
-            collection_id=NOTES_COLLECTION_ID,
-        )
-        STORE.update(doc_id, {"title": _note_title(text), "kind_override": "note",
-                              "source_document_id": body.source_document_id,
-                              "source_page": body.source_page, "source_quote": body.source_quote, "note_text": text})
-        enqueue_index(IndexTask(doc_id))
-        return _note_response(read_metadata(doc_id))
-
-    return await asyncio.to_thread(create)
+    return await asyncio.to_thread(
+        _create_note_record, text, body.source_document_id, body.source_page, body.source_quote
+    )
 
 
 @app.get("/notes")
@@ -3239,6 +3265,370 @@ async def delete_vocabulary(word_id: str):
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="vocabulary entry not found") from exc
     return {"ok": True}
+
+
+# ------------------------------------------------------------ catalogue --
+
+# What a catalogue match may fill in. Reviews, ratings, notes and reading
+# state are the reader's own and can never be written from a provider.
+CATALOGUE_FIELDS = frozenset({
+    "title", "subtitle", "author", "publisher", "published_year", "page_count",
+    "language", "genres", "isbn_10", "isbn_13", "subject", "description",
+})
+
+
+def _catalogue_call(function, *args):
+    try:
+        return function(*args)
+    except catalogue.CatalogueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/catalogue/search")
+async def catalogue_search(q: str = Query(min_length=2, max_length=200), limit: int = Query(default=8, ge=1, le=15)):
+    return {"results": await asyncio.to_thread(_catalogue_call, catalogue.search, q, limit)}
+
+
+@app.get("/catalogue/isbn/{isbn}")
+async def catalogue_isbn(isbn: str):
+    digits = re.sub(r"[-\s]", "", isbn)
+    try:
+        normalized = _normalized_isbn(digits, 13 if len(digits) == 13 else 10)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if normalized is None:
+        raise HTTPException(status_code=422, detail="enter an ISBN")
+    return {"results": await asyncio.to_thread(_catalogue_call, catalogue.by_isbn, normalized)}
+
+
+def _normalised_cover_jpeg(data: bytes) -> bytes:
+    from PIL import Image, ImageOps, UnidentifiedImageError
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            if image.format not in {"JPEG", "PNG", "WEBP"} or image.width * image.height > 20_000_000:
+                raise ValueError("unsupported or oversized image")
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            image.thumbnail((600, 900))
+            out = io.BytesIO()
+            image.save(out, format="JPEG", quality=85)
+            return out.getvalue()
+    except (ValueError, OSError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
+        raise HTTPException(status_code=502, detail="the catalogue sent an unusable cover") from exc
+
+
+@app.get("/catalogue/cover")
+async def catalogue_cover(id: str = Query(pattern=r"^\d{1,12}$")):
+    """A catalogue cover, fetched and re-encoded here so the browser never
+    talks to a third-party image host."""
+    def fetch() -> bytes:
+        return _normalised_cover_jpeg(_catalogue_call(catalogue.fetch_cover, id))
+    return Response(content=await asyncio.to_thread(fetch), media_type="image/jpeg",
+                    headers={"Cache-Control": "private, max-age=86400"})
+
+
+class CatalogueApply(BaseModel):
+    """The fields the reader ticked, and optionally the cover to keep."""
+    fields: DocumentPatch = Field(default_factory=DocumentPatch)
+    cover_id: Optional[str] = Field(default=None, pattern=r"^\d{1,12}$")
+    provider_id: Optional[str] = Field(default=None, max_length=64)
+
+
+@app.post("/documents/{doc_id}/metadata-apply")
+async def apply_catalogue_metadata(doc_id: str, body: CatalogueApply):
+    """Apply only what the reader selected from a catalogue match."""
+    await asyncio.to_thread(read_metadata, doc_id)
+    extra = body.fields.model_fields_set - CATALOGUE_FIELDS
+    if extra:
+        raise HTTPException(status_code=422, detail=f"catalogue matches cannot change: {', '.join(sorted(extra))}")
+    cover = None
+    if body.cover_id:
+        cover = await asyncio.to_thread(
+            lambda: _normalised_cover_jpeg(_catalogue_call(catalogue.fetch_cover, body.cover_id))
+        )
+    updated = await patch_document(doc_id, body.fields) if body.fields.model_fields_set else await asyncio.to_thread(read_metadata, doc_id)
+    if body.fields.model_fields_set:
+        updated = await asyncio.to_thread(
+            STORE.update, doc_id, {"metadata_source": "Open Library", "metadata_source_id": body.provider_id}
+        )
+    if cover:
+        await asyncio.to_thread(_save_custom_cover, doc_id, cover)
+    return updated
+
+
+# ------------------------------------------------------ export and import --
+
+APP_VERSION = "0.3.0"
+IMPORT_LIMIT_BYTES = portability.MAX_ARCHIVE_BYTES
+# Fields restored onto a book that already exists. They are filled in when the
+# local value is empty and replaced only when the reader asks for it.
+IMPORT_BOOK_FIELDS = (
+    "title", "subtitle", "author", "subject", "description", "publisher", "published_year",
+    "page_count", "language", "isbn_10", "isbn_13", "acquisition_source", "reading_status",
+    "started_at", "finished_at", "current_page", "reading_progress", "last_read_at",
+    "rating", "review", "shelf", "owned", "kind_override", "metadata_source", "metadata_source_id",
+)
+# For these the app guesses a value itself, so an untouched guess is not
+# something the reader chose and may be overwritten by their saved correction.
+IMPORT_GUESSED_FIELDS = frozenset({"title", "author", "subject"})
+
+
+def _export_archive(destination: Path) -> dict:
+    documents = list_metadata()
+    books = [portability.book_record(doc) for doc in documents if doc.get("collection_id") != NOTES_COLLECTION_ID]
+    notes = [
+        portability.note_record(doc, _note_response(doc)["text"])
+        for doc in documents
+        if doc.get("collection_id") == NOTES_COLLECTION_ID
+    ]
+    covers = [
+        (doc["document_id"], THUMBNAILS_DIR / f"{doc['document_id']}-custom.jpg")
+        for doc in documents
+        if doc.get("collection_id") != NOTES_COLLECTION_ID and (THUMBNAILS_DIR / f"{doc['document_id']}-custom.jpg").exists()
+    ]
+    return portability.build_archive(
+        destination, books=books, notes=notes, vocabulary=STORE.list_vocabulary(), covers=covers,
+        app_version=APP_VERSION, created_at=utc_now(), timezone_name=time.tzname[0],
+    )
+
+
+@app.get("/export")
+async def export_library():
+    """Download everything the reader created as one ZIP archive."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(dir=DATA_DIR, prefix="export-", suffix=".zip", delete=False)
+    handle.close()
+    path = Path(handle.name)
+    try:
+        await asyncio.to_thread(_export_archive, path)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    name = f"ai-librarian-export-{datetime.now(timezone.utc).date().isoformat()}.zip"
+    return FileResponse(path, media_type="application/zip", filename=name,
+                        background=BackgroundTask(path.unlink, missing_ok=True))
+
+
+def _import_changes(record: dict, local: Optional[dict], replace: bool) -> tuple:
+    """(changes to apply, number of fields kept because the reader already set them)."""
+    changes: dict = {}
+    kept = 0
+    for field in IMPORT_BOOK_FIELDS:
+        value = record.get(field)
+        if value is None or value == "":
+            continue
+        current = local.get(field) if local else None
+        unset = current in (None, "") or (field == "reading_status" and current == "to_read") \
+            or (field in IMPORT_GUESSED_FIELDS and not local.get("metadata_edited"))
+        if unset or replace:
+            if current != value:
+                changes[field] = value
+        elif current != value:
+            kept += 1
+    genres = record.get("genres")
+    if genres and isinstance(genres, list) and (replace or not (local or {}).get("genres_json")):
+        encoded = json.dumps([str(item) for item in genres[:20]], ensure_ascii=False)
+        if encoded != (local or {}).get("genres_json"):
+            changes["genres_json"] = encoded
+    if changes.keys() & {"title", "author", "subject", "subtitle", "description", "genres_json", "publisher"}:
+        changes["metadata_edited"] = 1
+    status = changes.get("reading_status", (local or {}).get("reading_status"))
+    finished = changes.get("finished_at", (local or {}).get("finished_at"))
+    if "reading_status" in changes or "finished_at" in changes:
+        changes["read_at"] = f"{finished}T00:00:00Z" if status == "read" and finished else None
+    return changes, kept
+
+
+def _validated_book_record(record: dict) -> dict:
+    """Run an imported book through the same validation as the editor."""
+    allowed = {key: record[key] for key in (
+        "title", "author", "subject", "subtitle", "description", "publisher", "published_year",
+        "page_count", "language", "isbn_10", "isbn_13", "acquisition_source", "reading_status",
+        "started_at", "finished_at", "current_page", "reading_progress", "rating", "review",
+        "genres", "owned",
+    ) if record.get(key) not in (None, "")}
+    DocumentPatch(**allowed)  # raises ValidationError on a bad value
+    for key in ("started_at", "finished_at"):
+        if key in allowed:
+            date.fromisoformat(str(allowed[key])[:10])
+    return record
+
+
+def _import_archive(archive: "portability.Archive", dry_run: bool, replace: bool) -> dict:
+    documents = list_metadata()
+    by_id = {doc["document_id"]: doc for doc in documents}
+    by_hash = {
+        doc["content_sha256"]: doc for doc in documents
+        if doc.get("record_type") != "standalone" and doc.get("collection_id") != NOTES_COLLECTION_ID
+    }
+    report = {
+        "dry_run": dry_run,
+        "books": {"created": 0, "updated": 0, "unchanged": 0, "skipped": 0, "kept_existing_values": 0},
+        "notes": {"created": 0, "unchanged": 0, "skipped": 0},
+        "vocabulary": {"created": 0, "unchanged": 0},
+        "covers": {"restored": 0},
+        "problems": [],
+        "archive": {"created_at": archive.manifest.get("created_at"), "app_version": archive.manifest.get("app_version"),
+                    "counts": archive.manifest.get("counts")},
+    }
+
+    def problem(message: str) -> None:
+        if len(report["problems"]) < 50:
+            report["problems"].append(message)
+
+    id_map: dict = {}
+    for record in archive.books():
+        label = record.get("title") or record.get("filename") or record.get("document_id") or "a book"
+        try:
+            _validated_book_record(record)
+        except (ValidationError, ValueError, TypeError) as exc:
+            report["books"]["skipped"] += 1
+            problem(f"{label}: skipped, a saved value is invalid ({str(exc).splitlines()[0][:100]})")
+            continue
+        source_id = record.get("document_id")
+        local = None
+        if record.get("record_type") == "standalone":
+            candidate = by_id.get(source_id)
+            local = candidate if candidate and candidate.get("record_type") == "standalone" else None
+        else:
+            local = by_hash.get(record.get("content_sha256"))
+            if local is None:
+                report["books"]["skipped"] += 1
+                problem(f"{label}: skipped, its file is not in this library yet (scan your library, then import again)")
+                continue
+        changes, kept = _import_changes(record, local, replace)
+        report["books"]["kept_existing_values"] += kept
+        if local is None:
+            report["books"]["created"] += 1
+            title = (record.get("title") or record.get("filename") or "Untitled").strip()[:300]
+            new_id = source_id if source_id and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", source_id) and source_id not in by_id else secrets.token_hex(6)
+            id_map[source_id] = new_id
+            if not dry_run:
+                created = _new_standalone_record(new_id, title, None)
+                changes.pop("title", None)
+                STORE.create(created)
+                if changes:
+                    STORE.update(new_id, changes)
+                if changes.get("author") or changes.get("subject"):
+                    STORE.update(new_id, {"shelf_suggested": shelves.suggest_shelf(
+                        "book", changes.get("subject"), changes.get("author"))})
+                by_id[new_id] = created
+            target_id = new_id
+        else:
+            id_map[source_id] = local["document_id"]
+            target_id = local["document_id"]
+            if changes:
+                report["books"]["updated"] += 1
+                if not dry_run:
+                    STORE.update(target_id, changes)
+                    if {"author", "subject"} & changes.keys():
+                        merged = {**local, **changes}
+                        STORE.update(target_id, {"shelf_suggested": shelves.suggest_shelf(
+                            merged.get("kind_override") or merged.get("kind"), merged.get("subject"), merged.get("author"))})
+            else:
+                report["books"]["unchanged"] += 1
+        cover = archive.cover(source_id) if source_id else None
+        if cover and (replace or not (THUMBNAILS_DIR / f"{target_id}-custom.jpg").exists()):
+            try:
+                _normalised_cover_jpeg(cover)
+                report["covers"]["restored"] += 1
+                if not dry_run:
+                    _save_custom_cover(target_id, cover)
+            except HTTPException:
+                problem(f"{label}: its saved cover could not be read")
+
+    existing_notes = {
+        (doc.get("source_document_id"), doc.get("note_text"))
+        for doc in documents if doc.get("collection_id") == NOTES_COLLECTION_ID
+    }
+    for note in archive.notes():
+        text = (note.get("text") or "").strip() if isinstance(note.get("text"), str) else ""
+        source = note.get("source_document_id")
+        if not text or len(text) > 20_000:
+            report["notes"]["skipped"] += 1
+            problem("A note was skipped because its text was empty or too long")
+            continue
+        if source:
+            source = id_map.get(source) or (source if source in by_id else None)
+            if source is None:
+                report["notes"]["skipped"] += 1
+                problem(f"A note was skipped because its book ({note.get('source_document_id')}) is not in this library")
+                continue
+        page = note.get("source_page") if isinstance(note.get("source_page"), int) and note.get("source_page") >= 1 else None
+        quote = note.get("source_quote") if isinstance(note.get("source_quote"), str) else None
+        if (source, text) in existing_notes:
+            report["notes"]["unchanged"] += 1
+            continue
+        existing_notes.add((source, text))
+        report["notes"]["created"] += 1
+        if not dry_run:
+            _create_note_record(text, source, page if source else None, quote if source else None,
+                                note.get("created_at") if isinstance(note.get("created_at"), str) else None)
+
+    known_words = {
+        (item["normalized_word"], item.get("document_id"), item["definition"]) for item in STORE.list_vocabulary()
+    }
+    for item in archive.vocabulary():
+        word = " ".join(str(item.get("word") or "").split())[:120]
+        definition = str(item.get("definition") or "").strip()[:4000]
+        if not word or not definition:
+            continue
+        linked = item.get("document_id")
+        linked = (id_map.get(linked) or (linked if linked in by_id else None)) if linked else None
+        key = (word.casefold(), linked, definition)
+        if key in known_words:
+            report["vocabulary"]["unchanged"] += 1
+            continue
+        known_words.add(key)
+        report["vocabulary"]["created"] += 1
+        if not dry_run:
+            now = utc_now()
+            page = item.get("source_page") if isinstance(item.get("source_page"), int) and item.get("source_page") >= 1 else None
+            STORE.create_vocabulary({
+                "word_id": generate_id(), "word": word, "normalized_word": word.casefold(),
+                "definition": definition,
+                "part_of_speech": str(item.get("part_of_speech") or "")[:80] or None,
+                "example": str(item.get("example") or "")[:2000] or None,
+                "document_id": linked, "source_page": page if linked else None,
+                "source_quote": (str(item.get("source_quote") or "")[:4000] or None) if linked else None,
+                "definition_source": str(item.get("definition_source") or "manual")[:40],
+                "created_at": str(item.get("created_at") or now), "updated_at": now,
+            })
+    return report
+
+
+@app.post("/import")
+async def import_library(
+    file: UploadFile = File(...),
+    dry_run: bool = Query(default=True),
+    conflict: str = Query(default="keep", pattern="^(keep|replace)$"),
+):
+    """Check (dry_run, the default) or apply an export archive.
+
+    Books are matched by content hash, so run a library scan first. Existing
+    values are kept unless conflict=replace; nothing is ever deleted."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(dir=DATA_DIR, prefix="import-", suffix=".zip", delete=False)
+    path = Path(handle.name)
+    try:
+        size = 0
+        with handle:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > IMPORT_LIMIT_BYTES:
+                    raise HTTPException(status_code=413, detail="this archive is too large to import")
+                handle.write(chunk)
+        await file.close()
+
+        def run() -> dict:
+            try:
+                with portability.Archive(path) as archive:
+                    return _import_archive(archive, dry_run, conflict == "replace")
+            except portability.ArchiveError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        return await asyncio.to_thread(run)
+    finally:
+        path.unlink(missing_ok=True)
 
 
 @app.post("/shelves/accept")

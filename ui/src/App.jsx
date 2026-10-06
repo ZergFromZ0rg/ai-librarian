@@ -926,6 +926,8 @@ export default function App() {
             </button>
             {settingsOpen && (
               <Settings
+                apiBase={API_BASE}
+                onLibraryChanged={async () => { await refreshDocuments(); window.dispatchEvent(new Event("book-cover-changed")); }}
                 theme={theme}
                 onThemeChange={setTheme}
                 apiKeys={apiKeys}
