@@ -5787,3 +5787,60 @@ main {
   .diary-month h3 { flex-wrap: wrap; gap: 2px 12px; }
   .book-star { font-size: 34px; }
 }
+
+/* ------------------------------------- compact book page (one screen) -- */
+.book-field-trio { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+.book-title-pair { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); }
+@media (max-width: 760px) {
+  .book-field-trio, .book-title-pair { grid-template-columns: minmax(0, 1fr); gap: 0; }
+}
+@media (min-width: 1050px) {
+  .book-page { padding-top: 16px; padding-bottom: 80px; }
+  .book-page-nav { padding-bottom: 10px; margin-bottom: 14px; }
+  .book-overview { margin-bottom: 14px; }
+  .book-overview h1 { font-size: clamp(24px, 2.6vw, 34px); margin: 4px 0; }
+  .book-overview p { font-size: 15px; }
+  .book-management { gap: 24px; }
+  .book-cover-panel { gap: 8px; }
+  .book-cover-drop { min-height: 236px; padding: 10px; }
+  .book-cover-drop img { height: 214px; }
+  .book-cover-help { margin: 0; font-size: 10px; }
+  .book-file-card { margin-top: 4px; padding-top: 12px; }
+  .book-file-card > div { margin-top: 8px; }
+  .book-file-card p { margin: 6px 0; }
+  .book-editor-fields { gap: 12px; }
+  .book-editor-card { padding: 16px 18px; }
+  .book-card-heading { margin-bottom: 12px; }
+  .book-card-heading h2 { font-size: 14px; }
+  .book-field { gap: 4px; margin-bottom: 10px; }
+  .book-field .input { height: 34px; padding: 6px 10px; font-size: 13px; }
+  .book-title-field .input { font-size: 14px; }
+  .book-field .book-description { min-height: 54px; }
+  .book-field-pair, .book-field-trio { gap: 12px; }
+  .book-status-fields { padding-top: 10px; margin-top: 4px; gap: 12px; }
+  .book-status-fields legend { margin-bottom: 5px; }
+  .book-segments label { line-height: 26px; }
+  .book-reading-dates { margin-top: 10px; }
+  .book-check { margin-top: 8px; }
+  .book-publication { margin-top: 10px; padding-top: 10px; }
+  .book-publication-fields { margin-top: 12px; }
+  /* The lookup card shrinks to a slim bar. */
+  .book-lookup-card:not(.open) { padding: 8px 16px; }
+  .book-lookup-card:not(.open) .book-card-heading { margin-bottom: 0; }
+  .book-lookup-card:not(.open) > p.muted { display: none; }
+  /* The review column: stars and heart, then a textarea that fills the rest. */
+  .book-review-card { display: flex; flex-direction: column; }
+  .book-review-card > .book-field { display: flex; flex-direction: column; flex: 1; min-height: 0; margin-bottom: 0; }
+  .book-review-card > .book-field textarea.input { flex: 1; min-height: 120px; height: auto; }
+  .book-review-card .book-rating { margin: -4px 0 8px; }
+  .book-star { font-size: 30px; }
+  .book-rating-caption { min-height: 20px; }
+  .like-button { margin-top: 0; padding: 5px 12px; }
+  .book-review-hint { margin-top: 8px; font-size: 10px; line-height: 1.5; }
+  .book-editor-footer { margin-top: 12px; padding-top: 8px; padding-bottom: 8px; }
+}
+@media (min-width: 1050px) and (max-height: 760px) {
+  .book-cover-drop { min-height: 190px; }
+  .book-cover-drop img { height: 168px; }
+  .book-review-hint { display: none; }
+}
