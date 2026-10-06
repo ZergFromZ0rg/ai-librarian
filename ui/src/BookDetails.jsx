@@ -3,9 +3,9 @@ import { applyBody, matchRows } from "./catalogueMatch.js";
 import { clothColor } from "./clothCovers.js";
 import { DOC_TYPES, TYPE_LABEL, isWorkDocument } from "./documentsLibrary.js";
 import LookupPanel from "./LookupPanel.jsx";
+import StarRating, { LikeButton } from "./StarRating.jsx";
 import { displayTitle } from "./storage.js";
 
-const labels = ["Not for me", "It was okay", "I liked it", "Really good", "A favourite"];
 const today = () => {
   const now = new Date();
   const pad = (value) => String(value).padStart(2, "0");
@@ -25,6 +25,7 @@ function values(doc) {
     publisher: doc.publisher || "", published_year: doc.published_year == null ? "" : String(doc.published_year),
     page_count: doc.page_count == null ? "" : String(doc.page_count), language: doc.language || "",
     isbn_10: doc.isbn_10 || "", isbn_13: doc.isbn_13 || "", rating: doc.rating || null, review: doc.review || "",
+    liked: Boolean(doc.liked), review_spoiler: Boolean(doc.review_spoiler), reread: Boolean(doc.reread),
   };
 }
 
@@ -32,26 +33,6 @@ function apiValue(key, value) {
   if (key === "genres") return value.split(",").map((item) => item.trim()).filter(Boolean);
   if (["published_year", "page_count"].includes(key)) return value === "" ? null : Number(value);
   return value;
-}
-
-export function StarRating({ value, onChange, disabled }) {
-  const [hover, setHover] = useState(null);
-  return <div className="book-rating">
-    <div className="book-stars" role="radiogroup" aria-label="Your rating" onMouseLeave={() => setHover(null)}>
-      {[1, 2, 3, 4, 5].map((star) => <button key={star} type="button" role="radio" aria-checked={value === star} aria-label={`${star} ${star === 1 ? "star" : "stars"}`} tabIndex={value === star || (!value && star === 1) ? 0 : -1} disabled={disabled}
-        className={(hover ?? value ?? 0) >= star ? "filled" : ""}
-        onMouseEnter={() => setHover(star)} onFocus={() => setHover(null)} onClick={() => onChange(star)}
-        onKeyDown={(event) => {
-          let next;
-          if (["ArrowRight", "ArrowDown"].includes(event.key)) next = star === 5 ? 1 : star + 1;
-          if (["ArrowLeft", "ArrowUp"].includes(event.key)) next = star === 1 ? 5 : star - 1;
-          if (event.key === "Home") next = 1;
-          if (event.key === "End") next = 5;
-          if (next) { event.preventDefault(); onChange(next); event.currentTarget.parentElement.children[next - 1].focus(); }
-        }}><span aria-hidden="true">★</span></button>)}
-    </div>
-    <div className="book-rating-caption"><span>{value ? `${value}/5 · ${labels[value - 1]}` : "Not rated yet"}</span>{value && <button type="button" className="text-button" disabled={disabled} onClick={() => onChange(null)}>Clear rating</button>}</div>
-  </div>;
 }
 
 export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCoverChanged }) {
@@ -205,6 +186,7 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
             <fieldset className="book-reading-status"><legend>Reading status</legend><div className="book-segments">{[["to_read", "To read"], ["reading", "Reading"], ["read", "Read"], ["abandoned", "Abandoned"]].map(([value, label]) => <label className={fields.reading_status === value ? "selected" : ""} key={value}><input type="radio" name="book-reading-status" checked={fields.reading_status === value} onChange={() => setReadingStatus(value)} />{label}</label>)}</div></fieldset>
           </div>
           {fields.reading_status !== "to_read" && <div className="book-field-pair book-reading-dates"><label className="book-field">Started<input className="input" type="date" value={fields.started_at} max={fields.finished_at || undefined} onChange={(event) => set("started_at", event.target.value)} /></label>{fields.reading_status === "read" && <label className="book-field">Finished<input className="input" type="date" value={fields.finished_at} min={fields.started_at || undefined} onChange={(event) => set("finished_at", event.target.value)} /></label>}</div>}
+          {fields.reading_status === "read" && <label className="book-check"><input type="checkbox" checked={fields.reread} onChange={(event) => set("reread", event.target.checked)} />I've read this book before <small>(shown as a re-read in your diary)</small></label>}
           <details className="book-publication">
             <summary>Publication details</summary>
             <div className="book-publication-fields">
@@ -217,8 +199,9 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
         </section>
         <section className="book-editor-card book-review-card" aria-labelledby="review-heading">
           <div className="book-card-heading"><h2 id="review-heading">{work ? "Summary & takeaways" : "Your review"}</h2><span className="muted">{work ? "For your own reference" : "Just for you"}</span></div>
-          {!work && <StarRating value={fields.rating} onChange={(value) => set("rating", value)} disabled={saving} />}
+          {!work && <div className="book-rating-row"><StarRating value={fields.rating} onChange={(value) => set("rating", value)} disabled={saving} /><LikeButton liked={fields.liked} onChange={(value) => set("liked", value)} disabled={saving} /></div>}
           <label className="book-field">{work ? "Key points" : "What did you think?"}<textarea className="input" rows={work ? 6 : 4} maxLength={20000} value={fields.review} onChange={(event) => set("review", event.target.value)} placeholder={work ? "What is this about, and what matters in it? What did you conclude or need to act on?" : "What stayed with you? Who would you recommend it to?"} /></label>
+          {!work && <label className="book-check"><input type="checkbox" checked={fields.review_spoiler} onChange={(event) => set("review_spoiler", event.target.checked)} />This review contains spoilers <small>(hidden until you choose to show it)</small></label>}
           <p className="book-review-hint">{work ? "A short summary you can find again. Keep quoted passages and detailed thoughts in the notes below." : "Your overall impression lives here. Keep passages and detailed thoughts in the notes below."}</p>
         </section>
       </fieldset>

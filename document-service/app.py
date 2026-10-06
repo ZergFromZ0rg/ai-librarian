@@ -505,8 +505,12 @@ def _normalized_isbn(value: Optional[str], length: int) -> Optional[str]:
 
 
 class DocumentPatch(BaseModel):
-    rating: Optional[int] = Field(default=None, ge=1, le=5, strict=True)
+    # Half-star steps, 0.5 to 5, like Letterboxd. Whole numbers stay integers.
+    rating: Optional[float] = Field(default=None, ge=0.5, le=5, strict=True)
     review: Optional[str] = Field(default=None, max_length=20_000)
+    liked: Optional[bool] = None
+    review_spoiler: Optional[bool] = None
+    reread: Optional[bool] = None
     title: Optional[str] = Field(default=None, max_length=300)
     author: Optional[str] = Field(default=None, max_length=240)
     subject: Optional[str] = Field(default=None, max_length=240)
@@ -537,6 +541,15 @@ class DocumentPatch(BaseModel):
     doc_type: Optional[str] = Field(default=None, pattern=r"^(auto|paper|report|manual|slides|data|writing|legal|other)$")
     # "Books/Philosophy/Albert Camus"; null or "" goes back to the suggestion.
     shelf: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator("rating")
+    @classmethod
+    def validate_half_star(cls, value):
+        if value is None:
+            return None
+        if value * 2 != int(value * 2):
+            raise ValueError("rating must be a whole or half star")
+        return int(value) if value == int(value) else value
 
     @field_validator("isbn_10", mode="before")
     @classmethod
@@ -3099,6 +3112,9 @@ async def patch_document(doc_id: str, patch: DocumentPatch):
         changes["rating"] = patch.rating
     if "review" in sent:
         changes["review"] = (patch.review or "").strip() or None
+    for flag in ("liked", "review_spoiler", "reread"):
+        if flag in sent:
+            changes[flag] = None if getattr(patch, flag) is None else int(getattr(patch, flag))
     text_fields = (
         "title",
         "author",
@@ -4018,7 +4034,8 @@ IMPORT_BOOK_FIELDS = (
     "title", "subtitle", "author", "subject", "description", "publisher", "published_year",
     "page_count", "language", "isbn_10", "isbn_13", "acquisition_source", "reading_status",
     "started_at", "finished_at", "current_page", "reading_progress", "last_read_at",
-    "rating", "review", "shelf", "owned", "kind_override", "metadata_source", "metadata_source_id",
+    "rating", "review", "liked", "review_spoiler", "reread", "shelf", "owned", "kind_override",
+    "metadata_source", "metadata_source_id",
 )
 # For these the app guesses a value itself, so an untouched guess is not
 # something the reader chose and may be overwritten by their saved correction.
@@ -4097,7 +4114,7 @@ def _validated_book_record(record: dict) -> dict:
         "title", "author", "subject", "subtitle", "description", "publisher", "published_year",
         "page_count", "language", "isbn_10", "isbn_13", "acquisition_source", "reading_status",
         "started_at", "finished_at", "current_page", "reading_progress", "rating", "review",
-        "genres", "owned",
+        "liked", "review_spoiler", "reread", "genres", "owned",
     ) if record.get(key) not in (None, "")}
     DocumentPatch(**allowed)  # raises ValidationError on a bad value
     for key in ("started_at", "finished_at"):

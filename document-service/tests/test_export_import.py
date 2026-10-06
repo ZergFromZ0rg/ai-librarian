@@ -25,8 +25,8 @@ def seed(client):
     """A source book with a review, a catalogue book with a cover, a note and a word."""
     source = upload(client)["document_id"]
     assert client.patch(f"/documents/{source}", json={
-        "title": "My Camus", "author": "Albert Camus", "rating": 5, "review": "Stayed with me.",
-        "reading_status": "read", "finished_at": "2026-03-04", "genres": ["Philosophy"],
+        "title": "My Camus", "author": "Albert Camus", "rating": 4.5, "review": "Stayed with me.",
+        "liked": True, "review_spoiler": True, "reread": True, "reading_status": "read", "finished_at": "2026-03-04", "genres": ["Philosophy"],
     }).status_code == 200
     book = client.post("/owned-books", json={"title": "Paper Book", "author": "Someone"}).json()["book"]["document_id"]
     client.patch(f"/documents/{book}", json={"rating": 3, "review": "Fine.", "page_count": 210, "isbn_13": "9780679720201"})
@@ -54,6 +54,7 @@ def wipe_reader_data(module, client, source, book, note, word):
     client.delete(f"/vocabulary/{word['word_id']}")
     module.STORE.update(source, {"rating": None, "review": None, "reading_status": None, "finished_at": None,
                                  "read_at": None, "genres_json": None, "title": "original", "author": None,
+                                 "liked": None, "review_spoiler": None, "reread": None,
                                  "metadata_edited": 0})
 
 
@@ -91,7 +92,8 @@ def test_round_trip_restores_everything_into_a_library_that_lost_it(service):
     assert report["books"]["created"] == 1 and report["books"]["updated"] == 1 and report["problems"] == []
 
     restored_source = client.get(f"/documents/{source}").json()
-    assert (restored_source["title"], restored_source["author"], restored_source["rating"]) == ("My Camus", "Albert Camus", 5)
+    assert (restored_source["title"], restored_source["author"], restored_source["rating"]) == ("My Camus", "Albert Camus", 4.5)
+    assert (restored_source["liked"], restored_source["review_spoiler"], restored_source["reread"]) == (1, 1, 1)
     assert restored_source["review"] == "Stayed with me." and restored_source["reading_status"] == "read"
     assert restored_source["finished_at"] == "2026-03-04" and restored_source["read_at"] == "2026-03-04T00:00:00Z"
     assert restored_source["genres_json"] == '["Philosophy"]'

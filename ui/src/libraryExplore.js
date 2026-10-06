@@ -2,7 +2,7 @@ import { displayTitle, readingStatus } from "./storage.js";
 
 export const EMPTY_FILTERS = Object.freeze({
   query: "", status: "all", ownership: "all", rating: "all", format: "all",
-  collection: "all", genre: "all", author: "all", acquisition: "all", finishedYear: "all", indexing: "all", notes: "all",
+  collection: "all", genre: "all", author: "all", acquisition: "all", finishedYear: "all", indexing: "all", notes: "all", liked: "all",
   sort: "title", order: "default",
 });
 
@@ -54,6 +54,7 @@ export function filterLibrary(documents, filters = EMPTY_FILTERS, noteText = new
     if (f.ownership !== "all" && (f.ownership === "owned") !== Boolean(doc.owned)) return false;
     if (f.rating === "rated" && !doc.rating) return false;
     if (!["all", "rated"].includes(f.rating) && Number(doc.rating || 0) !== Number(f.rating)) return false;
+    if (f.liked === "liked" && !doc.liked) return false;
     if (f.format !== "all" && formatOf(doc) !== f.format) return false;
     if (f.collection !== "all" && (doc.collection_id || "legacy-root") !== f.collection) return false;
     if (f.genre !== "all" && !genresFor(doc).some((genre) => genre.toLocaleLowerCase() === f.genre.toLocaleLowerCase())) return false;
@@ -88,7 +89,8 @@ export function filterLabels(filters, collections = []) {
   if (f.query.trim()) out.push(`“${f.query.trim()}”`);
   if (f.status !== "all") out.push(label("Status", { to_read: "To read", reading: "Reading", read: "Read", abandoned: "Abandoned" }[f.status] || f.status));
   if (f.ownership !== "all") out.push(f.ownership === "owned" ? "Owned" : "Not owned");
-  if (f.rating !== "all") out.push(f.rating === "rated" ? "Rated" : `${f.rating} stars`);
+  if (f.rating !== "all") out.push(f.rating === "rated" ? "Rated" : `${f.rating} ${Number(f.rating) === 1 ? "star" : "stars"}`);
+  if (f.liked === "liked") out.push("Liked");
   if (f.format !== "all") out.push(label("Format", f.format));
   if (f.collection !== "all") out.push(label("Collection", collections.find((item) => item.id === f.collection)?.name || f.collection));
   if (f.genre !== "all") out.push(label("Genre", f.genre));
@@ -105,10 +107,10 @@ export function filterLabels(filters, collections = []) {
 // anything else on the address.
 const PARAMS = {
   query: "q", status: "status", ownership: "own", rating: "rating", format: "format", collection: "coll",
-  genre: "genre", author: "author", acquisition: "acq", finishedYear: "year", indexing: "index", notes: "notes",
+  genre: "genre", author: "author", acquisition: "acq", finishedYear: "year", indexing: "index", notes: "notes", liked: "liked",
   sort: "sort", order: "order",
 };
-export const LAYOUTS = ["list", "ledger"];
+export const LAYOUTS = ["list", "ledger", "diary"];
 const PREFIX = "lib.";
 
 export function viewToParams(filters, layout = "list") {

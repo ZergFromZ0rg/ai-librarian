@@ -69,6 +69,11 @@ COLUMNS = (
     "note_text",
     "rating",
     "review",
+    # Letterboxd-style marks: a heart, "review contains spoilers", and
+    # "I've read this before".
+    "liked",
+    "review_spoiler",
+    "reread",
     # Reader-managed catalogue metadata. Provider suggestions are applied only
     # after review; `metadata_source*` records the accepted provenance.
     "isbn_10",
@@ -147,6 +152,9 @@ CREATE TABLE IF NOT EXISTS documents (
     note_text             TEXT,
     rating                INTEGER,
     review                TEXT,
+    liked                 INTEGER,
+    review_spoiler        INTEGER,
+    reread                INTEGER,
     isbn_10               TEXT,
     isbn_13               TEXT,
     subtitle              TEXT,
@@ -273,6 +281,9 @@ class MetadataStore:
             ("note_text", "TEXT"),
             ("rating", "INTEGER"),
             ("review", "TEXT"),
+            ("liked", "INTEGER"),
+            ("review_spoiler", "INTEGER"),
+            ("reread", "INTEGER"),
             ("isbn_10", "TEXT"),
             ("isbn_13", "TEXT"),
             ("subtitle", "TEXT"),

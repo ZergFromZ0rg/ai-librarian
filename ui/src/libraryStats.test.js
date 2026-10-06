@@ -11,3 +11,19 @@ it("summarizes finished pages, ratings, and breakdowns", () => {
   expect(stats.genres[0]).toEqual({ label: "Essay", value: 2 });
   expect(stats.years).toEqual([{ label: "2025", value: 1 }]);
 });
+
+it("builds a half-star histogram and the Letterboxd-style counts", () => {
+  const stats = libraryStats([
+    { document_id: "a", kind: "book", reading_status: "read", rating: 4.5, liked: 1, finished_at: "2025-03-09" },
+    { document_id: "b", kind: "book", reading_status: "read", rating: 4.5, reread: 1, review: "Great", finished_at: "2025-03-20" },
+    { document_id: "c", kind: "book", reading_status: "read", rating: 2, finished_at: "2024-12-31" },
+    { document_id: "d", kind: "book", reading_status: "reading", rating: 5 },
+  ], new Date("2025-06-01T00:00:00Z"));
+  expect(stats.ratings).toHaveLength(10);
+  expect(stats.ratings.find((row) => row.rating === 4.5).value).toBe(2);
+  expect(stats.ratings.find((row) => row.rating === 0.5).value).toBe(0);
+  expect(stats).toMatchObject({ liked: 1, reread: 1, reviewed: 1, year: 2025 });
+  expect(stats.months[2]).toMatchObject({ label: "Mar", value: 2 });
+  expect(stats.months.reduce((sum, row) => sum + row.value, 0)).toBe(2);
+  expect(stats.averageRating).toBe(4);
+});

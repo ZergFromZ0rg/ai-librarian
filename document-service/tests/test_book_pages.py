@@ -106,13 +106,28 @@ def test_rating_review_and_ownership_persist_and_can_be_cleared(service):
     module.suggest_document_shelf(doc["document_id"])
     assert client.get(path).json()["rating"] == 5
     assert client.get(path).json()["file_type"] == "pdf"
-    for invalid in (0, 6, 2.5, True, "5"):
+    for invalid in (0, 0.25, 6, 5.5, 2.75, True, "5"):
         assert client.patch(path, json={"rating": invalid}).status_code == 422
     assert client.patch(path, json={"review": "x" * 20001}).status_code == 422
     response = client.patch(path, json={"rating": None, "review": "", "owned": False})
     assert response.json()["rating"] is None
     assert response.json()["review"] is None
     assert response.json()["owned"] == 0
+
+
+def test_half_stars_and_letterboxd_marks(service):
+    _, client, _ = service
+    # A catalogue book needs no file, so this doesn't wait on indexing.
+    path = f"/documents/{client.post('/owned-books', json={'title': 'Dune'}).json()['book']['document_id']}"
+    for good in (0.5, 3.5, 4.0, 5):
+        saved = client.patch(path, json={"rating": good}).json()
+        assert saved["rating"] == good
+    assert isinstance(client.patch(path, json={"rating": 4.0}).json()["rating"], int)
+    saved = client.patch(path, json={"liked": True, "review_spoiler": True, "reread": True}).json()
+    assert (saved["liked"], saved["review_spoiler"], saved["reread"]) == (1, 1, 1)
+    assert saved["rating"] == 4  # untouched by flag-only patches
+    saved = client.patch(path, json={"liked": False, "reread": None}).json()
+    assert (saved["liked"], saved["review_spoiler"], saved["reread"]) == (0, 1, None)
 
 
 def test_richer_metadata_and_reading_lifecycle(service):

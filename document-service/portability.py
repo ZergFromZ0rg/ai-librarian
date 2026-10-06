@@ -25,7 +25,7 @@ BOOK_FIELDS = (
     "kind_override", "owned", "description", "publisher", "published_year", "page_count",
     "language", "isbn_10", "isbn_13", "acquisition_source", "reading_status", "started_at",
     "finished_at", "current_page", "reading_progress", "last_read_at", "rating", "review",
-    "metadata_source", "metadata_source_id",
+    "liked", "review_spoiler", "reread", "metadata_source", "metadata_source_id",
 )
 VOCABULARY_FIELDS = (
     "word_id", "word", "definition", "part_of_speech", "example", "document_id",

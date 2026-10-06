@@ -1,6 +1,7 @@
 import React from "react";
 
 import { SORTS } from "./libraryExplore.js";
+import { ratingNumber, starText } from "./ratings.js";
 import { displayTitle, readingStatus } from "./storage.js";
 
 const STATUS = { to_read: "To read", reading: "Reading", read: "Read", abandoned: "Abandoned" };
@@ -48,7 +49,7 @@ export default function LibraryLedger({ rows, filters, onSort, onOpen }) {
           <th scope="row"><button type="button" className="ledger-title" onClick={() => onOpen(doc)}>{title}</button></th>
           <td className="ledger-optional">{doc.author || <span className="muted">—</span>}</td>
           <td><span className={`ledger-status status-${readingStatus(doc)}`}>{STATUS[readingStatus(doc)] || "To read"}</span></td>
-          <td className="num">{doc.rating ? <span aria-label={`${doc.rating} out of 5`}>{"★".repeat(doc.rating)}</span> : <span className="muted">—</span>}</td>
+          <td className="num">{doc.rating ? <span aria-label={`${ratingNumber(doc.rating)} out of 5`}>{starText(doc.rating)}</span> : <span className="muted">—</span>}{doc.liked ? <span className="ledger-heart" role="img" aria-label="Liked" title="Liked">♥</span> : null}{doc.reread ? <span className="ledger-reread" role="img" aria-label="Re-read" title="Re-read">↻</span> : null}</td>
           <td className="ledger-optional">{doc.record_type === "standalone" ? "Catalogue" : (doc.file_type || "").toUpperCase() || "—"}</td>
           <td className="num ledger-optional">{doc.page_count || doc.pages || <span className="muted">—</span>}</td>
           <td className="ledger-optional">{finished || <span className="muted">—</span>}</td>

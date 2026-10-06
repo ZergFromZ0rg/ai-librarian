@@ -22,6 +22,7 @@
   --glow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 24px 60px -28px rgba(36, 72, 216, 0.35);
 
   --accent: #2448d8;
+  --star: #b87916;
   --accent-hover: #1a38b3;
   --accent-tint: rgba(36, 72, 216, 0.07);
   --accent-ring: rgba(36, 72, 216, 0.28);
@@ -74,6 +75,7 @@
     --grid: rgba(237, 237, 238, 0.04);
     --hero-bg: #0b0b0c;
     --accent: #8ab4ff;
+    --star: #e0a73c;
     --accent-hover: #adc9ff;
     --accent-tint: rgba(138, 180, 255, 0.1);
     --accent-ring: rgba(138, 180, 255, 0.32);
@@ -110,6 +112,7 @@
   --grid: rgba(237, 237, 238, 0.04);
   --hero-bg: #0b0b0c;
   --accent: #8ab4ff;
+  --star: #e0a73c;
   --accent-hover: #adc9ff;
   --accent-tint: rgba(138, 180, 255, 0.1);
   --accent-ring: rgba(138, 180, 255, 0.32);
@@ -5370,13 +5373,26 @@ main {
 .book-publication-fields { margin-top: 18px; }
 .book-metadata-source { border-left: 2px solid var(--accent-ring); color: var(--muted); font-size: 11px; line-height: 1.5; margin: 4px 0 0; padding-left: 10px; }
 .book-rating { margin: -6px 0 20px; }
-.book-stars { display: flex; gap: 5px; }
-.book-stars button { border: 0; background: transparent; font-size: 34px; padding: 0 2px; color: var(--rule-strong); line-height: 1.25; cursor: pointer; transition: color .12s, transform .12s; }
-.book-stars button.filled { color: #b87916; }
-.book-stars button:hover { transform: translateY(-1px); }
-.book-stars button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.book-rating-row { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px 24px; }
+.book-stars { display: inline-flex; gap: 2px; border-radius: 6px; cursor: pointer; touch-action: none; }
+.book-stars:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.book-stars[aria-disabled="true"] { cursor: default; opacity: .6; }
+.book-star { position: relative; display: block; width: 1em; height: 1em; font-size: 38px; line-height: 1; }
+.book-rating-small .book-star { font-size: 14px; }
+.book-star-base, .book-star-fill { position: absolute; inset: 0 auto 0 0; display: block; line-height: 1; overflow: hidden; white-space: nowrap; }
+.book-star-base { color: var(--rule-strong); }
+.book-star-fill { color: var(--star); transition: width .08s; }
 .book-rating-caption { display: flex; gap: 16px; align-items: center; min-height: 26px; color: var(--muted); font-size: 11px; }
 .book-rating-caption .text-button { font-size: 11px; }
+.like-button { display: inline-flex; align-items: center; gap: 7px; margin-top: 4px; padding: 7px 14px; border: 1px solid var(--rule-strong); border-radius: 999px; background: var(--surface); color: var(--ink-2); font-size: 12px; font-weight: 550; transition: color .12s, border-color .12s, transform .12s; }
+.like-button span { font-size: 17px; line-height: 1; }
+.like-button:hover:not(:disabled) { border-color: #d6455f; color: #d6455f; }
+.like-button.on { border-color: #d6455f; color: #d6455f; background: color-mix(in srgb, #d6455f 9%, var(--surface)); }
+.like-button:active:not(:disabled) { transform: scale(.96); }
+.like-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.book-check { display: flex; align-items: baseline; gap: 8px; margin: 12px 0 0; color: var(--ink-2); font-size: 12px; cursor: pointer; }
+.book-check input { margin: 0; accent-color: var(--accent); transform: translateY(1px); }
+.book-check small { color: var(--muted); font-size: 11px; }
 .book-review-card textarea.input { min-height: 110px; height: auto; resize: vertical; font-weight: 400; line-height: 1.6; }
 .book-review-hint { margin: 0; font-size: 11px; line-height: 1.6; color: var(--muted); }
 .book-editor-footer { position: sticky; bottom: 12px; z-index: 2; margin-top: 18px; display: flex; justify-content: space-between; align-items: center; gap: 12px; border: 1px solid var(--rule); background: var(--surface); padding: 12px 14px; border-radius: 9px; box-shadow: var(--shadow-pop); }
@@ -5707,3 +5723,67 @@ main {
 
 .lookup-best { margin-left: 8px; border-radius: 999px; background: var(--ok-tint); padding: 1px 8px; color: var(--ok); font: 600 10px var(--sans); font-style: normal; letter-spacing: 0.04em; text-transform: uppercase; vertical-align: middle; }
 .settings-check { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; }
+
+/* ---------------------------------------- ratings charts, diary, marks -- */
+.stats-wide { grid-column: 1 / -1; }
+.library-statistics > .stats-panel { width: 100%; }
+.stats-panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.stats-panel-head h3 { margin: 0; }
+.stats-panel-head .muted { font-size: 11px; }
+.histogram { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: end; gap: 10px; }
+.histogram-edge { color: var(--star); font-size: 11px; letter-spacing: 1px; padding-bottom: 4px; }
+.histogram-bars { display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px; height: 120px; align-items: end; }
+.histogram-bar { position: relative; display: flex; flex-direction: column; justify-content: flex-end; align-items: stretch; height: 100%; padding: 0; border: 0; background: transparent; }
+.histogram-bar i { display: block; border-radius: 2px 2px 0 0; background: color-mix(in srgb, var(--star) 50%, var(--surface)); transition: background .12s; }
+.histogram-bar:not(:disabled):hover i, .histogram-bar:focus-visible i { background: var(--star); }
+.histogram-bar:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.histogram-bar:disabled { cursor: default; }
+.histogram-count { align-self: center; margin-bottom: 3px; color: var(--muted); font: 10px var(--mono, monospace); min-height: 12px; }
+.histogram-average { display: grid; justify-items: center; gap: 1px; min-width: 76px; padding-left: 14px; border-left: 1px solid var(--rule); }
+.histogram-average strong { font: 34px/1 var(--serif, Georgia, serif); }
+.histogram-average span { color: var(--star); font-size: 11px; letter-spacing: 1px; }
+.histogram-average small { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .07em; }
+.columns { display: flex; align-items: stretch; gap: 6px; height: 150px; overflow-x: auto; padding-bottom: 2px; }
+.column { flex: 1 1 0; min-width: 26px; max-width: 72px; display: flex; flex-direction: column; justify-content: flex-end; align-items: stretch; padding: 0; border: 0; background: transparent; }
+.column i { display: block; border-radius: 2px 2px 0 0; background: var(--accent); opacity: .8; transition: opacity .12s; }
+.column:not(:disabled):hover i, .column:focus-visible i { opacity: 1; }
+.column:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.column:disabled { cursor: default; }
+.column:disabled i { background: var(--surface-3); opacity: 1; }
+.column-count { align-self: center; margin-bottom: 3px; color: var(--ink-2); font: 10px var(--mono, monospace); min-height: 12px; }
+.column-label { align-self: center; margin-top: 5px; color: var(--muted); font: 10px var(--mono, monospace); }
+.ledger-heart, .diary-heart { margin-left: 6px; color: #d6455f; }
+.ledger-reread, .diary-reread { margin-left: 6px; color: var(--muted); }
+.flag-liked { color: #d6455f; }
+.diary { display: grid; gap: 26px; margin-top: 10px; }
+.diary-month h3 { position: sticky; top: 0; z-index: 2; background: color-mix(in srgb, var(--bg, var(--surface)) 92%, transparent); backdrop-filter: blur(6px); display: flex; align-items: baseline; justify-content: space-between; margin: 0 0 6px; padding-bottom: 8px; border-bottom: 1px solid var(--rule-strong); font-size: 13px; letter-spacing: .02em; }
+.diary-month h3 span { color: var(--muted); font: 11px var(--mono, monospace); }
+.diary-month ol { margin: 0; padding: 0; list-style: none; }
+.diary-entry { display: grid; grid-template-columns: 34px 60px minmax(0, 1fr); gap: 16px; align-items: start; margin: 0 -10px; padding: 14px 10px; border-bottom: 1px solid var(--rule); cursor: pointer; transition: background .12s; }
+.diary-entry:hover { background: var(--surface-2); }
+.diary-cover .cover { border-radius: 3px; box-shadow: 0 1px 2px rgba(0,0,0,.18), 0 4px 10px -4px rgba(0,0,0,.28); }
+.diary-day { padding-top: 2px; color: var(--muted); font: 20px/1 var(--serif, Georgia, serif); text-align: center; }
+.diary-cover { padding: 0; border: 0; background: transparent; }
+.diary-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.diary-title { padding: 0; border: 0; background: none; color: var(--ink); font: 17px/1.25 var(--serif, Georgia, serif); text-align: left; }
+.diary-title:hover { text-decoration: underline; }
+.diary-line .muted { font-size: 12px; }
+.diary-marks { display: flex; align-items: center; min-height: 20px; margin-top: 4px; font-size: 14px; }
+.diary-stars { color: var(--star); letter-spacing: 1px; }
+.diary-review { max-width: 62ch; margin: 8px 0 0; color: var(--ink-2); font: 14px/1.55 var(--serif, Georgia, serif); white-space: pre-wrap; overflow-wrap: anywhere; }
+.diary-review.spoiler { font: italic 12px var(--sans, inherit); color: var(--muted); }
+.diary-review.spoiler em { font-style: italic; }
+.spoiler-show { margin-left: 6px; padding: 2px 10px; border: 1px solid var(--rule-strong); border-radius: 999px; background: var(--surface); color: var(--ink-2); font-size: 11px; font-weight: 550; }
+.spoiler-show:hover { border-color: var(--accent); color: var(--accent); }
+.book-star { transition: transform .1s; }
+.book-stars:hover .book-star:hover { transform: scale(1.12); }
+.like-button.on span { animation: heart-pop .28s ease-out; }
+@keyframes heart-pop { 0% { transform: scale(.6); } 60% { transform: scale(1.35); } 100% { transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) { .like-button.on span { animation: none; } .book-stars:hover .book-star:hover { transform: none; } }
+@media (max-width: 600px) {
+  .histogram { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .histogram-average { grid-column: 1 / -1; grid-template-columns: auto auto auto; justify-content: start; align-items: baseline; gap: 10px; padding: 8px 0 0; border: 0; border-top: 1px solid var(--rule); }
+  .diary-entry { grid-template-columns: 24px 44px minmax(0, 1fr); gap: 10px; }
+  .diary-month h3 { flex-wrap: wrap; gap: 2px 12px; }
+  .book-star { font-size: 34px; }
+}

@@ -1,5 +1,6 @@
 import React from "react";
 
+import { ratingNumber, starText } from "./ratings.js";
 import { docKind, isRead, ownedState, readingStatus } from "./storage.js";
 
 const KIND_LABELS = { book: "Book", paper: "Paper", document: "Document" };
@@ -20,7 +21,8 @@ export function CoverFlags({ doc }) {
         {statusLabel}
       </span>
       {doc?.note_count > 0 && <span className="note-ribbon" role="img" aria-label={`${doc.note_count} ${doc.note_count === 1 ? "note" : "notes"}`} title={`${doc.note_count} ${doc.note_count === 1 ? "note" : "notes"}`} />}
-      {doc?.rating && <span className="flag flag-rating" title={`Your rating: ${doc.rating} out of 5 stars`}>★ {doc.rating}/5</span>}
+      {doc?.rating && <span className="flag flag-rating" title={`Your rating: ${ratingNumber(doc.rating)} out of 5 stars`}>{starText(doc.rating)}</span>}
+      {doc?.liked ? <span className="flag flag-liked" role="img" aria-label="Liked" title="Liked">♥</span> : null}
       {owned != null && <span className={`flag flag-owned${owned ? " is-owned" : ""}`}>{owned ? "Owned" : "Not owned"}</span>}
     </>
   );

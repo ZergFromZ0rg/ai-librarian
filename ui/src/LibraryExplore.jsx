@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import Cover from "./Cover.jsx";
 import { CoverFlags } from "./DocMarks.jsx";
+import LibraryDiary from "./LibraryDiary.jsx";
 import LibraryLedger from "./LibraryLedger.jsx";
+import { starText } from "./ratings.js";
 import { EMPTY_FILTERS, facetValues, filterLabels, filterLibrary, searchWithView, viewFromSearch } from "./libraryExplore.js";
 import { displayTitle, loadStored, saveStored } from "./storage.js";
 
@@ -64,7 +66,8 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
       <div className="explore-facets">
         <label>Status<select value={filters.status} onChange={(e) => update("status", e.target.value)}><option value="all">All</option><option value="to_read">To read</option><option value="reading">Reading</option><option value="read">Read</option><option value="abandoned">Abandoned</option></select></label>
         <label>Ownership<select value={filters.ownership} onChange={(e) => update("ownership", e.target.value)}><option value="all">All</option><option value="owned">Owned</option><option value="unowned">Not owned</option></select></label>
-        <label>Rating<select value={filters.rating} onChange={(e) => update("rating", e.target.value)}><option value="all">All</option><option value="rated">Any rating</option>{[5,4,3,2,1].map((n) => <option key={n} value={n}>{n} stars</option>)}</select></label>
+        <label>Rating<select value={filters.rating} onChange={(e) => update("rating", e.target.value)}><option value="all">All</option><option value="rated">Any rating</option>{[5,4.5,4,3.5,3,2.5,2,1.5,1,0.5].map((n) => <option key={n} value={n}>{starText(n)}</option>)}</select></label>
+        <label>Liked<select value={filters.liked} onChange={(e) => update("liked", e.target.value)}><option value="all">All</option><option value="liked">♥ Liked</option></select></label>
         <label>Format<select value={filters.format} onChange={(e) => update("format", e.target.value)}><option value="all">All</option>{facets.formats.map((item) => <option key={item}>{item}</option>)}</select></label>
         <label>Collection<select value={filters.collection} onChange={(e) => update("collection", e.target.value)}><option value="all">All</option>{collections.filter((item) => !item.builtin).map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
         <label>Genre<select value={filters.genre} onChange={(e) => update("genre", e.target.value)}><option value="all">All</option>{facets.genres.map((item) => <option key={item}>{item}</option>)}</select></label>
@@ -81,13 +84,14 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
       </div>
     </section>
     <div className="explore-result-head"><strong>{results.length.toLocaleString()}</strong> book{results.length === 1 ? "" : "s"}<span className="muted">Open a row to edit metadata, progress, notes, and vocabulary.</span>
-      <span className="layout-toggle" role="group" aria-label="Layout">{[["list", "List"], ["ledger", "Ledger"]].map(([value, label]) => <button type="button" key={value} className={layout === value ? "active" : ""} aria-pressed={layout === value} onClick={() => setLayout(value)}>{label}</button>)}</span>
+      <span className="layout-toggle" role="group" aria-label="Layout">{[["list", "List"], ["ledger", "Ledger"], ["diary", "Diary"]].map(([value, label]) => <button type="button" key={value} className={layout === value ? "active" : ""} aria-pressed={layout === value} onClick={() => setLayout(value)}>{label}</button>)}</span>
     </div>
     {layout === "ledger" && results.length > 0 && <LibraryLedger rows={results} filters={filters} onOpen={onOpenDocument} onSort={(key) => setFilters((current) => (current.sort === key ? { ...current, order: current.order === "reverse" ? "default" : "reverse" } : { ...current, sort: key, order: "default" }))} />}
+    {layout === "diary" && results.length > 0 && <LibraryDiary apiBase={apiBase} rows={results} onOpen={onOpenDocument} />}
     {layout === "list" && <div className="explore-results">
       {results.map((doc) => <button type="button" className="explore-book" key={doc.document_id} onClick={() => onOpenDocument(doc)}>
         <Cover apiBase={apiBase} documentId={doc.document_id} filename={doc.title || doc.filename} author={doc.author} fileType={doc.file_type} width={90}><CoverFlags doc={doc} /></Cover>
-        <span className="explore-book-copy"><strong>{doc.title || displayTitle(doc.filename)}</strong><span>{doc.author || "Unknown author"}</span><small>{doc.file_type?.toUpperCase() || "BOOK"} · {doc.reading_status?.replace("_", " ") || "to read"}{doc.rating ? ` · ${"★".repeat(doc.rating)}` : ""}</small></span>
+        <span className="explore-book-copy"><strong>{doc.title || displayTitle(doc.filename)}</strong><span>{doc.author || "Unknown author"}</span><small>{doc.file_type?.toUpperCase() || "BOOK"} · {doc.reading_status?.replace("_", " ") || "to read"}{doc.rating ? ` · ${starText(doc.rating)}` : ""}{doc.liked ? " · ♥" : ""}</small></span>
         <span className="explore-progress"><span style={{ width: `${doc.reading_progress || 0}%` }} />{doc.reading_progress || 0}%</span>
       </button>)}
     </div>}

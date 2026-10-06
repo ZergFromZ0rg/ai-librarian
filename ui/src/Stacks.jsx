@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import ActionProgress from "./ActionProgress.jsx";
 import Cover from "./Cover.jsx";
+import { starText } from "./ratings.js";
 import { CoverFlags, MarkControls } from "./DocMarks.jsx";
 import IndexActivity from "./IndexActivity.jsx";
 import LibraryExplore from "./LibraryExplore.jsx";
@@ -480,7 +481,7 @@ function Catalogue({ apiBase, documents, reindexing, reindexProgress, onReindex,
                       <Cover apiBase={apiBase} documentId={doc.document_id} filename={doc.filename} fileType={doc.file_type} width={160} className="cover-mini" />
                       <span>
                         <span className="catalogue-name">{doc.title || displayTitle(doc.filename)}</span>
-                        <span className="catalogue-book-meta">{[doc.file_type?.toUpperCase(), doc.rating ? `★ ${doc.rating}/5` : null, doc.owned == null ? null : doc.owned ? "Owned" : "Not owned"].filter(Boolean).join(" · ")}</span>
+                        <span className="catalogue-book-meta">{[doc.file_type?.toUpperCase(), doc.rating ? starText(doc.rating) : null, doc.owned == null ? null : doc.owned ? "Owned" : "Not owned"].filter(Boolean).join(" · ")}</span>
                         <span className="catalogue-path">{doc.source_path ? `↪ ${doc.source_path}` : "uploaded"}</span>
                       </span>
                     </button>

@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import Cover from "./Cover.jsx";
 import { clothColor } from "./clothCovers.js";
 import { CoverFlags } from "./DocMarks.jsx";
+import { starText } from "./ratings.js";
 import { displayTitle, timeAgo } from "./storage.js";
 
 export const SHELF_SIZE = 12;
@@ -90,7 +91,7 @@ export default function BookRow({ apiBase, items, onOpen }) {
                 <CoverFlags doc={active.doc} />
               </Cover>
               <span className="bookcase-preview-title">{active.doc.title || displayTitle(active.doc.filename)}</span>
-              <span className="bookcase-preview-meta">{[active.doc.author, active.doc.rating ? `★ ${active.doc.rating}/5` : null, active.openedAt ? `p. ${active.page} · ${timeAgo(active.openedAt)}` : null].filter(Boolean).join(" · ") || "Open book"}</span>
+              <span className="bookcase-preview-meta">{[active.doc.author, active.doc.rating ? starText(active.doc.rating) : null, active.openedAt ? `p. ${active.page} · ${timeAgo(active.openedAt)}` : null].filter(Boolean).join(" · ") || "Open book"}</span>
             </button>
           ) : (
             <div className="bookcase-empty" aria-hidden="true">
