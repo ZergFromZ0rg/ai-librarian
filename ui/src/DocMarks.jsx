@@ -19,6 +19,7 @@ export function CoverFlags({ doc }) {
       <span className={`flag flag-read${read ? " is-read" : ""}`} title={`Reading status: ${statusLabel.replace("✓ ", "")}`}>
         {statusLabel}
       </span>
+      {doc?.note_count > 0 && <span className="note-ribbon" role="img" aria-label={`${doc.note_count} ${doc.note_count === 1 ? "note" : "notes"}`} title={`${doc.note_count} ${doc.note_count === 1 ? "note" : "notes"}`} />}
       {doc?.rating && <span className="flag flag-rating" title={`Your rating: ${doc.rating} out of 5 stars`}>★ {doc.rating}/5</span>}
       {owned != null && <span className={`flag flag-owned${owned ? " is-owned" : ""}`}>{owned ? "Owned" : "Not owned"}</span>}
     </>

@@ -2435,9 +2435,23 @@ async def config():
     }
 
 
+def _with_note_counts(documents: List[dict]) -> List[dict]:
+    """Each book's `note_count`: how many of the reader's notes are linked to it
+    (so the library can mark and filter books that have notes)."""
+    counts = collections.Counter(
+        doc["source_document_id"]
+        for doc in documents
+        if doc.get("collection_id") == NOTES_COLLECTION_ID and doc.get("source_document_id")
+    )
+    return [
+        doc if doc.get("collection_id") == NOTES_COLLECTION_ID else {**doc, "note_count": counts.get(doc["document_id"], 0)}
+        for doc in documents
+    ]
+
+
 @app.get("/documents")
 async def get_documents():
-    return {"documents": await asyncio.to_thread(list_metadata)}
+    return {"documents": await asyncio.to_thread(lambda: _with_note_counts(list_metadata()))}
 
 
 def _index_activity_snapshot() -> dict:
@@ -2712,7 +2726,17 @@ async def upload_document(file: UploadFile = File(...)):
 
 @app.get("/documents/{doc_id}")
 async def get_document(doc_id: str):
-    return await asyncio.to_thread(read_metadata, doc_id)
+    def read() -> dict:
+        document = read_metadata(doc_id)
+        if document.get("collection_id") == NOTES_COLLECTION_ID:
+            return document
+        linked = sum(
+            1 for doc in list_metadata()
+            if doc.get("collection_id") == NOTES_COLLECTION_ID and doc.get("source_document_id") == doc_id
+        )
+        return {**document, "note_count": linked}
+
+    return await asyncio.to_thread(read)
 
 
 @app.get("/documents/{doc_id}/chunks")

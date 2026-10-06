@@ -109,6 +109,8 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => loadStored(SIDEBAR_COLLAPSED_KEY, "") === "1");
   const [surface, setSurface] = useState(() => {
+    // An address carrying a saved library view (?lib.…) opens the Library.
+    if ([...new URLSearchParams(window.location.search).keys()].some((key) => key.startsWith("lib."))) return "library";
     const stored = loadStored(SURFACE_KEY, "workspace");
     return stored === "library" || stored === "documents" ? stored : "workspace";
   });

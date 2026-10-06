@@ -342,3 +342,18 @@ def test_classify_proposes_then_files_only_unshelved_documents(service):
 
     forced = client.post("/documents/classify", json={"apply": True, "include_filed": True, "document_ids": [mine]}).json()
     assert forced["applied"] == 1 and client.get(f"/documents/{mine}").json()["shelf"] == "Legal & Finance"
+
+
+def test_documents_report_how_many_notes_are_linked_to_them(service):
+    module, client, _ = service
+    with_notes = upload(client)["document_id"]
+    without = upload_text(client, "A different file entirely.", "other.pdf")["document_id"]
+    for text in ("First thought", "Second thought"):
+        note = client.post("/notes", json={"text": text, "source_document_id": with_notes}).json()["document_id"]
+        wait_for_status(client, note, "indexed")
+    counts = {doc["document_id"]: doc.get("note_count") for doc in client.get("/documents").json()["documents"]}
+    assert counts[with_notes] == 2 and counts[without] == 0
+    assert client.get(f"/documents/{with_notes}").json()["note_count"] == 2
+    assert client.get(f"/documents/{without}").json()["note_count"] == 0
+    # Notes themselves are not books and carry no count.
+    assert all("note_count" not in doc for doc in client.get("/documents").json()["documents"] if doc.get("collection_id") == "notes")

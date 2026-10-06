@@ -5536,3 +5536,53 @@ main {
 .docs-sort-group li label { display: flex; align-items: center; gap: 9px; padding: 4px 0; font-size: 12.5px; cursor: pointer; }
 .docs-sort-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .docs-sort-actions { display: flex; align-items: center; gap: 14px; }
+
+/* ------------------------------------------------ notes ribbon + ledger -- */
+.note-ribbon {
+  position: absolute;
+  top: 0;
+  right: 7px;
+  z-index: 2;
+  width: 12px;
+  height: 20px;
+  background: var(--accent, #3b3f73);
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 74%, 0 100%);
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.25));
+}
+.cover-mini .note-ribbon { right: 2px; width: 8px; height: 13px; }
+.note-ribbon-inline {
+  display: inline-block;
+  width: 9px;
+  height: 14px;
+  margin-right: 5px;
+  vertical-align: -2px;
+  background: var(--accent, #3b3f73);
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 74%, 0 100%);
+}
+.layout-toggle { display: inline-flex; margin-left: 10px; border: 1px solid var(--rule-strong); border-radius: 7px; overflow: hidden; }
+.layout-toggle button { padding: 3px 11px; border: 0; background: transparent; color: var(--ink-2); font-size: 12px; }
+.layout-toggle button + button { border-left: 1px solid var(--rule-strong); }
+.layout-toggle button.active { background: var(--ink); color: var(--bg, #fff); }
+.explore-result-head { flex-wrap: wrap; }
+.explore-result-head .muted { margin-left: auto; }
+.ledger-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 10px; margin-top: 10px; }
+.ledger { width: 100%; min-width: 640px; border-collapse: collapse; font-size: 13px; }
+.ledger th, .ledger td { padding: 8px 12px; text-align: left; vertical-align: middle; border-bottom: 1px solid var(--rule); }
+.ledger thead th { position: sticky; top: 0; background: var(--surface-2); white-space: nowrap; font-weight: 600; font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.ledger thead button { display: inline-flex; align-items: center; gap: 5px; padding: 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; }
+.ledger thead button:hover { color: var(--ink); }
+.ledger thead th[aria-sort="ascending"] button, .ledger thead th[aria-sort="descending"] button { color: var(--ink); }
+.ledger-arrow { font-size: 8px; min-width: 8px; }
+.ledger .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ledger tbody tr:hover { background: var(--surface-2); }
+.ledger tbody th { font-weight: 500; max-width: 340px; }
+.ledger-title { padding: 0; border: 0; background: none; color: var(--ink); font-weight: 550; text-align: left; overflow-wrap: anywhere; }
+.ledger-title:hover { text-decoration: underline; }
+.ledger-status { font-size: 12px; color: var(--ink-2); }
+.ledger-status.status-reading { color: var(--accent); font-weight: 550; }
+.ledger-status.status-abandoned { color: var(--muted); }
+.ledger-notes { display: inline-flex; align-items: center; }
+.ledger-shelf { color: var(--muted); font-size: 12px; }
+.ledger tfoot td { padding: 9px 12px; border-bottom: 0; background: var(--surface-2); font-size: 12px; color: var(--muted); }
+.ledger tfoot strong { color: var(--ink); }
+@media (max-width: 760px) { .ledger-optional { display: none; } .ledger { min-width: 0; } }

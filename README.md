@@ -82,6 +82,24 @@ To fetch both up front instead of on the first request:
 docker compose run --rm document-service python warm_models.py
 ```
 
+### Browsing: filters, notes markers, and the Ledger
+
+**Library → Browse** lists your books in two layouts. **List** shows cards;
+**Ledger** is a dense, sortable table (title, author, status, rating, format,
+pages, finished date, notes, shelf) that ends with a count row (books, read,
+pages, average rating) for whatever is currently filtered. Click a column heading to sort, and click it again to
+reverse; books with no value for that column always stay at the bottom. The
+search box finds a book by its title, author, ISBN, description, review, genres,
+and the text of your own notes on it (quoted passages are not searched). A
+bookmark ribbon marks every book that has notes, and a **Notes** filter shows
+only books with or without them.
+
+The whole view (filters, sort, layout) is kept in the address, for example
+`?lib.status=read&lib.notes=with&lib.view=ledger`. Bookmark it, or open the same
+address on the same installation, and the Library opens right there. Opening a
+book and closing it again keeps your view. A search with no results names the
+filters that caused it and offers a one-click reset.
+
 ### Documents
 
 The **Documents** workspace (left rail) is the library for working files that
@@ -502,7 +520,7 @@ Interactive API documentation is available at `http://127.0.0.1:8000/docs` (also
 Important endpoints:
 
 - `POST /documents` — upload a document (PDF, Word, Excel, PowerPoint, text, Markdown or CSV)
-- `GET /documents` — list documents and indexing states
+- `GET /documents` — list documents and indexing states (books also carry `note_count`)
 - `GET /documents/{id}` — inspect one document's state
 - `GET /catalogue/search?q=`, `GET /catalogue/isbn/{isbn}`, `GET /catalogue/cover?id=` — optional Open Library lookup (502 when unreachable)
 - `POST /documents/{id}/metadata-apply` — apply only the selected catalogue fields (and optionally a catalogue cover)
