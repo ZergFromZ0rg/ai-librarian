@@ -12,15 +12,17 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import tempfile
 import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import partial
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 import pymupdf
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
@@ -31,6 +33,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from starlette.background import BackgroundTask
 from starlette.datastructures import Headers, MutableHeaders
 
+import annotations as reader_annotations
 import catalogue
 import generation
 import portability
@@ -601,12 +604,75 @@ class NoteBody(BaseModel):
 
 class VocabularyBody(BaseModel):
     word: str = Field(min_length=1, max_length=120)
-    definition: str = Field(min_length=1, max_length=4_000)
+    definition: str = Field(default="", max_length=4_000)
     part_of_speech: Optional[str] = Field(default=None, max_length=80)
     example: Optional[str] = Field(default=None, max_length=2_000)
     document_id: Optional[str] = None
     source_page: Optional[int] = Field(default=None, ge=1, le=1_000_000)
     source_quote: Optional[str] = Field(default=None, max_length=4_000)
+
+
+class AnnotationBody(BaseModel):
+    page: int = Field(ge=1, le=1_000_000)
+    kind: Literal["highlight", "underline", "text", "ink"]
+    color: Optional[str] = Field(default=None, max_length=7)
+    text: Optional[str] = Field(default=None, max_length=4_000)
+    comment: Optional[str] = Field(default=None, max_length=4_000)
+    # Normalised to the page: x0, y0, x1, y1 in 0..1.
+    rects: List[List[float]] = Field(default_factory=list, max_length=400)
+    # Ink strokes: a list of strokes, each a list of [x, y] points in 0..1.
+    paths: List[List[List[float]]] = Field(default_factory=list, max_length=300)
+    width: Optional[float] = Field(default=None, ge=0.0005, le=0.1)
+    size: Optional[float] = Field(default=None, ge=0.005, le=0.3)
+
+    @field_validator("color")
+    @classmethod
+    def _color(cls, value):
+        if value is not None and not reader_annotations.HEX_COLOR.match(value):
+            raise ValueError("color must look like #rrggbb")
+        return value
+
+    @field_validator("rects")
+    @classmethod
+    def _rects(cls, value):
+        for rect in value:
+            if len(rect) != 4 or any(not 0.0 <= v <= 1.0 for v in rect) or rect[2] <= rect[0] or rect[3] <= rect[1]:
+                raise ValueError("each rect must be [x0, y0, x1, y1] inside the page")
+        return value
+
+    @field_validator("paths")
+    @classmethod
+    def _paths(cls, value):
+        if sum(len(stroke) for stroke in value) > 20_000:
+            raise ValueError("drawing is too detailed")
+        for stroke in value:
+            for point in stroke:
+                if len(point) != 2 or any(not 0.0 <= v <= 1.0 for v in point):
+                    raise ValueError("each point must be [x, y] inside the page")
+        return value
+
+
+class AnnotationPatch(BaseModel):
+    color: Optional[str] = Field(default=None, max_length=7)
+    text: Optional[str] = Field(default=None, max_length=4_000)
+    comment: Optional[str] = Field(default=None, max_length=4_000)
+    rects: Optional[List[List[float]]] = Field(default=None, max_length=400)
+    size: Optional[float] = Field(default=None, ge=0.005, le=0.3)
+
+    _color = field_validator("color")(AnnotationBody._color.__func__)
+    _rects = field_validator("rects")(AnnotationBody._rects.__func__)
+
+
+class HarvestWord(BaseModel):
+    word: str = Field(min_length=1, max_length=120)
+    page: Optional[int] = Field(default=None, ge=1, le=1_000_000)
+    quote: Optional[str] = Field(default=None, max_length=4_000)
+    definition: Optional[str] = Field(default=None, max_length=4_000)
+
+
+class HarvestBody(BaseModel):
+    document_id: str
+    words: List[HarvestWord] = Field(min_length=1, max_length=1_000)
 
 
 class ShelfAccept(BaseModel):
@@ -2441,7 +2507,7 @@ def _with_note_counts(documents: List[dict]) -> List[dict]:
     counts = collections.Counter(
         doc["source_document_id"]
         for doc in documents
-        if doc.get("collection_id") == NOTES_COLLECTION_ID and doc.get("source_document_id")
+        if doc.get("collection_id") == NOTES_COLLECTION_ID and doc.get("source_document_id") and not _is_digest(doc)
     )
     return [
         doc if doc.get("collection_id") == NOTES_COLLECTION_ID else {**doc, "note_count": counts.get(doc["document_id"], 0)}
@@ -2733,6 +2799,7 @@ async def get_document(doc_id: str):
         linked = sum(
             1 for doc in list_metadata()
             if doc.get("collection_id") == NOTES_COLLECTION_ID and doc.get("source_document_id") == doc_id
+            and not _is_digest(doc)
         )
         return {**document, "note_count": linked}
 
@@ -3296,7 +3363,7 @@ async def list_notes(source_document_id: Optional[str] = None):
     """Every note, newest first, with its text."""
 
     def notes() -> dict:
-        docs = [doc for doc in list_metadata() if doc.get("collection_id") == NOTES_COLLECTION_ID]
+        docs = [doc for doc in list_metadata() if doc.get("collection_id") == NOTES_COLLECTION_ID and not _is_digest(doc)]
         if source_document_id:
             docs = [doc for doc in docs if doc.get("source_document_id") == source_document_id]
         docs.sort(key=lambda doc: doc.get("uploaded_at") or "", reverse=True)
@@ -3337,10 +3404,10 @@ async def update_note(doc_id: str, body: NoteBody):
     return await asyncio.to_thread(update)
 
 
-def _vocabulary_record(body: VocabularyBody) -> dict:
+def _vocabulary_record(body: VocabularyBody, *, blank_definition_ok: bool = False) -> dict:
     word = " ".join(body.word.split())
     definition = body.definition.strip()
-    if not word or not definition:
+    if not word or not (definition or blank_definition_ok):
         raise HTTPException(status_code=422, detail="a word and definition are required")
     if body.document_id:
         source = read_metadata(body.document_id)
@@ -3387,7 +3454,10 @@ async def create_vocabulary(body: VocabularyBody):
 
 @app.put("/vocabulary/{word_id}")
 async def update_vocabulary(word_id: str, body: VocabularyBody):
-    changes = await asyncio.to_thread(_vocabulary_record, body)
+    # A word collected from an underline starts without a definition; saving
+    # an edit to it (adding the definition later) must not demand one.
+    changes = await asyncio.to_thread(partial(_vocabulary_record, body, blank_definition_ok=True))
+    changes["definition_source"] = "manual"
     changes["updated_at"] = utc_now()
     try:
         return await asyncio.to_thread(STORE.update_vocabulary, word_id, changes)
@@ -3402,6 +3472,334 @@ async def delete_vocabulary(word_id: str):
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="vocabulary entry not found") from exc
     return {"ok": True}
+
+
+# ---------------------------------------------------------- annotations --
+
+ANNOTATION_DIGEST_KIND = "annotations"
+ANNOTATION_INDEX_DELAY = float(os.getenv("ANNOTATION_INDEX_DELAY_SECONDS", "4"))
+_digest_timers: dict = {}
+_digest_timers_lock = threading.Lock()
+
+
+def _is_digest(doc: dict) -> bool:
+    """The per-book Markdown digest of a reader's marks. It lives in the Notes
+    library so search finds it, but it is generated, not a note the reader wrote."""
+    return doc.get("collection_id") == NOTES_COLLECTION_ID and doc.get("kind_override") == ANNOTATION_DIGEST_KIND
+
+
+def _digest_doc(book_id: str) -> Optional[dict]:
+    return next(
+        (doc for doc in list_metadata() if _is_digest(doc) and doc.get("source_document_id") == book_id), None
+    )
+
+
+def _cancel_digest_timer(book_id: str) -> None:
+    with _digest_timers_lock:
+        timers = [_digest_timers.pop(key, None) for key in (book_id, ("pdf", book_id))]
+    for timer in timers:
+        if timer:
+            timer.cancel()
+
+
+def _schedule_digest(book_id: str, delay: Optional[float] = None, attempt: int = 0) -> None:
+    """Rebuild the book's searchable digest once the reader pauses: a burst of
+    highlighting would otherwise re-embed the whole digest after every stroke."""
+    delay = ANNOTATION_INDEX_DELAY if delay is None else delay
+    if delay <= 0:
+        _rebuild_digest(book_id, attempt)
+        return
+    timer = threading.Timer(delay, _rebuild_digest, args=(book_id, attempt))
+    timer.daemon = True
+    with _digest_timers_lock:
+        previous = _digest_timers.pop(book_id, None)
+        _digest_timers[book_id] = timer
+    if previous:
+        previous.cancel()
+    timer.start()
+
+
+def _rebuild_digest(book_id: str, attempt: int = 0) -> None:
+    with _digest_timers_lock:
+        _digest_timers.pop(book_id, None)
+    try:
+        book = read_metadata(book_id)
+        items = STORE.list_annotations(book_id)
+        digest = _digest_doc(book_id)
+        searchable = [a for a in items if (a.get("text") or "").strip() or (a.get("comment") or "").strip()]
+        if not searchable:
+            if digest:
+                _delete_document_blocking(digest)
+            return
+        title = book.get("title") or book.get("filename") or "Untitled"
+        text = reader_annotations.digest_text(title, items)
+        if digest is None:
+            doc_id = generate_id()
+            stored = DOCUMENTS_DIR / f"{doc_id}.md"
+            stored.write_text(text, encoding="utf-8")
+            create_document(
+                stored, f"annotations-{doc_id[:8]}.md", hashlib.sha256(stored.read_bytes()).hexdigest(),
+                doc_id=doc_id, collection_id=NOTES_COLLECTION_ID,
+            )
+            STORE.update(doc_id, {"title": f"Annotations: {title}", "kind_override": ANNOTATION_DIGEST_KIND,
+                                  "source_document_id": book_id})
+            enqueue_index(IndexTask(doc_id))
+            return
+        if digest.get("indexing_status") == "indexing" and attempt < 24:
+            # The running extraction would finish on the old text and mark it
+            # indexed; try again once it is done.
+            _schedule_digest(book_id, 5.0, attempt + 1)
+            return
+        stored = pdf_path(digest)
+        if stored.exists() and stored.read_text(encoding="utf-8") == text:
+            return
+        stored.write_text(text, encoding="utf-8")
+        STORE.update(digest["document_id"], {
+            "title": f"Annotations: {title}",
+            "content_sha256": hashlib.sha256(stored.read_bytes()).hexdigest(),
+            "pipeline_version": -1,
+        })
+        enqueue_index(IndexTask(digest["document_id"]))
+    except Exception:
+        logger.exception("could not refresh the annotation digest for %s", book_id)
+
+
+_pdf_sync_status: dict = {}
+
+
+def _schedule_pdf_sync(book_id: str, delay: Optional[float] = None) -> None:
+    """Write the reader's marks into the PDF file itself, once they settle."""
+    delay = ANNOTATION_INDEX_DELAY if delay is None else delay
+    if delay <= 0:
+        _sync_pdf(book_id)
+        return
+    timer = threading.Timer(delay, _sync_pdf, args=(book_id,))
+    timer.daemon = True
+    with _digest_timers_lock:
+        previous = _digest_timers.pop(("pdf", book_id), None)
+        _digest_timers[("pdf", book_id)] = timer
+    if previous:
+        previous.cancel()
+    timer.start()
+
+
+def _sync_pdf(book_id: str) -> None:
+    """Replace the stored PDF with a copy carrying the current marks. The very
+    first time, the untouched original is kept under DATA_DIR/originals. The
+    swap is atomic, so a page being rendered never sees a half-written file."""
+    with _digest_timers_lock:
+        _digest_timers.pop(("pdf", book_id), None)
+    try:
+        book = read_metadata(book_id)
+        stored = pdf_path(book)
+        if book.get("file_type") != "pdf" or not stored.exists():
+            return
+        items = STORE.list_annotations(book_id)
+        with get_document_lock(book_id):
+            content = reader_annotations.bake(stored, items)
+            if content == stored.read_bytes():
+                _pdf_sync_status[book_id] = {"ok": True}
+                return
+            originals = DATA_DIR / "originals"
+            originals.mkdir(parents=True, exist_ok=True)
+            backup = originals / f"{book_id}.pdf"
+            if not backup.exists():
+                shutil.copy2(stored, backup)
+            temporary = stored.with_name(f".{stored.name}.{secrets.token_hex(4)}.tmp")
+            try:
+                temporary.write_bytes(content)
+                shutil.copymode(stored, temporary)
+                os.replace(temporary, stored)
+            finally:
+                temporary.unlink(missing_ok=True)
+            STORE.update(book_id, {"content_sha256": hashlib.sha256(content).hexdigest(), "updated_at": utc_now()})
+        _pdf_sync_status[book_id] = {"ok": True}
+    except Exception as exc:
+        logger.exception("could not write annotations into the PDF for %s", book_id)
+        _pdf_sync_status[book_id] = {"ok": False, "error": "The PDF file could not be written (is the library folder read-only?). Your marks are saved in the app."}
+
+
+def _annotatable_pdf(doc_id: str) -> dict:
+    metadata = read_metadata(doc_id)
+    if metadata.get("file_type") != "pdf" or metadata.get("collection_id") == NOTES_COLLECTION_ID:
+        raise HTTPException(status_code=400, detail="annotations are only available for PDF books")
+    return metadata
+
+
+def _annotation_data(body: AnnotationBody) -> dict:
+    return {"rects": body.rects, "paths": body.paths, "width": body.width, "size": body.size}
+
+
+@app.get("/documents/{doc_id}/page/{page}/words")
+async def get_page_words(doc_id: str, page: int):
+    """Word boxes for one page, normalised to it, in reading order. The reader
+    lays an invisible layer of these over the page image so words can be
+    selected, highlighted, and underlined."""
+    await asyncio.to_thread(_annotatable_pdf, doc_id)
+    stored = await asyncio.to_thread(_stored_paged_path, doc_id)
+
+    def words() -> dict:
+        with pymupdf.open(stored) as source:
+            if not 1 <= page <= source.page_count:
+                raise HTTPException(status_code=404, detail="page out of range")
+            return reader_annotations.page_words(source[page - 1])
+
+    return await asyncio.to_thread(words)
+
+
+@app.get("/documents/{doc_id}/annotations")
+async def list_annotations(doc_id: str):
+    await asyncio.to_thread(read_metadata, doc_id)
+    return {"annotations": await asyncio.to_thread(STORE.list_annotations, doc_id),
+            "pdf_sync": _pdf_sync_status.get(doc_id, {"ok": True})}
+
+
+@app.post("/documents/{doc_id}/annotations", status_code=201)
+async def create_annotation(doc_id: str, body: AnnotationBody):
+    metadata = await asyncio.to_thread(_annotatable_pdf, doc_id)
+    if metadata.get("pages") and body.page > metadata["pages"]:
+        raise HTTPException(status_code=422, detail="page out of range")
+    text = (body.text or "").strip()
+    if body.kind in ("highlight", "underline") and not body.rects:
+        raise HTTPException(status_code=422, detail="select some text to mark")
+    if body.kind == "text" and not (text and body.rects):
+        raise HTTPException(status_code=422, detail="a text box needs text and a place on the page")
+    if body.kind == "ink" and not any(len(stroke) > 1 for stroke in body.paths):
+        raise HTTPException(status_code=422, detail="draw something first")
+    now = utc_now()
+    record = {
+        "annotation_id": generate_id(),
+        "document_id": doc_id,
+        "page": body.page,
+        "kind": body.kind,
+        "color": body.color or reader_annotations.DEFAULT_COLORS[body.kind],
+        "text": text or None,
+        "comment": (body.comment or "").strip() or None,
+        "data_json": json.dumps(_annotation_data(body)),
+        "created_at": now,
+        "updated_at": now,
+    }
+    created = await asyncio.to_thread(STORE.create_annotation, record)
+    _schedule_digest(doc_id)
+    _schedule_pdf_sync(doc_id)
+    return created
+
+
+@app.put("/annotations/{annotation_id}")
+async def update_annotation(annotation_id: str, body: AnnotationPatch):
+    existing = await asyncio.to_thread(STORE.get_annotation, annotation_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="annotation not found")
+    changes = {"updated_at": utc_now()}
+    sent = body.model_dump(exclude_unset=True)
+    if "color" in sent and sent["color"]:
+        changes["color"] = sent["color"]
+    if "text" in sent:
+        text = (sent["text"] or "").strip()
+        if existing["kind"] == "text" and not text:
+            raise HTTPException(status_code=422, detail="a text box needs text")
+        changes["text"] = text or None
+    if "comment" in sent:
+        changes["comment"] = (sent["comment"] or "").strip() or None
+    geometry = {key: existing.get(key) for key in ("rects", "paths", "width", "size")}
+    if sent.get("rects"):
+        geometry["rects"] = sent["rects"]
+    if sent.get("size"):
+        geometry["size"] = sent["size"]
+    changes["data_json"] = json.dumps(geometry)
+    updated = await asyncio.to_thread(STORE.update_annotation, annotation_id, changes)
+    _schedule_digest(existing["document_id"])
+    _schedule_pdf_sync(existing["document_id"])
+    return updated
+
+
+@app.delete("/annotations/{annotation_id}")
+async def delete_annotation(annotation_id: str):
+    try:
+        removed = await asyncio.to_thread(STORE.delete_annotation, annotation_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="annotation not found") from exc
+    _schedule_digest(removed["document_id"])
+    _schedule_pdf_sync(removed["document_id"])
+    return {"ok": True}
+
+
+@app.get("/documents/{doc_id}/annotated.pdf")
+async def download_annotated_pdf(doc_id: str):
+    """The PDF with the reader's marks written in as standard PDF annotations.
+    The stored file itself is never changed."""
+    metadata = await asyncio.to_thread(_annotatable_pdf, doc_id)
+    stored = await asyncio.to_thread(_stored_paged_path, doc_id)
+    items = await asyncio.to_thread(STORE.list_annotations, doc_id)
+    try:
+        content = await asyncio.to_thread(reader_annotations.bake, stored, items)
+    except Exception as exc:
+        raise _sanitized_http_error(500, "could not write the annotated PDF", exc, log_context=doc_id) from exc
+    stem = re.sub(r"[^\w.\- ]+", "", Path(metadata.get("filename") or "book").stem).strip() or "book"
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{stem}-annotated.pdf"'},
+    )
+
+
+@app.post("/documents/{doc_id}/underlined-words")
+async def scan_underlined_words(doc_id: str):
+    """Find the single words underlined in a book, for the vocabulary notebook
+    to collect. Nothing is saved: the reader reviews the list first."""
+    metadata = await asyncio.to_thread(_annotatable_pdf, doc_id)
+    stored = await asyncio.to_thread(_stored_paged_path, doc_id)
+
+    def scan() -> dict:
+        marks: dict = {}
+        for item in STORE.list_annotations(doc_id):
+            if item["kind"] == "underline" and item.get("rects"):
+                marks.setdefault(item["page"], []).append(item["rects"])
+        found = reader_annotations.find_underlined_words(stored, marks)
+        saved = {entry["normalized_word"] for entry in STORE.list_vocabulary(doc_id)}
+        return {
+            "document_id": doc_id,
+            "title": metadata.get("title") or metadata.get("filename"),
+            "words": [{**item, "saved": item["word"].casefold() in saved} for item in found],
+        }
+
+    try:
+        return await asyncio.to_thread(scan)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _sanitized_http_error(500, "could not scan this book", exc, log_context=doc_id) from exc
+
+
+@app.post("/vocabulary/harvest", status_code=201)
+async def harvest_vocabulary(body: HarvestBody):
+    """Save words found by the underline scan, each linked to its page and the
+    sentence it appeared in. Definitions can be added afterwards."""
+
+    def harvest() -> dict:
+        source = read_metadata(body.document_id)
+        if source.get("collection_id") == NOTES_COLLECTION_ID:
+            raise HTTPException(status_code=422, detail="link vocabulary to a source document, not a note")
+        have = {entry["normalized_word"] for entry in STORE.list_vocabulary(body.document_id)}
+        created = skipped = 0
+        for item in body.words:
+            word = " ".join(item.word.split())
+            if not word or word.casefold() in have:
+                skipped += 1
+                continue
+            now = utc_now()
+            STORE.create_vocabulary({
+                "word_id": generate_id(), "word": word, "normalized_word": word.casefold(),
+                "definition": (item.definition or "").strip(), "part_of_speech": None, "example": None,
+                "document_id": body.document_id, "source_page": item.page,
+                "source_quote": (item.quote or "").strip() or None,
+                "definition_source": "underline", "created_at": now, "updated_at": now,
+            })
+            have.add(word.casefold())
+            created += 1
+        return {"created": created, "skipped": skipped}
+
+    return await asyncio.to_thread(harvest)
 
 
 # ------------------------------------------------------------ catalogue --
@@ -3515,7 +3913,7 @@ def _export_archive(destination: Path) -> dict:
     notes = [
         portability.note_record(doc, _note_response(doc)["text"])
         for doc in documents
-        if doc.get("collection_id") == NOTES_COLLECTION_ID
+        if doc.get("collection_id") == NOTES_COLLECTION_ID and not _is_digest(doc)
     ]
     covers = [
         (doc["document_id"], THUMBNAILS_DIR / f"{doc['document_id']}-custom.jpg")
@@ -3675,7 +4073,7 @@ def _import_archive(archive: "portability.Archive", dry_run: bool, replace: bool
 
     existing_notes = {
         (doc.get("source_document_id"), doc.get("note_text"))
-        for doc in documents if doc.get("collection_id") == NOTES_COLLECTION_ID
+        for doc in documents if doc.get("collection_id") == NOTES_COLLECTION_ID and not _is_digest(doc)
     }
     for note in archive.notes():
         text = (note.get("text") or "").strip() if isinstance(note.get("text"), str) else ""
@@ -3707,7 +4105,7 @@ def _import_archive(archive: "portability.Archive", dry_run: bool, replace: bool
     for item in archive.vocabulary():
         word = " ".join(str(item.get("word") or "").split())[:120]
         definition = str(item.get("definition") or "").strip()[:4000]
-        if not word or not definition:
+        if not word:
             continue
         linked = item.get("document_id")
         linked = (id_map.get(linked) or (linked if linked in by_id else None)) if linked else None
@@ -3818,25 +4216,34 @@ async def move_shelf(request: ShelfMove):
     return await asyncio.to_thread(move)
 
 
+def _delete_document_blocking(metadata: dict) -> None:
+    doc_id = metadata["document_id"]
+    with get_document_lock(doc_id):
+        delete_document_vectors(doc_id)
+        artifacts = [EXTRACTED_DIR / f"{doc_id}.json", CHUNKS_DIR / f"{doc_id}.json"]
+        artifacts.extend(THUMBNAILS_DIR.glob(f"{doc_id}-*.jpg"))
+        # Only remove the PDF itself when we own it (an upload). A
+        # referenced library file is left exactly where the reader put it.
+        if metadata.get("record_type") != "standalone" and not (metadata.get("source_path") or "").strip():
+            artifacts.append(DOCUMENTS_DIR / metadata["stored_filename"])
+        for path in artifacts:
+            path.unlink(missing_ok=True)
+        STORE.delete(doc_id)
+        clear_index_activity(doc_id)
+    with DOCUMENT_LOCKS_LOCK:
+        DOCUMENT_LOCKS.pop(doc_id, None)
+
+
 @app.delete("/documents/{doc_id}")
 async def delete_document(doc_id: str):
     metadata = await asyncio.to_thread(read_metadata, doc_id)
 
     def delete_all() -> None:
-        with get_document_lock(doc_id):
-            delete_document_vectors(doc_id)
-            artifacts = [EXTRACTED_DIR / f"{doc_id}.json", CHUNKS_DIR / f"{doc_id}.json"]
-            artifacts.extend(THUMBNAILS_DIR.glob(f"{doc_id}-*.jpg"))
-            # Only remove the PDF itself when we own it (an upload). A
-            # referenced library file is left exactly where the reader put it.
-            if metadata.get("record_type") != "standalone" and not (metadata.get("source_path") or "").strip():
-                artifacts.append(DOCUMENTS_DIR / metadata["stored_filename"])
-            for path in artifacts:
-                path.unlink(missing_ok=True)
-            STORE.delete(doc_id)
-            clear_index_activity(doc_id)
-        with DOCUMENT_LOCKS_LOCK:
-            DOCUMENT_LOCKS.pop(doc_id, None)
+        _cancel_digest_timer(doc_id)
+        digest = _digest_doc(doc_id)
+        if digest:
+            _delete_document_blocking(digest)
+        _delete_document_blocking(metadata)
 
     try:
         await asyncio.to_thread(delete_all)

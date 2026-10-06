@@ -197,6 +197,20 @@ CREATE TABLE IF NOT EXISTS vocabulary (
 );
 CREATE INDEX IF NOT EXISTS idx_vocabulary_word ON vocabulary (normalized_word);
 CREATE INDEX IF NOT EXISTS idx_vocabulary_document ON vocabulary (document_id);
+
+CREATE TABLE IF NOT EXISTS annotations (
+    annotation_id         TEXT PRIMARY KEY,
+    document_id           TEXT NOT NULL,
+    page                  INTEGER NOT NULL,
+    kind                  TEXT NOT NULL,
+    color                 TEXT,
+    text                  TEXT,
+    comment               TEXT,
+    data_json             TEXT NOT NULL DEFAULT '{}',
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_annotations_document ON annotations (document_id, page);
 """
 
 
@@ -204,6 +218,12 @@ def _row_to_dict(row: Optional[sqlite3.Row]) -> Optional[dict]:
     if row is None:
         return None
     return {key: row[key] for key in row.keys()}
+
+
+def _annotation_row(row: sqlite3.Row) -> dict:
+    record = _row_to_dict(row)
+    data = json.loads(record.pop("data_json") or "{}")
+    return {**record, **data}
 
 
 class MetadataStore:
@@ -400,6 +420,9 @@ class MetadataStore:
                 "UPDATE vocabulary SET document_id = NULL, source_page = NULL, "
                 "source_quote = NULL WHERE document_id = ?", (document_id,)
             )
+            self._conn.execute(
+                "DELETE FROM annotations WHERE document_id = ?", (document_id,)
+            )
             self._conn.commit()
 
     # ------------------------------------------------------------ vocabulary
@@ -452,6 +475,66 @@ class MetadataStore:
             if cursor.rowcount == 0:
                 raise KeyError(word_id)
             self._conn.commit()
+
+    # ----------------------------------------------------------- annotations
+    # Reader marks on a PDF page (highlights, underlines, text boxes, ink).
+    # Geometry lives in `data_json`, normalised to the page so it is
+    # independent of zoom; `text` / `comment` are what search indexes.
+    ANNOTATION_UPDATABLE = frozenset({"color", "text", "comment", "data_json", "updated_at"})
+
+    def list_annotations(self, document_id: Optional[str] = None) -> List[dict]:
+        with self._lock:
+            if document_id:
+                rows = self._conn.execute(
+                    "SELECT * FROM annotations WHERE document_id = ? ORDER BY page, created_at",
+                    (document_id,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM annotations ORDER BY document_id, page, created_at"
+                ).fetchall()
+        return [_annotation_row(row) for row in rows]
+
+    def get_annotation(self, annotation_id: str) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM annotations WHERE annotation_id = ?", (annotation_id,)
+            ).fetchone()
+        return _annotation_row(row) if row else None
+
+    def create_annotation(self, record: dict) -> dict:
+        columns = tuple(record)
+        with self._lock:
+            self._conn.execute(
+                f"INSERT INTO annotations ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                tuple(record[column] for column in columns),
+            )
+            self._conn.commit()
+        return self.get_annotation(record["annotation_id"])
+
+    def update_annotation(self, annotation_id: str, changes: dict) -> dict:
+        if set(changes) - self.ANNOTATION_UPDATABLE:
+            raise ValueError("unknown annotation columns")
+        with self._lock:
+            cursor = self._conn.execute(
+                f"UPDATE annotations SET {', '.join(f'{column} = ?' for column in changes)} WHERE annotation_id = ?",
+                (*changes.values(), annotation_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(annotation_id)
+            self._conn.commit()
+        return self.get_annotation(annotation_id)
+
+    def delete_annotation(self, annotation_id: str) -> dict:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM annotations WHERE annotation_id = ?", (annotation_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(annotation_id)
+            self._conn.execute("DELETE FROM annotations WHERE annotation_id = ?", (annotation_id,))
+            self._conn.commit()
+        return _annotation_row(row)
 
     # --------------------------------------------------------- indexing queue
     def claim_for_indexing(self, now: str) -> Optional[dict]:

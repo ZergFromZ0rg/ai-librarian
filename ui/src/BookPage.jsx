@@ -143,7 +143,7 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
               </footer>
             </article>)}
           </div>
-          <VocabularyPanel apiBase={apiBase} documents={[doc]} documentId={doc.document_id} onOpenDocument={() => {}} onDirty={setVocabularyDirty} />
+          <VocabularyPanel apiBase={apiBase} documents={[doc]} documentId={doc.document_id} onOpenDocument={(_, at) => onRead(source(at || 1))} onDirty={setVocabularyDirty} />
         </>}
       </div>
     </section>, document.body,
