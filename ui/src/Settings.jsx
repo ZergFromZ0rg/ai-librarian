@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 
 import ActionProgress from "./ActionProgress.jsx";
 import BackupSection from "./BackupSection.jsx";
+import CatalogueSection from "./CatalogueSection.jsx";
 import { ingestActionProgress, reindexActionProgress } from "./actionProgress.js";
 import { CLOUD_PROVIDERS } from "./useAsk.js";
 
@@ -171,6 +172,8 @@ export default function Settings({
           </button>
         )}
       </section>
+
+      <CatalogueSection apiBase={apiBase} onChanged={onLibraryChanged} />
 
       <BackupSection apiBase={apiBase} onImported={onLibraryChanged} />
 

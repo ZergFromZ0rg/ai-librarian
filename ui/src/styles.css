@@ -5704,3 +5704,6 @@ main {
   .viewer-body { flex-direction: column; }
   .marks-panel { flex: 0 0 40%; border-left: 0; border-top: 1px solid var(--rule); }
 }
+
+.lookup-best { margin-left: 8px; border-radius: 999px; background: var(--ok-tint); padding: 1px 8px; color: var(--ok); font: 600 10px var(--sans); font-style: normal; letter-spacing: 0.04em; text-transform: uppercase; vertical-align: middle; }
+.settings-check { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; }

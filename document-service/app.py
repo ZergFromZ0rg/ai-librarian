@@ -1389,6 +1389,7 @@ def _embed_and_finish(doc_id: str) -> None:
             )
             update_ingest_entry(doc_id, "indexed")
             clear_index_activity(doc_id)
+            _maybe_auto_match(doc_id)
         except Exception as exc:
             _fail_indexing(doc_id, str(exc) or exc.__class__.__name__)
 
@@ -3804,12 +3805,19 @@ async def harvest_vocabulary(body: HarvestBody):
 
 # ------------------------------------------------------------ catalogue --
 
+# Open Library cover ids are numbers; Google Books covers are "g:<volume id>".
+COVER_ID_PATTERN = r"^(?:\d{1,12}|g:[A-Za-z0-9_-]{6,20})$"
+
 # What a catalogue match may fill in. Reviews, ratings, notes and reading
 # state are the reader's own and can never be written from a provider.
 CATALOGUE_FIELDS = frozenset({
     "title", "subtitle", "author", "publisher", "published_year", "page_count",
     "language", "genres", "isbn_10", "isbn_13", "subject", "description",
 })
+
+
+def _provider_label(provider_id: Optional[str]) -> str:
+    return "Google Books" if (provider_id or "").startswith("gb:") else "Open Library"
 
 
 def _catalogue_call(function, *args):
@@ -3852,7 +3860,7 @@ def _normalised_cover_jpeg(data: bytes) -> bytes:
 
 
 @app.get("/catalogue/cover")
-async def catalogue_cover(id: str = Query(pattern=r"^\d{1,12}$")):
+async def catalogue_cover(id: str = Query(pattern=COVER_ID_PATTERN)):
     """A catalogue cover, fetched and re-encoded here so the browser never
     talks to a third-party image host."""
     def fetch() -> bytes:
@@ -3861,10 +3869,120 @@ async def catalogue_cover(id: str = Query(pattern=r"^\d{1,12}$")):
                     headers={"Cache-Control": "private, max-age=86400"})
 
 
+# --- Matching books to the catalogue without typing --------------------------
+# Opt-in: with "auto match" on, a newly indexed book's cleaned-up file name is
+# sent to the catalogue and a confident match fills in only what is missing.
+# Off by default because it sends file names to a third party unasked.
+
+_AUTO_MATCH_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="auto-match")
+_AUTO_MATCH_FIELDS = ("subtitle", "publisher", "published_year", "page_count", "language", "genres", "isbn_10", "isbn_13", "description")
+
+
+def _auto_match_enabled() -> bool:
+    return bool(_load_settings().get("catalogue_auto_match")) and not catalogue._offline()
+
+
+def _catalogue_query_for(doc: dict) -> str:
+    """What to look a book up by: the title and author the reader settled on,
+    else its file name."""
+    if doc.get("metadata_edited") and doc.get("title"):
+        return " ".join(part for part in (doc.get("title"), doc.get("author")) if part)
+    return Path(doc.get("filename") or doc.get("title") or "").stem
+
+
+def _auto_match_eligible(doc: dict) -> bool:
+    return bool(
+        doc.get("record_type") != "standalone"
+        and doc.get("collection_id") != NOTES_COLLECTION_ID
+        and doc.get("file_type") in {"pdf", "epub"}
+        and (doc.get("kind_override") or doc.get("kind")) == "book"
+        and not doc.get("metadata_source")
+        and not doc.get("isbn_13") and not doc.get("isbn_10")
+        and doc["document_id"] not in (_load_settings().get("auto_match_tried") or [])
+    )
+
+
+def _auto_match_book(doc_id: str) -> bool:
+    """Look one book up and apply a confident match. Never replaces anything
+    the reader entered; returns whether details were applied."""
+    try:
+        doc = read_metadata(doc_id)
+        if not _auto_match_eligible(doc):
+            return False
+        tried = (_load_settings().get("auto_match_tried") or [])[-4000:]
+        _save_settings({"auto_match_tried": [*tried, doc_id]})
+        match = catalogue.best_match(_catalogue_query_for(doc))
+        if not match:
+            return False
+        fields = {key: match[key] for key in _AUTO_MATCH_FIELDS if match.get(key) not in (None, "", []) and not doc.get(
+            "genres_json" if key == "genres" else key)}
+        if not doc.get("metadata_edited"):
+            # The title and author were only guessed from the file name.
+            for key in ("title", "author"):
+                if match.get(key):
+                    fields[key] = match[key]
+        if fields.get("title"):
+            # Drop a subtitle or translator credit ("A Happy Death. Translated from the French by ...").
+            fields["title"] = catalogue._main_title(fields["title"]).strip() or fields["title"]
+        patch = DocumentPatch(**fields)
+        if patch.model_fields_set:
+            asyncio.run(patch_document(doc_id, patch))
+        STORE.update(doc_id, {"metadata_source": _provider_label(match["id"]), "metadata_source_id": match["id"]})
+        if match.get("cover_id") and not (THUMBNAILS_DIR / f"{doc_id}-custom.jpg").exists():
+            try:
+                _save_custom_cover(doc_id, _normalised_cover_jpeg(catalogue.fetch_cover(match["cover_id"])))
+            except Exception:
+                logger.info("auto-match found no usable cover for %s", doc_id)
+        return True
+    except Exception:
+        logger.exception("auto-match failed for %s", doc_id)
+        return False
+
+
+def _maybe_auto_match(doc_id: str) -> None:
+    if _auto_match_enabled():
+        _AUTO_MATCH_POOL.submit(_auto_match_book, doc_id)
+
+
+class CatalogueSettings(BaseModel):
+    auto_match: bool
+
+
+@app.get("/catalogue/settings")
+async def get_catalogue_settings():
+    return {"auto_match": bool(_load_settings().get("catalogue_auto_match")), "providers": catalogue._providers(),
+            "google_key": bool(os.environ.get("GOOGLE_BOOKS_API_KEY", "").strip()), "offline": catalogue._offline()}
+
+
+@app.put("/catalogue/settings")
+async def put_catalogue_settings(body: CatalogueSettings):
+    await asyncio.to_thread(_save_settings, {"catalogue_auto_match": body.auto_match})
+    return await get_catalogue_settings()
+
+
+@app.post("/catalogue/auto-match")
+async def auto_match_library():
+    """Queue every book the app has not matched yet. Runs in the background."""
+    if catalogue._offline():
+        raise HTTPException(status_code=409, detail="Catalogue lookup is disabled because OFFLINE mode is on.")
+    docs = [doc for doc in await asyncio.to_thread(list_metadata) if doc.get("indexing_status") == "indexed" and _auto_match_eligible(doc)]
+    for doc in docs:
+        _AUTO_MATCH_POOL.submit(_auto_match_book, doc["document_id"])
+    return {"queued": len(docs)}
+
+
+@app.get("/documents/{doc_id}/catalogue-query")
+async def catalogue_query_for_document(doc_id: str):
+    """The cleaned-up search text for a book (no network): its title and author
+    if the reader set them, else its file name without the download-site noise."""
+    doc = await asyncio.to_thread(read_metadata, doc_id)
+    return {"query": catalogue.clean_query(_catalogue_query_for(doc))}
+
+
 class CatalogueApply(BaseModel):
     """The fields the reader ticked, and optionally the cover to keep."""
     fields: DocumentPatch = Field(default_factory=DocumentPatch)
-    cover_id: Optional[str] = Field(default=None, pattern=r"^\d{1,12}$")
+    cover_id: Optional[str] = Field(default=None, pattern=COVER_ID_PATTERN)
     provider_id: Optional[str] = Field(default=None, max_length=64)
 
 
@@ -3883,7 +4001,7 @@ async def apply_catalogue_metadata(doc_id: str, body: CatalogueApply):
     updated = await patch_document(doc_id, body.fields) if body.fields.model_fields_set else await asyncio.to_thread(read_metadata, doc_id)
     if body.fields.model_fields_set:
         updated = await asyncio.to_thread(
-            STORE.update, doc_id, {"metadata_source": "Open Library", "metadata_source_id": body.provider_id}
+            STORE.update, doc_id, {"metadata_source": _provider_label(body.provider_id), "metadata_source_id": body.provider_id}
         )
     if cover:
         await asyncio.to_thread(_save_custom_cover, doc_id, cover)

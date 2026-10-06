@@ -176,7 +176,7 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
           <div className="book-card-heading"><h2 id="lookup-heading">Find book information</h2><button type="button" className="text-button" aria-expanded={lookupOpen} onClick={() => { setLookupOpen((open) => !open); setMatch(null); }}>{lookupOpen ? "Close" : "Look up"}</button></div>
           {!lookupOpen && <p className="muted">Fill in the author, year, pages, ISBN and a cover from Open Library. You choose what to keep.</p>}
           {lookupOpen && changed && <p className="book-inline-error" role="alert">Save or discard your unsaved edits first, so applying a match cannot overwrite them.</p>}
-          {lookupOpen && !match && <LookupPanel apiBase={apiBase} initialQuery={[fields.title, fields.author].filter(Boolean).join(" ")} onPick={pickMatch} pickLabel="Compare" />}
+          {lookupOpen && !match && <LookupPanel apiBase={apiBase} documentId={doc.document_id} initialQuery={[fields.title, fields.author].filter(Boolean).join(" ")} onPick={pickMatch} pickLabel="Compare" />}
           {lookupOpen && match && <div className="lookup-compare">
             <p className="lookup-compare-title"><strong>{match.title}</strong>{match.author ? ` · ${match.author}` : ""} <button type="button" className="text-button" onClick={() => setMatch(null)}>Back to results</button></p>
             {matchRowsNow.length === 0 && !match.cover_id ? <p className="muted">This match has nothing new to add.</p> : <table className="lookup-table">
