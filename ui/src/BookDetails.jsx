@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { applyBody, matchRows } from "./catalogueMatch.js";
 import { clothColor } from "./clothCovers.js";
+import { DOC_TYPES, TYPE_LABEL, isWorkDocument } from "./documentsLibrary.js";
 import LookupPanel from "./LookupPanel.jsx";
 import { displayTitle } from "./storage.js";
 
@@ -18,7 +19,7 @@ function values(doc) {
   return {
     title: doc.title || displayTitle(doc.filename), subtitle: doc.subtitle || "", author: doc.author || "",
     subject: doc.subject || "", genres: genres(doc).join(", "), description: doc.description || "",
-    kind: doc.kind_override || "auto", owned: doc.owned == null ? null : Boolean(doc.owned),
+    kind: doc.kind_override || "auto", doc_type: doc.doc_type_override || "auto", owned: doc.owned == null ? null : Boolean(doc.owned),
     acquisition_source: doc.acquisition_source || "", reading_status: doc.reading_status || (doc.read_at ? "read" : "to_read"),
     started_at: (doc.started_at || "").slice(0, 10), finished_at: (doc.finished_at || doc.read_at || "").slice(0, 10),
     publisher: doc.publisher || "", published_year: doc.published_year == null ? "" : String(doc.published_year),
@@ -147,8 +148,11 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
   }
   const format = ({ word: "DOCX", excel: "XLSX", powerpoint: "PPTX", markdown: "Markdown", text: "TXT" })[doc.file_type] || doc.file_type?.toUpperCase() || "File";
   const hasSource = doc.record_type !== "standalone";
+  // Papers, reports and other working files: no cover, ratings or catalogue lookup.
+  const work = isWorkDocument(doc);
   return <div className="book-management">
     <aside className="book-cover-panel" aria-label="Book cover and file">
+      {!work && <>
       <div className={`book-cover-drop${dragging ? " dragging" : ""}`} tabIndex={0} aria-label="Cover preview. Paste or drop an image to replace it."
         onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); setDragging(true); }}
         onDragLeave={() => setDragging(false)}
@@ -163,11 +167,12 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
       {file ? <div className="cover-preview-actions"><button type="button" className="button primary small" disabled={coverBusy} onClick={() => saveCover()}>{coverBusy ? "Saving…" : "Use this cover"}</button><button type="button" className="text-button" disabled={coverBusy} onClick={() => setFile(null)}>Cancel</button></div> : <button type="button" className="text-button" disabled={coverBusy} onClick={() => saveCover(true)}>{hasSource ? "Restore original cover" : "Use title cover"}</button>}
       {coverError && <p className="book-inline-error" role="alert">{coverError}</p>}
       {coverMessage && <p className="book-inline-success" role="status">{coverMessage}</p>}
+      </>}
       {hasSource ? <div className="book-file-card"><span className="eyebrow">In your library</span><div><span className={`book-format format-${doc.file_type}`}>{format}</span><span>{doc.pages || 0} {doc.file_type === "epub" ? "sections" : doc.pages === 1 ? "page" : "pages"}</span></div><p title={doc.filename}>{doc.filename}</p><a href={`${apiBase}/documents/${doc.document_id}/file`} target="_blank" rel="noreferrer">Open {format} ↗</a></div> : <div className="book-file-card book-record-card"><span className="eyebrow">Catalogue record</span><p>This book has no digital file. Its metadata, cover, reading state, review, and notes still live in your library.</p></div>}
     </aside>
     <form className="book-editor" onSubmit={save}>
       <fieldset disabled={saving} className="book-editor-fields">
-        <section className="book-editor-card book-lookup-card" aria-labelledby="lookup-heading">
+        {!work && <section className="book-editor-card book-lookup-card" aria-labelledby="lookup-heading">
           <div className="book-card-heading"><h2 id="lookup-heading">Find book information</h2><button type="button" className="text-button" aria-expanded={lookupOpen} onClick={() => { setLookupOpen((open) => !open); setMatch(null); }}>{lookupOpen ? "Close" : "Look up"}</button></div>
           {!lookupOpen && <p className="muted">Fill in the author, year, pages, ISBN and a cover from Open Library. You choose what to keep.</p>}
           {lookupOpen && changed && <p className="book-inline-error" role="alert">Save or discard your unsaved edits first, so applying a match cannot overwrite them.</p>}
@@ -186,17 +191,17 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
             </table>}
             <div className="cover-preview-actions"><button type="button" className="button primary small" disabled={applying || changed} onClick={applyMatch}>{applying ? "Applying…" : "Apply selected"}</button><button type="button" className="text-button" onClick={() => setMatch(null)}>Cancel</button></div>
           </div>}
-        </section>
+        </section>}
         <section className="book-editor-card" aria-labelledby="metadata-heading">
-          <div className="book-card-heading"><h2 id="metadata-heading">Book details</h2><span className="muted">Make it yours</span></div>
+          <div className="book-card-heading"><h2 id="metadata-heading">{work ? "Document details" : "Book details"}</h2><span className="muted">{work ? "Keep it findable" : "Make it yours"}</span></div>
           <label className="book-field book-title-field">Title<input className="input" required maxLength={300} value={fields.title} onChange={(event) => set("title", event.target.value)} /></label>
           <label className="book-field">Subtitle<input className="input" maxLength={300} placeholder="Optional subtitle" value={fields.subtitle} onChange={(event) => set("subtitle", event.target.value)} /></label>
           <div className="book-field-pair"><label className="book-field">Author<input className="input" maxLength={240} placeholder="Add an author" value={fields.author} onChange={(event) => set("author", event.target.value)} /></label><label className="book-field">Subject<input className="input" maxLength={240} placeholder="e.g. Philosophy" value={fields.subject} onChange={(event) => set("subject", event.target.value)} /></label></div>
           <label className="book-field">Genres<input className="input" maxLength={1000} placeholder="Philosophy, Essays" value={fields.genres} onChange={(event) => set("genres", event.target.value)} /><small>Separate multiple genres with commas.</small></label>
           <label className="book-field">Description<textarea className="input book-description" rows={3} maxLength={20000} placeholder="A short synopsis or your catalogue description" value={fields.description} onChange={(event) => set("description", event.target.value)} /></label>
-          <div className="book-field-pair"><label className="book-field">Library type<select className="input" value={fields.kind} onChange={(event) => set("kind", event.target.value)}><option value="auto">Automatic · {doc.kind || "document"}</option><option value="book">Book</option><option value="paper">Paper</option><option value="document">Document</option></select></label><label className="book-field">Source<select className="input" value={fields.acquisition_source} onChange={(event) => set("acquisition_source", event.target.value)}><option value="">Not specified</option><option value="book_store">Book store</option><option value="kindle">Kindle</option><option value="audiobook">Audiobook</option><option value="borrowed">Borrowed</option><option value="second_hand">Second hand</option><option value="gifted">Gifted</option><option value="library">Library</option><option value="other">Other</option></select></label></div>
+          <div className="book-field-pair"><label className="book-field">Library type<select className="input" value={fields.kind} onChange={(event) => set("kind", event.target.value)}><option value="auto">Automatic · {doc.kind || "document"}</option><option value="book">Book</option><option value="paper">Paper</option><option value="document">Document</option></select></label>{work ? <label className="book-field">Document type<select className="input" value={fields.doc_type} onChange={(event) => set("doc_type", event.target.value)}><option value="auto">Automatic · {TYPE_LABEL[doc.doc_type] || "Other"}</option>{DOC_TYPES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label> : <label className="book-field">Source<select className="input" value={fields.acquisition_source} onChange={(event) => set("acquisition_source", event.target.value)}><option value="">Not specified</option><option value="book_store">Book store</option><option value="kindle">Kindle</option><option value="audiobook">Audiobook</option><option value="borrowed">Borrowed</option><option value="second_hand">Second hand</option><option value="gifted">Gifted</option><option value="library">Library</option><option value="other">Other</option></select></label>}</div>
           <div className="book-status-fields">
-            <fieldset><legend>Ownership</legend><div className="book-segments">{[[true, "Owned"], [false, "Not owned"]].map(([value, label]) => <label className={fields.owned === value ? "selected" : ""} key={label}><input type="radio" name="book-owned" checked={fields.owned === value} onChange={() => set("owned", value)} />{label}</label>)}</div>{fields.owned == null && <small className="muted">Not specified</small>}</fieldset>
+            {!work && <fieldset><legend>Ownership</legend><div className="book-segments">{[[true, "Owned"], [false, "Not owned"]].map(([value, label]) => <label className={fields.owned === value ? "selected" : ""} key={label}><input type="radio" name="book-owned" checked={fields.owned === value} onChange={() => set("owned", value)} />{label}</label>)}</div>{fields.owned == null && <small className="muted">Not specified</small>}</fieldset>}
             <fieldset className="book-reading-status"><legend>Reading status</legend><div className="book-segments">{[["to_read", "To read"], ["reading", "Reading"], ["read", "Read"], ["abandoned", "Abandoned"]].map(([value, label]) => <label className={fields.reading_status === value ? "selected" : ""} key={value}><input type="radio" name="book-reading-status" checked={fields.reading_status === value} onChange={() => setReadingStatus(value)} />{label}</label>)}</div></fieldset>
           </div>
           {fields.reading_status !== "to_read" && <div className="book-field-pair book-reading-dates"><label className="book-field">Started<input className="input" type="date" value={fields.started_at} max={fields.finished_at || undefined} onChange={(event) => set("started_at", event.target.value)} /></label>{fields.reading_status === "read" && <label className="book-field">Finished<input className="input" type="date" value={fields.finished_at} min={fields.started_at || undefined} onChange={(event) => set("finished_at", event.target.value)} /></label>}</div>}
@@ -211,10 +216,10 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
           </details>
         </section>
         <section className="book-editor-card book-review-card" aria-labelledby="review-heading">
-          <div className="book-card-heading"><h2 id="review-heading">Your review</h2><span className="muted">Just for you</span></div>
-          <StarRating value={fields.rating} onChange={(value) => set("rating", value)} disabled={saving} />
-          <label className="book-field">What did you think?<textarea className="input" rows={4} maxLength={20000} value={fields.review} onChange={(event) => set("review", event.target.value)} placeholder="What stayed with you? Who would you recommend it to?" /></label>
-          <p className="book-review-hint">Your overall impression lives here. Keep passages and detailed thoughts in the notes below.</p>
+          <div className="book-card-heading"><h2 id="review-heading">{work ? "Summary & takeaways" : "Your review"}</h2><span className="muted">{work ? "For your own reference" : "Just for you"}</span></div>
+          {!work && <StarRating value={fields.rating} onChange={(value) => set("rating", value)} disabled={saving} />}
+          <label className="book-field">{work ? "Key points" : "What did you think?"}<textarea className="input" rows={work ? 6 : 4} maxLength={20000} value={fields.review} onChange={(event) => set("review", event.target.value)} placeholder={work ? "What is this about, and what matters in it? What did you conclude or need to act on?" : "What stayed with you? Who would you recommend it to?"} /></label>
+          <p className="book-review-hint">{work ? "A short summary you can find again. Keep quoted passages and detailed thoughts in the notes below." : "Your overall impression lives here. Keep passages and detailed thoughts in the notes below."}</p>
         </section>
       </fieldset>
       <div className="book-editor-footer">

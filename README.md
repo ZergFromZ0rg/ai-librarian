@@ -82,6 +82,21 @@ To fetch both up front instead of on the first request:
 docker compose run --rm document-service python warm_models.py
 ```
 
+### Documents
+
+The **Documents** workspace (left rail) is the library for working files that
+are not books: papers, reports, manuals and specs, slides, data, writing, and
+legal or finance paperwork. It is a dense, searchable table with no covers and
+no ratings, filtered by type, reading status, and whether a file is filed.
+Each document gets a type from its file format and opening pages (plain
+keywords, no model), which the reader can correct from the table or the
+document's page, and a document's page offers a summary field in place of a
+review. **Sort documents** shows what would be filed where, grouped by shelf
+(for example `Papers/Physics`, `Reports`, `Legal & Finance`), and files the
+ticked ones. Filing only sets the virtual shelf; files on disk never move, and
+a shelf you chose yourself is never overwritten. `POST /documents/classify`
+(with `apply` false to preview) does the same over the API.
+
 ### Finding book information, covers, and backups
 
 **Find book information** on a book page searches Open Library by ISBN, or by
@@ -491,6 +506,7 @@ Important endpoints:
 - `GET /documents/{id}` — inspect one document's state
 - `GET /catalogue/search?q=`, `GET /catalogue/isbn/{isbn}`, `GET /catalogue/cover?id=` — optional Open Library lookup (502 when unreachable)
 - `POST /documents/{id}/metadata-apply` — apply only the selected catalogue fields (and optionally a catalogue cover)
+- `POST /documents/classify` — type and shelve working documents (`apply: false` previews)
 - `GET /export` — download the reader's data as a ZIP; `POST /import?dry_run=true|false&conflict=keep|replace` — check or apply one
 - `POST /documents/{id}/retry` — retry failed indexing
 - `DELETE /documents/{id}` — delete stored files and vectors

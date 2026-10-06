@@ -146,19 +146,3 @@ export function ownedState(doc) {
   if (docKind(doc) !== "book") return null;
   return Boolean(doc?.owned);
 }
-
-// One newest-first History list: saved chats (from the server) and past
-// searches (this browser). Past *questions* aren't listed on their own —
-// each already lives inside its chat, so listing it twice was just noise.
-export function historyEntries(chats, inquiries) {
-  const entries = [];
-  for (const chat of chats || []) {
-    const at = Date.parse(chat.updated_at || chat.created_at || "") || 0;
-    entries.push({ type: "chat", key: `chat:${chat.id}`, id: chat.id, title: chat.title || "Untitled", count: chat.message_count || 0, at });
-  }
-  for (const entry of inquiries || []) {
-    if (entry.mode !== "search") continue;
-    entries.push({ type: "search", key: `search:${entry.q}`, q: entry.q, at: entry.at || 0, inquiry: entry });
-  }
-  return entries.sort((a, b) => b.at - a.at);
-}

@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   displayTitle,
   docKind,
-  historyEntries,
   isRead,
   ownedState,
   readingStatus,
@@ -116,19 +115,5 @@ describe("document marks", () => {
     expect(ownedState({ kind: "book", owned: 0 })).toBe(false);
     expect(ownedState({ kind: "book", owned: null })).toBe(false); // unmarked = not owned
     expect(ownedState({ kind: "paper", owned: 1 })).toBeNull(); // only books
-  });
-});
-
-describe("historyEntries", () => {
-  it("merges chats and searches newest first, leaving questions inside their chats", () => {
-    const chats = [{ id: "c1", title: "Camus", updated_at: "2026-01-02T00:00:00Z", message_count: 4 }];
-    const inquiries = [
-      { q: "absurd", mode: "search", at: Date.parse("2026-01-03T00:00:00Z") },
-      { q: "what is revolt?", mode: "ask", at: Date.parse("2026-01-04T00:00:00Z") },
-      { q: "older", mode: "search", at: Date.parse("2026-01-01T00:00:00Z") },
-    ];
-    const entries = historyEntries(chats, inquiries);
-    expect(entries.map((e) => e.key)).toEqual(["search:absurd", "chat:c1", "search:older"]);
-    expect(entries[1]).toMatchObject({ type: "chat", title: "Camus", count: 4 });
   });
 });

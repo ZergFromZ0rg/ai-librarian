@@ -296,3 +296,49 @@ def test_restart_leaves_catalogue_only_books_alone(service):
     module.recover_interrupted_work()
     saved = client.get(f"/documents/{book}").json()
     assert saved["indexing_status"] == "catalogued" and saved["indexing_error"] is None
+
+
+def upload_text(client, text, name="doc.pdf"):
+    response = client.post("/documents", files={"file": (name, make_pdf(text), "application/pdf")})
+    assert response.status_code == 201
+    return wait_for_status(client, response.json()["document_id"], "indexed")
+
+
+def test_documents_get_a_type_and_a_shelf_by_type(service):
+    module, client, _ = service
+    invoice = upload_text(client, "INVOICE\nBill to: Acme\nAmount due: $40\nTerms and conditions apply.", "inv.pdf")
+    plain = upload_text(client, "Meeting notes about the absurd and freedom.", "notes.pdf")
+    assert invoice["doc_type"] == "legal" and invoice["shelf_suggested"] == "Legal & Finance"
+    assert plain["doc_type"] == "other" and plain["shelf_suggested"].startswith("Documents")
+
+    # The reader's correction wins and moves the suggested shelf with it.
+    changed = client.patch(f"/documents/{plain['document_id']}", json={"doc_type": "report"}).json()
+    assert changed["doc_type_override"] == "report" and changed["doc_type"] == "report"
+    assert changed["shelf_suggested"].startswith("Reports")
+    assert client.patch(f"/documents/{plain['document_id']}", json={"doc_type": "nonsense"}).status_code == 422
+    back = client.patch(f"/documents/{plain['document_id']}", json={"doc_type": "auto"}).json()
+    assert back["doc_type_override"] is None and back["doc_type"] == "other"
+
+
+def test_classify_proposes_then_files_only_unshelved_documents(service):
+    module, client, _ = service
+    invoice = upload_text(client, "INVOICE\nBill to: Acme\nAmount due: $40\nTerms and conditions apply.", "inv.pdf")["document_id"]
+    mine = upload_text(client, "Receipt\nTotal due: $9\nInvoice paid. Terms and conditions.", "rec.pdf")["document_id"]
+    client.patch(f"/documents/{mine}", json={"shelf": "Work/Receipts"})
+    book = client.post("/owned-books", json={"title": "A Novel"}).json()["book"]["document_id"]
+
+    preview = client.post("/documents/classify", json={}).json()
+    by_id = {item["document_id"]: item for item in preview["proposals"]}
+    assert set(by_id) == {invoice, mine}  # books never appear
+    assert by_id[invoice]["doc_type"] == "legal" and by_id[invoice]["proposed_shelf"] == "Legal & Finance"
+    assert by_id[mine]["filed"] is True and preview["applied"] == 0
+    assert client.get(f"/documents/{invoice}").json().get("shelf") is None  # a preview changes nothing
+
+    done = client.post("/documents/classify", json={"apply": True}).json()
+    assert done["applied"] == 1
+    assert client.get(f"/documents/{invoice}").json()["shelf"] == "Legal & Finance"
+    assert client.get(f"/documents/{mine}").json()["shelf"] == "Work/Receipts"  # reader's shelf wins
+    assert client.get(f"/documents/{book}").json().get("doc_type") is None
+
+    forced = client.post("/documents/classify", json={"apply": True, "include_filed": True, "document_ids": [mine]}).json()
+    assert forced["applied"] == 1 and client.get(f"/documents/{mine}").json()["shelf"] == "Legal & Finance"

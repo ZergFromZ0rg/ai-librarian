@@ -45,6 +45,7 @@ from chunking import (
 from conversations import ConversationStore
 from database import MetadataStore
 from doc_kind import detect_kind
+from doc_types import LABELS as DOC_TYPE_LABELS, TYPES as DOC_TYPES, classify_document
 from embeddings import (
     DEFAULT_MODEL as EMBEDDING_MODEL,
     embed_texts,
@@ -529,6 +530,8 @@ class DocumentPatch(BaseModel):
     owned: Optional[bool] = None
     read: Optional[bool] = None
     kind: Optional[str] = Field(default=None, pattern=r"^(book|paper|document|auto)$")
+    # A working document's type; "auto" drops the reader's choice.
+    doc_type: Optional[str] = Field(default=None, pattern=r"^(auto|paper|report|manual|slides|data|writing|legal|other)$")
     # "Books/Philosophy/Albert Camus"; null or "" goes back to the suggestion.
     shelf: Optional[str] = Field(default=None, max_length=500)
 
@@ -1194,9 +1197,32 @@ def _first_page_texts(doc_id: str, count: int = 3) -> List[str]:
     return [page.get("text") or "" for page in pages[:count]]
 
 
+def _document_type(metadata: dict, kind: Optional[str]) -> Optional[str]:
+    """Paper / report / manual / ... for a working document (anything that is
+    not a book or a note): the reader's choice, else a guess from its text."""
+    if kind in {"book", "note"}:
+        return None
+    if metadata.get("doc_type_override"):
+        return metadata["doc_type_override"]
+    try:
+        return classify_document(
+            metadata.get("file_type"), _first_page_texts(metadata["document_id"]),
+            metadata.get("pages") or 0, kind,
+        )
+    except Exception:
+        logger.warning("Could not classify document %s", metadata.get("document_id"), exc_info=True)
+        return None
+
+
+def _shelf_suggestion(kind: Optional[str], doc_type: Optional[str], subject: Optional[str], author: Optional[str]) -> str:
+    if doc_type:
+        return shelves.suggest_document_shelf(doc_type, subject)
+    return shelves.suggest_shelf(kind, subject, author)
+
+
 def _shelf_fields(metadata: dict, kind: Optional[str]) -> dict:
-    """A document's author, subject and suggested shelf (see shelves.py), for
-    ``kind`` (the reader's override, else the detected kind). Never the
+    """A document's author, subject, type and suggested shelf (see shelves.py),
+    for ``kind`` (the reader's override, else the detected kind). Never the
     reader's own ``shelf``. Best effort: {} when anything fails."""
     doc_id = metadata["document_id"]
     try:
@@ -1210,7 +1236,11 @@ def _shelf_fields(metadata: dict, kind: Optional[str]) -> dict:
             subject = shelves.classify_subject(_document_vector(doc_id), _subject_vectors())
         if metadata.get("metadata_edited"):
             author, subject = metadata.get("author"), metadata.get("subject")
-        return {"author": author, "subject": subject, "shelf_suggested": shelves.suggest_shelf(kind, subject, author)}
+        doc_type = _document_type(metadata, kind)
+        fields = {"author": author, "subject": subject, "shelf_suggested": _shelf_suggestion(kind, doc_type, subject, author)}
+        if doc_type:
+            fields["doc_type"] = doc_type
+        return fields
     except Exception:
         logger.warning("Could not suggest a shelf for document %s", doc_id, exc_info=True)
         return {}
@@ -1232,6 +1262,14 @@ def backfill_document_details() -> None:
             return
         if doc.get("indexing_status") == "indexed" and not doc.get("shelf_suggested"):
             suggest_document_shelf(doc["document_id"])
+        elif doc.get("indexing_status") == "indexed" and not doc.get("doc_type") and _is_work_document(doc):
+            doc_type = _document_type(doc, doc.get("kind_override") or doc.get("kind"))
+            if doc_type:
+                try:
+                    # Only the type: a stored suggestion or the reader's shelf stays put.
+                    STORE.update(doc["document_id"], {"doc_type": doc_type})
+                except KeyError:
+                    pass
 
 
 def _embed_and_finish(doc_id: str) -> None:
@@ -3054,25 +3092,100 @@ async def patch_document(doc_id: str, patch: DocumentPatch):
         changes["read_at"] = f"{finished}T00:00:00Z"
     if "kind" in sent and patch.kind is not None:
         changes["kind_override"] = None if patch.kind == "auto" else patch.kind
-        # The top-level shelf follows the kind (Books vs Papers); author and
-        # subject were already worked out, so no re-embedding is needed.
-        kind = changes["kind_override"] or metadata.get("kind")
-        changes["shelf_suggested"] = shelves.suggest_shelf(kind, metadata.get("subject"), metadata.get("author"))
+    if "doc_type" in sent and patch.doc_type is not None:
+        changes["doc_type_override"] = None if patch.doc_type == "auto" else patch.doc_type
     if "shelf" in sent:
         try:
             changes["shelf"] = shelves.normalize_shelf(patch.shelf)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if {"author", "subject"} & sent:
-        changes["shelf_suggested"] = shelves.suggest_shelf(
-            changes.get("kind_override", metadata.get("kind_override")) or metadata.get("kind"),
-            changes.get("subject", metadata.get("subject")), changes.get("author", metadata.get("author")),
-        )
+    if {"kind", "doc_type", "author", "subject"} & sent:
+        # The top-level shelf follows the kind and type (Books, Papers, Reports,
+        # ...); author and subject were already worked out, so nothing is
+        # re-embedded.
+        merged = {**metadata, **changes}
+        kind = merged.get("kind_override") or merged.get("kind")
+        if kind in {"book", "note"}:
+            doc_type = None
+        elif merged.get("doc_type_override"):
+            doc_type = merged["doc_type_override"]
+        elif {"kind", "doc_type"} & sent or not merged.get("doc_type"):
+            doc_type = _document_type(merged, kind)
+        else:
+            doc_type = merged["doc_type"]
+        if doc_type:
+            changes["doc_type"] = doc_type
+        changes["shelf_suggested"] = _shelf_suggestion(kind, doc_type, merged.get("subject"), merged.get("author"))
     if not changes:
         return await asyncio.to_thread(read_metadata, doc_id)
     # Not update_metadata(): a reader's mark isn't a pipeline change, so it
     # shouldn't bump updated_at (which orders the indexing queue).
     return await asyncio.to_thread(STORE.update, doc_id, changes)
+
+
+class ClassifyBody(BaseModel):
+    # Omitted: every working document. `apply` false only proposes.
+    document_ids: Optional[List[str]] = Field(default=None, max_length=10_000)
+    apply: bool = False
+    # Documents the reader already shelved are left alone unless this is set.
+    include_filed: bool = False
+
+
+def _is_work_document(doc: dict) -> bool:
+    return (
+        doc.get("record_type") != "standalone"
+        and doc.get("collection_id") != NOTES_COLLECTION_ID
+        and (doc.get("kind_override") or doc.get("kind") or "document") not in {"book", "note"}
+    )
+
+
+@app.post("/documents/classify")
+async def classify_documents(body: ClassifyBody):
+    """Work out what each working document is and where it belongs.
+
+    Nothing on disk moves: "moving" sets the document's virtual shelf. With
+    ``apply`` false this only proposes; with it true the proposals for
+    documents without a shelf of their own are stored."""
+
+    def run() -> dict:
+        wanted = set(body.document_ids) if body.document_ids is not None else None
+        proposals, waiting = [], 0
+        for doc in list_metadata():
+            if not _is_work_document(doc) or (wanted is not None and doc["document_id"] not in wanted):
+                continue
+            if doc.get("indexing_status") != "indexed":
+                waiting += 1
+                continue
+            kind = doc.get("kind_override") or doc.get("kind")
+            doc_type = _document_type(doc, kind) or "other"
+            proposed = _shelf_suggestion(kind, doc_type, doc.get("subject"), doc.get("author"))
+            filed = bool(doc.get("shelf"))
+            proposals.append({
+                "document_id": doc["document_id"],
+                "title": doc.get("title") or doc.get("filename"),
+                "file_type": doc.get("file_type"),
+                "doc_type": doc_type,
+                "type_label": DOC_TYPE_LABELS[doc_type],
+                "current_shelf": shelves.effective_shelf(doc),
+                "proposed_shelf": proposed,
+                "filed": filed,
+                "changes": (doc.get("doc_type") != doc_type) or (not filed and doc.get("shelf_suggested") != proposed)
+                or (filed and body.include_filed and doc.get("shelf") != proposed),
+            })
+        applied = 0
+        if body.apply:
+            for item in proposals:
+                if item["filed"] and not body.include_filed:
+                    continue
+                updates = {"doc_type": item["doc_type"], "shelf": item["proposed_shelf"], "shelf_suggested": item["proposed_shelf"]}
+                try:
+                    STORE.update(item["document_id"], updates)
+                except KeyError:
+                    continue
+                applied += 1
+        return {"proposals": proposals, "applied": applied, "waiting": waiting, "types": list(DOC_TYPES)}
+
+    return await asyncio.to_thread(run)
 
 
 def _note_title(text: str) -> str:

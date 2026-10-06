@@ -2,15 +2,14 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 
 import AskThread, { AskRail } from "./AskThread.jsx";
 import Console from "./Console.jsx";
-import Notebook from "./Notebook.jsx";
 import SearchResults from "./SearchResults.jsx";
+import DocumentsLibrary from "./DocumentsLibrary.jsx";
 import Settings from "./Settings.jsx";
 import SourceViewer from "./SourceViewer.jsx";
 import BookPage from "./BookPage.jsx";
 import Stacks from "./Stacks.jsx";
 import { TERMINAL_JOB_STATES } from "./actionProgress.js";
 import {
-  clearInquiries,
   loadInquiries,
   loadStored,
   recordInquiry,
@@ -92,11 +91,11 @@ function LibraryIcon() {
   );
 }
 
-function NotebookIcon() {
+function DocumentsIcon() {
   return (
-    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
-      <rect x="5" y="3" width="14" height="18" rx="1.5" />
-      <path d="M9 3v18M12 8h4M12 12h4" />
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M7 3h7l4 4v14H7z" />
+      <path d="M14 3v4h4M10 12h5M10 16h5" />
     </svg>
   );
 }
@@ -108,9 +107,11 @@ export default function App() {
   const [floors, setFloors] = useState(DEFAULT_FLOORS);
   const [theme, setTheme] = useState(() => currentTheme() || "light");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [notebookOpen, setNotebookOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => loadStored(SIDEBAR_COLLAPSED_KEY, "") === "1");
-  const [surface, setSurface] = useState(() => (loadStored(SURFACE_KEY, "workspace") === "library" ? "library" : "workspace"));
+  const [surface, setSurface] = useState(() => {
+    const stored = loadStored(SURFACE_KEY, "workspace");
+    return stored === "library" || stored === "documents" ? stored : "workspace";
+  });
 
   // Collection maintenance: uploads, rescans, folder-import jobs, reindexing.
   const [job, setJob] = useState(null);
@@ -143,7 +144,7 @@ export default function App() {
     saveStored(OLLAMA_KEY, models);
   }, []);
 
-  // Conversation history — listed in the notebook; Ask renders whichever
+  // Conversation history — listed in the sidebar; Ask renders whichever
   // conversation `activeChatId` points at.
   const [chats, setChats] = useState([]);
   const [activeChatId, setActiveChatIdState] = useState(() => loadStored(ACTIVE_CHAT_KEY, "") || null);
@@ -411,7 +412,6 @@ export default function App() {
     setSurface("workspace");
     if (id !== activeChatId) setActiveChatId(id);
     setMode("ask");
-    setNotebookOpen(false);
     window.scrollTo({ top: 0 });
   }
 
@@ -419,7 +419,6 @@ export default function App() {
     setSurface("workspace");
     ask.newChat();
     setMode("ask");
-    setNotebookOpen(false);
     focusConsole();
   }
 
@@ -502,12 +501,11 @@ export default function App() {
     }
   }
 
-  // A search from the notebook re-runs at once; a question is put back in
+  // A recent-search chip re-runs at once; a question is put back in
   // the box instead, since sending it spends a model call and would land in
   // whichever conversation happens to be open.
   function runInquiry(entry) {
     setSurface("workspace");
-    setNotebookOpen(false);
     if (entry.mode === "ask" && askEnabled) {
       setMode("ask");
       setQuery(entry.q);
@@ -898,23 +896,26 @@ export default function App() {
           </button>
         )}
         <nav className="sidebar-nav" aria-label="Primary">
-          <button type="button" className={`sidebar-link${surface === "library" ? " active" : ""}`} onClick={() => { setSurface("library"); setNotebookOpen(false); setSettingsOpen(false); window.scrollTo({ top: 0 }); }} aria-current={surface === "library" ? "page" : undefined} aria-label="Library" title="Library">
+          <button type="button" className={`sidebar-link${surface === "library" ? " active" : ""}`} onClick={() => { setSurface("library"); setSettingsOpen(false); window.scrollTo({ top: 0 }); }} aria-current={surface === "library" ? "page" : undefined} aria-label="Library" title="Library">
             <LibraryIcon />
             Library
           </button>
-          <button type="button" className="sidebar-link" onClick={() => setNotebookOpen(true)} aria-label="History" title="History">
-            <NotebookIcon />
-            History
+          <button type="button" className={`sidebar-link${surface === "documents" ? " active" : ""}`} onClick={() => { setSurface("documents"); setSettingsOpen(false); window.scrollTo({ top: 0 }); }} aria-current={surface === "documents" ? "page" : undefined} aria-label="Documents" title="Documents">
+            <DocumentsIcon />
+            Documents
           </button>
         </nav>
         {askEnabled && chats.length > 0 && (
           <div className="sidebar-history">
             <div className="sidebar-section-label">Recent chats</div>
             {chats.slice(0, 8).map((chat) => (
-              <button type="button" className={`sidebar-chat${surface === "workspace" && chat.id === activeChatId ? " active" : ""}`} key={chat.id} onClick={() => selectChat(chat.id)} title={chat.title}>
-                <span aria-hidden="true">¶</span>
-                <span>{chat.title || "Untitled chat"}</span>
-              </button>
+              <div className="sidebar-chat-row" key={chat.id}>
+                <button type="button" className={`sidebar-chat${surface === "workspace" && chat.id === activeChatId ? " active" : ""}`} onClick={() => selectChat(chat.id)} title={chat.title}>
+                  <span aria-hidden="true">¶</span>
+                  <span>{chat.title || "Untitled chat"}</span>
+                </button>
+                <button type="button" className="sidebar-chat-delete" onClick={() => deleteChat(chat.id)} aria-label={`Delete conversation: ${chat.title || "Untitled chat"}`} title="Delete conversation">×</button>
+              </div>
             ))}
           </div>
         )}
@@ -957,9 +958,9 @@ export default function App() {
             <span className="brand-mark" aria-hidden="true" />
             <span className="brand-name">AI Librarian</span>
           </div>
-          {surface === "library" ? (
+          {surface === "library" || surface === "documents" ? (
             <div className="chat-crumb current">
-              <span className="chat-crumb-title">Library</span>
+              <span className="chat-crumb-title">{surface === "documents" ? "Documents" : "Library"}</span>
             </div>
           ) : askEnabled && (
             <div className={`chat-crumb${isAsk ? " current" : ""}`}>
@@ -969,7 +970,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className={surface === "library" ? "library-main" : "workspace-main"}>
+      <main className={surface === "library" || surface === "documents" ? "library-main" : "workspace-main"}>
         {surface === "workspace" && <section className={`hero${workspaceActive ? " docked" : ""}${workspaceActive && isAsk ? " chat-bottom" : ""}`} ref={heroRef}>
           <div className="hero-center">
             {!workspaceActive && (
@@ -1059,6 +1060,12 @@ export default function App() {
           </section>
         )}
 
+        {surface === "documents" && (
+          <div className="library-surface">
+            <DocumentsLibrary apiBase={API_BASE} documents={documents} onOpenDocument={(doc) => openBook(doc.document_id)} onChanged={refreshDocuments} />
+          </div>
+        )}
+
         {surface === "library" && (
           <div className="library-surface">
             <Stacks
@@ -1098,19 +1105,6 @@ export default function App() {
         )}
       </main>
 
-      <Notebook
-        open={notebookOpen}
-        onClose={() => setNotebookOpen(false)}
-        askEnabled={askEnabled}
-        chats={chats}
-        activeChatId={activeChatId}
-        onSelectChat={selectChat}
-        onNewChat={newChat}
-        onDeleteChat={deleteChat}
-        inquiries={inquiries}
-        onRunInquiry={runInquiry}
-        onClearInquiries={() => setInquiries(clearInquiries())}
-      />
 
       {bookId && (
         <BookPage key={bookId + (bookPassage?.snippet || "")} apiBase={API_BASE} documentId={bookId} passage={bookPassage} readerOpen={Boolean(source)} askEnabled={askEnabled}

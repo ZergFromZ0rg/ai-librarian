@@ -29,6 +29,16 @@ MAX_PART_CHARS = 80
 
 TOP_LEVEL = {"book": "Books", "paper": "Papers", "document": "Documents", "note": "Notes"}
 
+# Top-level shelves for working documents, by document type (see doc_types.py).
+# "other" keeps the original catch-all name so older shelves stay where they are.
+DOCUMENT_TOP_LEVEL = {
+    "paper": "Papers", "report": "Reports", "manual": "Manuals", "slides": "Slides",
+    "data": "Data", "writing": "Writing", "legal": "Legal & Finance", "other": "Documents",
+}
+# Only these get a subject sub-shelf: the subject list describes topics of
+# research and reference material, not invoices, decks or spreadsheets.
+DOCUMENT_SUBJECT_TYPES = frozenset({"paper", "report", "manual", "other"})
+
 # Label -> description embedded as a search query. Descriptions name the kind
 # of material a shelf holds so a document's opening passages match them the
 # way a passage matches a question.
@@ -168,6 +178,14 @@ def suggest_shelf(kind: Optional[str], subject: Optional[str], author: Optional[
         parts.append(subject)
     if author and kind == "book":
         parts.append(author)
+    return SEPARATOR.join(clean_part(part) for part in parts if clean_part(part))
+
+
+def suggest_document_shelf(doc_type: Optional[str], subject: Optional[str]) -> str:
+    """Where a working document of `doc_type` sits, e.g. Papers/Physics."""
+    parts = [DOCUMENT_TOP_LEVEL.get(doc_type or "", "Documents")]
+    if subject and doc_type in DOCUMENT_SUBJECT_TYPES:
+        parts.append(subject)
     return SEPARATOR.join(clean_part(part) for part in parts if clean_part(part))
 
 

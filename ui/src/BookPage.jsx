@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import BookDetails from "./BookDetails.jsx";
 import ReadingProgress from "./ReadingProgress.jsx";
 import VocabularyPanel from "./VocabularyPanel.jsx";
+import { isWorkDocument } from "./documentsLibrary.js";
 import { displayTitle } from "./storage.js";
 import { katexPlugin, prepareMath, remarkPlugins } from "./markdown.js";
 
@@ -102,24 +103,25 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
   const source = (at, snippet) => ({ documentId, documentName: doc.title || doc.filename, page: at || 1, snippet });
   const markdown = (text) => <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={[katexPlugin]} skipHtml>{prepareMath(text)}</ReactMarkdown>;
   const hasSource = doc?.record_type !== "standalone";
+  const work = isWorkDocument(doc);
   return createPortal(
     <section className="book-page-overlay" role="dialog" aria-modal={!readerOpen} aria-hidden={readerOpen || undefined} inert={readerOpen || undefined} aria-labelledby="book-page-title">
       <div className="book-page">
         <header className="book-page-nav">
-          <button ref={closeRef} className="text-button" onClick={close}>← Back to library</button>
+          <button ref={closeRef} className="text-button" onClick={close}>{work ? "← Back" : "← Back to library"}</button>
           <a className="text-button" href={`#book/${documentId}`} onClick={(event) => { event.preventDefault(); copyLink(); }}>Copy book link</a>
         </header>
         {error && <p className="notice error" role="alert">{error}</p>}
         {notice && <p className="notice" role="status">{notice}</p>}
         {!doc ? <h1 id="book-page-title">{error ? "Book unavailable" : "Opening book…"}</h1> : <>
           <header className="book-overview">
-            <div><div className="book-overview-kicker"><span className="eyebrow">Your personal library</span><span className="book-format">{hasSource ? doc.file_type?.toUpperCase() : "NO FILE"}</span></div><h1 id="book-page-title">{doc.title || displayTitle(doc.filename)}</h1>{doc.author && <p>{doc.author}</p>}</div>
-            {hasSource ? <div className="book-page-actions"><button className="button primary" onClick={() => onRead(source(passage?.page || doc.current_page || 1))}>{doc.current_page ? "Resume" : "Read"} {doc.file_type === "epub" ? "EPUB" : doc.file_type === "pdf" ? "PDF" : "source"} ↗</button><button className="button" disabled={!askEnabled} title={!askEnabled ? "Enable an answering model in Settings" : undefined} onClick={() => { if (!dirty.current || window.confirm("Discard your unsaved changes?")) onAsk(source()); }}>Ask this book</button></div> : <p className="book-record-label">Catalogue record · no digital file attached</p>}
+            <div><div className="book-overview-kicker"><span className="eyebrow">{work ? "Your documents" : "Your personal library"}</span><span className="book-format">{hasSource ? doc.file_type?.toUpperCase() : "NO FILE"}</span></div><h1 id="book-page-title">{doc.title || displayTitle(doc.filename)}</h1>{doc.author && <p>{doc.author}</p>}</div>
+            {hasSource ? <div className="book-page-actions"><button className="button primary" onClick={() => onRead(source(passage?.page || doc.current_page || 1))}>{doc.current_page ? "Resume" : "Read"} {doc.file_type === "epub" ? "EPUB" : doc.file_type === "pdf" ? "PDF" : "source"} ↗</button><button className="button" disabled={!askEnabled} title={!askEnabled ? "Enable an answering model in Settings" : undefined} onClick={() => { if (!dirty.current || window.confirm("Discard your unsaved changes?")) onAsk(source()); }}>{work ? "Ask this document" : "Ask this book"}</button></div> : <p className="book-record-label">Catalogue record · no digital file attached</p>}
           </header>
           <BookDetails doc={doc} apiBase={apiBase} onDocument={(updated) => { setDocument(updated); onChanged(); }} onDirty={setDetailsDirty} onCoverChanged={onCoverChanged} />
           <ReadingProgress apiBase={apiBase} doc={doc} onRead={onRead} onDirty={setProgressDirty} onDocument={(updated) => { setDocument(updated); onChanged(); }} />
           <div className="book-page-notes">
-            <div className="book-page-section-head"><h2>Reading notebook</h2><span className="muted">{notes.length} saved · searchable in Notes</span></div>
+            <div className="book-page-section-head"><h2>{work ? "Notes" : "Reading notebook"}</h2><span className="muted">{notes.length} saved · searchable in Notes</span></div>
             <form className="book-note-editor" onSubmit={saveNote}>
               <h3>{editing ? "Edit note" : quote ? "Save this passage" : "Add a thought"}</h3>
               {quote && <><blockquote>{quote}</blockquote><p className="muted">Source location {page || "—"} · saved separately from your commentary</p></>}

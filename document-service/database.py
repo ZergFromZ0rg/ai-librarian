@@ -89,6 +89,10 @@ COLUMNS = (
     "last_read_at",
     "metadata_source",
     "metadata_source_id",
+    # What sort of working document this is (paper, report, manual, ...), see
+    # doc_types.py. `doc_type` is the guess; `doc_type_override` is the reader's.
+    "doc_type",
+    "doc_type_override",
 )
 UPDATABLE_COLUMNS = frozenset(COLUMNS) - {"document_id"}
 
@@ -267,6 +271,8 @@ class MetadataStore:
             ("last_read_at", "TEXT"),
             ("metadata_source", "TEXT"),
             ("metadata_source_id", "TEXT"),
+            ("doc_type", "TEXT"),
+            ("doc_type_override", "TEXT"),
         ):
             if column not in existing:
                 self._conn.execute(
