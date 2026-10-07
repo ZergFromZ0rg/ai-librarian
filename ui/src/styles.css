@@ -5767,3 +5767,26 @@ main {
 .pdf-mark-comment { margin: 6px 0 0; color: var(--ink-2); font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .pdf-mark .muted { margin: 4px 0 0; font-size: 12px; }
 @media (max-width: 600px) { .pdf-mark { grid-template-columns: 38px minmax(0, 1fr); gap: 8px; } }
+
+/* ------------------------------------ a calmer library landing view -- */
+.collection-set { margin: 0 0 16px; padding: 8px 12px; }
+.collection-set.managing { padding: 14px; }
+.collection-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.collection-chips .eyebrow { margin-right: 4px; }
+.collection-chip { display: inline-flex; align-items: center; gap: 7px; padding: 4px 12px; border: 1px solid var(--rule); border-radius: 999px; background: var(--surface); color: var(--ink-2); font-size: 12.5px; font-weight: 550; transition: border-color .12s, background .12s; }
+.collection-chip:hover { border-color: var(--rule-strong); }
+.collection-chip.active { border-color: var(--accent); background: var(--accent-tint); color: var(--ink); }
+.collection-chip-count { color: var(--muted); font: 11px var(--mono, monospace); }
+.collection-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); opacity: .5; }
+.collection-dot.on { background: var(--ok, #2e9e63); opacity: 1; }
+.collection-manage { margin-left: auto; font-size: 12px; }
+.collection-set.managing .collection-set-head { margin: 14px 0 12px; }
+.explore-controls { padding: 12px 16px; gap: 12px; }
+.explore-filter-toggle { min-height: 36px; display: inline-flex; align-items: center; gap: 8px; }
+.explore-filter-count { min-width: 18px; padding: 0 5px; border-radius: 999px; background: var(--accent); color: var(--on-primary, #fff); font: 600 11px/18px var(--mono, monospace); text-align: center; }
+.explore-filter-summary { margin: 0; color: var(--muted); font-size: 12px; }
+.explore-filter-panel { display: grid; gap: 14px; border-top: 1px solid var(--rule); padding-top: 14px; }
+.explore-result-head .layout-toggle { margin-left: auto; }
+@media (min-width: 601px) {
+  .explore-search-row { grid-template-columns: minmax(240px, 1fr) minmax(150px, .25fr) repeat(3, auto); }
+}

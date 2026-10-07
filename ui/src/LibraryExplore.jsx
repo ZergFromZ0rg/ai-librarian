@@ -21,6 +21,7 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
     return Array.isArray(value) ? value : [];
   });
   const [saveName, setSaveName] = useState("");
+  const [showFilters, setShowFilters] = useState(false);
   useEffect(() => { if (preset) setFilters({ ...EMPTY_FILTERS, ...preset }); }, [preset]);
   useEffect(() => {
     const next = searchWithView(window.location.search, filters, layout);
@@ -54,15 +55,22 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
     setSaved(next); saveStored(SAVED_KEY, next); setSaveName("");
   }
   function removeView(id) { const next = saved.filter((view) => view.id !== id); setSaved(next); saveStored(SAVED_KEY, next); }
-  const activeCount = Object.entries(filters).filter(([key, value]) => !["sort", "order", "query"].includes(key) && value !== "all").length + (filters.query ? 1 : 0);
+  const facetCount = Object.entries(filters).filter(([key, value]) => !["sort", "order", "query"].includes(key) && value !== "all").length;
+  const activeCount = facetCount + (filters.query ? 1 : 0);
+  const summary = filterLabels({ ...filters, query: "" }, collections);
   return <div className="library-explore">
     <section className="explore-controls" aria-label="Filter library">
       <div className="explore-search-row">
         <label className="explore-search"><span>Search this library</span><input className="input" value={filters.query} onChange={(event) => update("query", event.target.value)} placeholder="Title, author, or ISBN" /></label>
         <label><span>Sort</span><select value={filters.sort} onChange={(event) => update("sort", event.target.value)}><option value="title">Title</option><option value="author">Author</option><option value="status">Status</option><option value="rating">Rating</option><option value="format">Format</option><option value="pages">Page count</option><option value="notes">Notes</option><option value="added">Recently added</option><option value="recent">Recently read</option><option value="finished">Recently finished</option></select></label>
         <button className="text-button" type="button" aria-pressed={filters.order === "reverse"} onClick={() => update("order", filters.order === "reverse" ? "default" : "reverse")}>{filters.order === "reverse" ? "Reversed" : "Reverse"}</button>
-        <button className="text-button" type="button" disabled={!activeCount} onClick={() => setFilters(EMPTY_FILTERS)}>Clear {activeCount || ""}</button>
+        <button className="button explore-filter-toggle" type="button" aria-expanded={showFilters} aria-controls="explore-filter-panel" onClick={() => setShowFilters((open) => !open)}>
+          Filters{facetCount > 0 && <span className="explore-filter-count">{facetCount}</span>}
+        </button>
+        {activeCount > 0 && <button className="text-button" type="button" onClick={() => setFilters(EMPTY_FILTERS)}>Clear {activeCount}</button>}
       </div>
+      {!showFilters && facetCount > 0 && <p className="explore-filter-summary" role="status">{summary.join(" · ")}</p>}
+      {showFilters && <div id="explore-filter-panel" className="explore-filter-panel">
       <div className="explore-facets">
         <label>Status<select value={filters.status} onChange={(e) => update("status", e.target.value)}><option value="all">All</option><option value="to_read">To read</option><option value="reading">Reading</option><option value="read">Read</option><option value="abandoned">Abandoned</option></select></label>
         <label>Ownership<select value={filters.ownership} onChange={(e) => update("ownership", e.target.value)}><option value="all">All</option><option value="owned">Owned</option><option value="unowned">Not owned</option></select></label>
@@ -82,9 +90,9 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
         {saved.map((view) => <span className="saved-view" key={view.id}><button type="button" onClick={() => setFilters({ ...EMPTY_FILTERS, ...view.filters })}>{view.name}</button><button type="button" aria-label={`Delete ${view.name}`} onClick={() => removeView(view.id)}>×</button></span>)}
         <form onSubmit={saveView}><input value={saveName} onChange={(e) => setSaveName(e.target.value)} placeholder="View name" aria-label="Saved view name" /><button className="text-button" disabled={!saveName.trim()}>Save current</button></form>
       </div>
+      </div>}
     </section>
-    <div className="explore-result-head"><strong>{results.length.toLocaleString()}</strong> book{results.length === 1 ? "" : "s"}<span className="muted">Open a row to edit metadata, progress, notes, and vocabulary.</span>
-      <span className="layout-toggle" role="group" aria-label="Layout">{[["list", "List"], ["ledger", "Ledger"], ["diary", "Diary"]].map(([value, label]) => <button type="button" key={value} className={layout === value ? "active" : ""} aria-pressed={layout === value} onClick={() => setLayout(value)}>{label}</button>)}</span>
+    <div className="explore-result-head"><strong>{results.length.toLocaleString()}</strong> book{results.length === 1 ? "" : "s"}      <span className="layout-toggle" role="group" aria-label="Layout">{[["list", "List"], ["ledger", "Ledger"], ["diary", "Diary"]].map(([value, label]) => <button type="button" key={value} className={layout === value ? "active" : ""} aria-pressed={layout === value} onClick={() => setLayout(value)}>{label}</button>)}</span>
     </div>
     {layout === "ledger" && results.length > 0 && <LibraryLedger rows={results} filters={filters} onOpen={onOpenDocument} onSort={(key) => setFilters((current) => (current.sort === key ? { ...current, order: current.order === "reverse" ? "default" : "reverse" } : { ...current, sort: key, order: "default" }))} />}
     {layout === "diary" && results.length > 0 && <LibraryDiary apiBase={apiBase} rows={results} onOpen={onOpenDocument} />}

@@ -47,6 +47,7 @@ function CollectionBar({ collections, activeId, onSelect, onCreate, onUpdate, on
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
   const [autoScan, setAutoScan] = useState(true);
+  const [managing, setManaging] = useState(false);
   const active = collections.find((collection) => collection.id === activeId);
 
   async function submit(event) {
@@ -62,13 +63,34 @@ function CollectionBar({ collections, activeId, onSelect, onCreate, onUpdate, on
     }
   }
 
+  // Closed, collections are one slim row of chips so the books stay the first
+  // thing on the page; "Manage" opens the folder details, pause/resume, add
+  // and remove.
   return (
-    <section className="collection-set" aria-label="Collections">
+    <section className={`collection-set${managing ? " managing" : ""}`} aria-label="Collections">
+      <div className="collection-chips" role="group" aria-label="Choose collection">
+        <span className="eyebrow">Collections</span>
+        {collections.map((collection) => (
+          <button
+            key={collection.id}
+            type="button"
+            className={`collection-chip${collection.id === activeId ? " active" : ""}`}
+            aria-pressed={collection.id === activeId}
+            onClick={() => onSelect(collection.id)}
+            title={`/${collection.path || ""} · ${collection.auto_scan ? "watching" : "paused"}`}
+          >
+            <span className={`collection-dot${collection.auto_scan ? " on" : ""}`} aria-hidden="true" />
+            {collection.name}
+            <span className="collection-chip-count">{collection.document_count || 0}</span>
+          </button>
+        ))}
+        <button type="button" className="text-button collection-manage" aria-expanded={managing} onClick={() => { setManaging((open) => !open); if (managing) setAdding(false); }}>
+          {managing ? "Done" : "Manage"}
+        </button>
+      </div>
+      {managing && <>
       <div className="collection-set-head">
-        <div>
-          <span className="eyebrow">Collections</span>
-          <p>Keep books, work, and reference folders distinct without moving a file.</p>
-        </div>
+        <p>Keep books, work, and reference folders distinct without moving a file.</p>
         <div className="collection-set-actions">
           {active && !active.legacy && (
             <button type="button" className="text-button danger" onClick={() => onDelete(active)} title="Stop tracking this folder; its documents stay indexed">
@@ -80,7 +102,7 @@ function CollectionBar({ collections, activeId, onSelect, onCreate, onUpdate, on
           </button>
         </div>
       </div>
-      <div className="collection-cards" role="group" aria-label="Choose collection">
+      <div className="collection-cards" role="group" aria-label="Collection details">
         {collections.map((collection) => (
           <div key={collection.id} className={`collection-card${collection.id === activeId ? " active" : ""}`}>
             <button
@@ -118,6 +140,7 @@ function CollectionBar({ collections, activeId, onSelect, onCreate, onUpdate, on
           <button className="button primary" type="submit" disabled={busy || !name.trim() || !path.trim()}>{busy ? "Adding…" : "Add & index"}</button>
         </form>
       )}
+      </>}
     </section>
   );
 }
