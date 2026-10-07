@@ -183,7 +183,7 @@ export default function App() {
   }
   function viewSource(next) {
     if (next.savePassage) openBook(next.documentId, next);
-    else setSource(next);
+    else openSource(next);
   }
 
   const api = useCallback(async (path, options = {}) => {
@@ -862,6 +862,21 @@ export default function App() {
       .catch(() => {});
   }, []);
 
+  // A PDF opens in the browser's own viewer, on the right page, where the
+  // reader marks it up with that viewer's tools (highlight, underline, text,
+  // draw). The server reads those marks back out of the file. Everything else
+  // (notes, EPUBs, Office files) previews in the in-app reader.
+  function openSource(next) {
+    const doc = documents.find((item) => item.document_id === next.documentId);
+    if (doc?.file_type === "pdf" && doc.collection_id !== "notes") {
+      const page = next.page || 1;
+      window.open(`${API_BASE}/documents/${next.documentId}/file#page=${page}`, "_blank", "noopener");
+      rememberReadingPage(next.documentId, page);
+      return;
+    }
+    setSource(next);
+  }
+
   async function removeDocument(document) {
     const label = document.title || document.filename;
     if (!window.confirm(`Remove “${label}” from the library?`)) return;
@@ -1110,7 +1125,7 @@ export default function App() {
 
       {bookId && (
         <BookPage key={bookId + (bookPassage?.snippet || "")} apiBase={API_BASE} documentId={bookId} passage={bookPassage} readerOpen={Boolean(source)} askEnabled={askEnabled}
-          onClose={closeBook} onRead={setSource} onChanged={refreshDocuments}
+          onClose={closeBook} onRead={openSource} onChanged={refreshDocuments}
           onCoverChanged={() => window.dispatchEvent(new Event("book-cover-changed"))}
           onAsk={({ documentId, documentName }) => { closeBook(); setMode("ask"); scopeTo(documentId, documentName); }} />
       )}

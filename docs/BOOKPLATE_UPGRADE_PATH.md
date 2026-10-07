@@ -619,6 +619,7 @@ reopen without new evidence.
 | 2026-10-05 | Cloth cover colour is derived from the book ID (twelve fixed bindings), never list position. | A book keeps its colour when sorted or filtered. |
 | 2026-10-06 | Library view state (filters, sort, layout) is encoded as `lib.*` query parameters, and an address carrying them opens the Library. Notes are searched through a client-side map built from `GET /notes`, and books carry a server-computed `note_count`. | A bookmarkable view needs no new storage; the existing document list stays the single source for List and Ledger, so their counts always agree. |
 | 2026-10-06 | In sorting, books with no value for the sorted column always sort last, in either direction. | Reversing a column must not bury the books that have real values. |
+| 2026-10-07 | PDFs open in the browser's own viewer; the in-app PDF editor and its annotation table were removed. Marks are read back out of the PDF file itself (highlights, underlines, strike-outs, text boxes, notes, pen strokes) into one generated digest per book. | Native viewers are better editors than anything built here, and the file is the one source of truth. Originals stay read-only: a copy saved from a viewer is attached beside the original, and an in-place edit is detected by file signature, with a text fingerprint that ignores annotations so a marks-only change never re-indexes. |
 
 ## Current handoff
 

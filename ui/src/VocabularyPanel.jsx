@@ -3,8 +3,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import { displayTitle } from "./storage.js";
 import UnderlinedWords from "./UnderlinedWords.jsx";
 
-// Words are collected, not typed in: underline a single word in the reader (or
-// in any PDF app) and scan the book, and the word arrives with its page and
+// Words are collected, not typed in: underline a single word in your PDF
+// viewer (any app) and scan the book, and the word arrives with its page and
 // sentence. Here you review them and write the definitions.
 export default function VocabularyPanel({ apiBase, documents = [], documentId = "", onOpenDocument, onDirty }) {
   const [words, setWords] = useState([]);

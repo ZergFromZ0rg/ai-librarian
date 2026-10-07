@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { createPortal } from "react-dom";
 import BookDetails from "./BookDetails.jsx";
+import PdfMarks from "./PdfMarks.jsx";
 import ReadingProgress from "./ReadingProgress.jsx";
 import VocabularyPanel from "./VocabularyPanel.jsx";
 import { isWorkDocument } from "./documentsLibrary.js";
@@ -120,6 +121,7 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
           </header>
           <BookDetails doc={doc} apiBase={apiBase} onDocument={(updated) => { setDocument(updated); onChanged(); }} onDirty={setDetailsDirty} onCoverChanged={onCoverChanged} />
           <ReadingProgress apiBase={apiBase} doc={doc} onRead={onRead} onDirty={setProgressDirty} onDocument={(updated) => { setDocument(updated); onChanged(); }} />
+          {hasSource && doc.file_type === "pdf" && <PdfMarks apiBase={apiBase} doc={doc} onChanged={onChanged} />}
           <div className="book-page-notes">
             <div className="book-page-section-head"><h2>{work ? "Notes" : "Reading notebook"}</h2><span className="muted">{notes.length} saved · searchable in Notes</span></div>
             <form className="book-note-editor" onSubmit={saveNote}>

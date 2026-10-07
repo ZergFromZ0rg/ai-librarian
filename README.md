@@ -259,6 +259,17 @@ source reading and Ask appear only when a digital file exists. Metadata editing
 is manual, and note editing uses Markdown with a preview rather than an inline
 rich-text editor.
 
+### Marking up PDFs
+
+The app has no PDF editor of its own. **Read PDF** opens the file in your browser's viewer (or any PDF app), where you highlight, underline, strike out, type text, add sticky notes or draw with that viewer's own tools. Those marks are standard PDF annotations, and the app reads them back out of the file:
+
+- Highlighted and underlined passages are quoted from the page's own text layer by geometry, with any comment you attached. Typed text, notes, replies and highlighter-pen strokes are read too. They are indexed as one generated digest per book, so search and Ask can find and cite them, and the book page lists them under **Marks in your PDF** so you can check what was read.
+- A PDF edited **in place** in the library folder is noticed by the background scan (`AUTO_INGEST_INTERVAL_SECONDS`) and its marks refreshed. A file that only gained marks is not re-indexed; one whose text changed is.
+- A copy **saved from a browser's viewer** goes to your Downloads, so attach it with **Add saved copy** on the book page. It is kept beside the original (never replacing it, so a read-only library is fine) and opens in its place. **Use original** goes back.
+- Underlined single words feed the vocabulary notebook the same way.
+
+Annotated copies live in `data/annotated/` and are not part of the export archive; back that folder up if you rely on it.
+
 ### Supported formats and OCR
 
 Besides PDF, the library accepts EPUB (`.epub`), Word (`.docx`), Excel (`.xlsx`), PowerPoint (`.pptx`), plain text (`.txt`), Markdown (`.md`) and CSV. EPUBs are indexed as books, with their embedded title and author when available. Their pages and cover are rendered from a stable layout; PDF page highlighting is not available for EPUBs. Office files have no reliable page model, so each is split into "pages" that make sense for the format — a Word section, a spreadsheet sheet, a slide — and large text files into bounded blocks. The source viewer shows those formats as extracted text.

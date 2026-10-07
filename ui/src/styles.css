@@ -5596,107 +5596,10 @@ main {
 .ledger tfoot strong { color: var(--ink); }
 @media (max-width: 760px) { .ledger-optional { display: none; } .ledger { min-width: 0; } }
 
-/* ------------------------------------------- PDF reader and editor -- */
+/* ---------------------------------------------------- reader layout -- */
 
-.viewer.viewer-editor { width: min(1360px, 100%); }
 .viewer-body { display: flex; flex: 1; min-height: 0; }
 .viewer-body > .viewer-page-area { min-width: 0; }
-
-.viewer-tools {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px;
-  border-bottom: 1px solid var(--rule); background: var(--surface-2); padding: 6px 12px;
-}
-.viewer-tools select {
-  min-height: 28px; border: 1px solid var(--rule-strong); border-radius: 6px;
-  background: var(--bg); color: var(--ink); padding: 0 6px; font-size: 12px;
-}
-.tool-group { display: flex; align-items: center; gap: 2px; border: 1px solid var(--rule-strong); border-radius: 7px; background: var(--bg); padding: 2px; }
-.tool-group button {
-  min-height: 26px; border: 0; border-radius: 5px; background: none; padding: 0 9px;
-  color: var(--ink-2); font-size: 12px; font-weight: 500; cursor: pointer;
-}
-.tool-group button:hover { background: var(--surface-2); }
-.tool-group button.on { background: var(--primary); color: var(--on-primary); }
-.tool-colors { gap: 6px; padding: 4px 8px; }
-.tool-colors .swatch { width: 18px; height: 18px; }
-.tool-zoom button { min-width: 30px; padding: 0 6px; font-variant-numeric: tabular-nums; }
-.tool-spacer { flex: 1; }
-.tool-notice { color: var(--ok); font-size: 12px; }
-.viewer-tools .text-button.on { text-decoration: underline; text-underline-offset: 3px; }
-
-.swatch {
-  display: inline-block; width: 22px; height: 22px; border: 2px solid transparent; border-radius: 50%;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18); padding: 0; cursor: pointer;
-}
-.swatch.on { border-color: var(--bg); box-shadow: 0 0 0 2px var(--accent); }
-.swatch.tiny { width: 10px; height: 10px; flex: 0 0 auto; margin-top: 5px; cursor: default; border: 0; }
-
-.page-box { position: relative; display: block; margin: 0 auto; line-height: 0; }
-.page-box img { display: block; width: 100%; max-width: none; user-select: none; -webkit-user-drag: none; }
-.page-marks { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
-.page-marks .mark-highlight { mix-blend-mode: multiply; fill-opacity: 0.45; }
-.page-marks .mark-highlight.chosen { stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-dasharray: 4 3; }
-.page-marks .mark-halo { fill: var(--accent-tint); stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; stroke-dasharray: 4 3; }
-.page-marks polyline.chosen { filter: drop-shadow(0 0 3px var(--accent)); }
-.page-marks .mark-selection { fill: var(--accent); fill-opacity: 0.28; }
-.page-layer { position: absolute; inset: 0; cursor: text; user-select: none; touch-action: pan-y; }
-.page-layer.drawing { touch-action: none; }
-.tool-draw .page-layer { cursor: crosshair; }
-.tool-text .page-layer { cursor: cell; }
-.tool-erase .page-layer { cursor: pointer; }
-.tool-select .page-layer { cursor: default; }
-
-.page-textmark {
-  position: absolute; box-sizing: border-box; margin: 0; border: 1px solid transparent; border-radius: 3px;
-  background: none; padding: 1px 3px; font: 500 16px/1.35 var(--sans); white-space: pre-wrap; word-break: break-word;
-  text-align: left; pointer-events: none;
-}
-.page-textmark.live { pointer-events: auto; cursor: grab; }
-.page-textmark.live:hover { border-color: var(--accent-ring); }
-.page-textmark.chosen { border-color: var(--accent); border-style: dashed; }
-.page-textmark.editing { pointer-events: auto; border: 1px solid var(--accent); background: rgba(255, 255, 255, 0.92); outline: 0; resize: none; min-height: 2.2em; line-height: 1.35; }
-.page-box .page-textmark { z-index: 2; }
-
-.page-pop {
-  position: absolute; z-index: 5; display: flex; align-items: center; gap: 8px; line-height: 1.2;
-  border: 1px solid var(--rule-strong); border-radius: 8px; background: var(--surface); padding: 5px 9px; box-shadow: var(--shadow-pop);
-  white-space: nowrap;
-}
-.page-pop .swatch { width: 18px; height: 18px; }
-.page-pop .text-button { font-size: 12px; }
-
-.marks-panel {
-  display: flex; flex: 0 0 min(320px, 38%); flex-direction: column; min-width: 0;
-  border-left: 1px solid var(--rule); background: var(--surface);
-}
-.marks-tabs { display: flex; border-bottom: 1px solid var(--rule); }
-.marks-tabs button {
-  flex: 1; border: 0; border-bottom: 2px solid transparent; background: none; padding: 10px 6px;
-  color: var(--muted); font-size: 12px; font-weight: 600; cursor: pointer;
-}
-.marks-tabs button.on { border-bottom-color: var(--accent); color: var(--ink); }
-.marks-tabs button span { color: var(--muted); font-weight: 500; }
-.marks-body { flex: 1; overflow: auto; padding: 12px; text-align: left; }
-.marks-filters { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
-.marks-filters button {
-  border: 1px solid var(--rule); border-radius: 999px; background: none; padding: 2px 9px; color: var(--muted); font-size: 11px; cursor: pointer;
-}
-.marks-filters button.on { border-color: var(--accent); color: var(--accent); }
-.marks-page h4 { margin: 14px 0 4px; color: var(--muted); font: 600 10px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; }
-.marks-page ul { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
-.marks-page li button {
-  display: flex; align-items: flex-start; gap: 8px; width: 100%; border: 0; border-radius: 6px; background: none; padding: 6px 8px;
-  color: var(--ink-2); font-size: 12px; line-height: 1.45; text-align: left; cursor: pointer;
-}
-.marks-page li button:hover, .marks-page li button.on { background: var(--surface-2); }
-.marks-page li b { color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
-.marks-page li em { color: var(--muted); }
-.mark-editor { display: grid; gap: 8px; margin-bottom: 14px; border: 1px solid var(--accent-ring); border-radius: 8px; background: var(--accent-tint); padding: 10px; }
-.mark-editor header { display: flex; justify-content: space-between; font-size: 12px; }
-.mark-editor blockquote { margin: 0; border-left: 2px solid var(--accent-ring); padding-left: 8px; color: var(--ink-2); font-size: 12px; }
-.mark-editor textarea { width: 100%; resize: vertical; font-size: 12px; }
-.mark-colors { display: flex; gap: 6px; }
-.mark-editor-actions { display: flex; justify-content: space-between; }
 
 .underlined-words { display: grid; gap: 10px; text-align: left; }
 .underlined-words-head { display: flex; align-items: center; gap: 12px; }
@@ -5718,7 +5621,6 @@ main {
 
 @media (max-width: 760px) {
   .viewer-body { flex-direction: column; }
-  .marks-panel { flex: 0 0 40%; border-left: 0; border-top: 1px solid var(--rule); }
 }
 
 .lookup-best { margin-left: 8px; border-radius: 999px; background: var(--ok-tint); padding: 1px 8px; color: var(--ok); font: 600 10px var(--sans); font-style: normal; letter-spacing: 0.04em; text-transform: uppercase; vertical-align: middle; }
@@ -5844,3 +5746,24 @@ main {
   .book-cover-drop img { height: 168px; }
   .book-review-hint { display: none; }
 }
+
+/* ------------------------------------------------ marks in your PDF -- */
+.pdf-marks-card { display: grid; gap: 10px; margin-top: 24px; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); padding: 16px 20px; }
+.pdf-marks-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.pdf-marks-head > div:first-child { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; }
+.pdf-marks-head strong { font: 22px var(--serif, Georgia, serif); }
+.pdf-marks-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.pdf-marks-actions .button { text-decoration: none; }
+.pdf-marks-help { margin: 0; max-width: 72ch; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.pdf-marks-list { display: grid; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--rule); }
+.pdf-mark { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--rule); }
+.pdf-mark-page { padding-top: 2px; color: var(--accent); font: 11px var(--mono, monospace); text-decoration: none; }
+.pdf-mark-page:hover { text-decoration: underline; }
+.pdf-mark-kind { color: var(--muted); font: 10px var(--mono, monospace); letter-spacing: .07em; text-transform: uppercase; }
+.pdf-mark blockquote { margin: 4px 0 0; padding-left: 10px; border-left: 3px solid var(--rule-strong); color: var(--ink); font: 14px/1.55 var(--serif, Georgia, serif); overflow-wrap: anywhere; }
+.pdf-mark-highlight blockquote { border-left-color: #e8c33a; }
+.pdf-mark-underline blockquote { border-left-color: #d6455f; }
+.pdf-mark-strikeout blockquote { border-left-color: var(--muted); text-decoration: line-through; text-decoration-color: var(--muted); }
+.pdf-mark-comment { margin: 6px 0 0; color: var(--ink-2); font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pdf-mark .muted { margin: 4px 0 0; font-size: 12px; }
+@media (max-width: 600px) { .pdf-mark { grid-template-columns: 38px minmax(0, 1fr); gap: 8px; } }

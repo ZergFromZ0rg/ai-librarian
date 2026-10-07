@@ -1,5 +1,6 @@
 import importlib
 import math
+import os
 import sys
 import time
 from pathlib import Path
@@ -26,7 +27,7 @@ def make_pdf(text: str, pages: int = 1) -> bytes:
     return content
 
 
-def wait_for_status(client: TestClient, doc_id: str, expected: str, timeout: float = 10) -> dict:
+def wait_for_status(client: TestClient, doc_id: str, expected: str, timeout: float = float(os.environ.get("TEST_INDEX_TIMEOUT", "10"))) -> dict:
     # 10s, not 3s: extraction now runs in a fresh worker process (the `service`
     # fixture reimports `app` per test, so its process pool is never warm),
     # and that process's first call has to cold-start the ML layout model

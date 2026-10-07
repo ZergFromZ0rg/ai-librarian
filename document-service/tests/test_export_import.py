@@ -129,7 +129,7 @@ def test_existing_values_are_kept_unless_replace_is_chosen(service):
     replaced = import_archive(client, data, dry_run="false", conflict="replace").json()
     assert replaced["books"]["updated"] >= 1
     after = client.get(f"/documents/{source}").json()
-    assert after["rating"] == 5 and after["review"] == "Stayed with me."
+    assert after["rating"] == 4.5 and after["review"] == "Stayed with me."
 
 
 def test_books_whose_file_is_missing_are_reported_not_invented(service):

@@ -1,9 +1,9 @@
 import React, { useState } from "react";
 
-const SOURCE_LABELS = { "pdf-underline": "PDF underline", "drawn-line": "Drawn line", reader: "Reader underline" };
+const SOURCE_LABELS = { "pdf-underline": "PDF underline", "drawn-line": "Drawn line", "pen-line": "Pen line" };
 
-// Search one book for the single words that are underlined in it (in this
-// app's reader, or in the PDF itself), review them, and add the ones you want
+// Search one book for the single words that are underlined in its PDF (with
+// any viewer: a browser, Preview, Acrobat), review them, and add the ones you want
 // to the vocabulary notebook with the page and sentence they came from.
 export default function UnderlinedWords({ apiBase, documentId, onAdded }) {
   const [phase, setPhase] = useState("idle");

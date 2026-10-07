@@ -12,17 +12,16 @@ import os
 import queue
 import re
 import secrets
-import shutil
 import tempfile
 import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from functools import partial
 from datetime import date, datetime, timezone
+from functools import partial
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import List, Optional
 
 import pymupdf
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
@@ -623,57 +622,6 @@ class VocabularyBody(BaseModel):
     document_id: Optional[str] = None
     source_page: Optional[int] = Field(default=None, ge=1, le=1_000_000)
     source_quote: Optional[str] = Field(default=None, max_length=4_000)
-
-
-class AnnotationBody(BaseModel):
-    page: int = Field(ge=1, le=1_000_000)
-    kind: Literal["highlight", "underline", "text", "ink"]
-    color: Optional[str] = Field(default=None, max_length=7)
-    text: Optional[str] = Field(default=None, max_length=4_000)
-    comment: Optional[str] = Field(default=None, max_length=4_000)
-    # Normalised to the page: x0, y0, x1, y1 in 0..1.
-    rects: List[List[float]] = Field(default_factory=list, max_length=400)
-    # Ink strokes: a list of strokes, each a list of [x, y] points in 0..1.
-    paths: List[List[List[float]]] = Field(default_factory=list, max_length=300)
-    width: Optional[float] = Field(default=None, ge=0.0005, le=0.1)
-    size: Optional[float] = Field(default=None, ge=0.005, le=0.3)
-
-    @field_validator("color")
-    @classmethod
-    def _color(cls, value):
-        if value is not None and not reader_annotations.HEX_COLOR.match(value):
-            raise ValueError("color must look like #rrggbb")
-        return value
-
-    @field_validator("rects")
-    @classmethod
-    def _rects(cls, value):
-        for rect in value:
-            if len(rect) != 4 or any(not 0.0 <= v <= 1.0 for v in rect) or rect[2] <= rect[0] or rect[3] <= rect[1]:
-                raise ValueError("each rect must be [x0, y0, x1, y1] inside the page")
-        return value
-
-    @field_validator("paths")
-    @classmethod
-    def _paths(cls, value):
-        if sum(len(stroke) for stroke in value) > 20_000:
-            raise ValueError("drawing is too detailed")
-        for stroke in value:
-            for point in stroke:
-                if len(point) != 2 or any(not 0.0 <= v <= 1.0 for v in point):
-                    raise ValueError("each point must be [x, y] inside the page")
-        return value
-
-
-class AnnotationPatch(BaseModel):
-    color: Optional[str] = Field(default=None, max_length=7)
-    text: Optional[str] = Field(default=None, max_length=4_000)
-    comment: Optional[str] = Field(default=None, max_length=4_000)
-    rects: Optional[List[List[float]]] = Field(default=None, max_length=400)
-    size: Optional[float] = Field(default=None, ge=0.005, le=0.3)
-
-    _color = field_validator("color")(AnnotationBody._color.__func__)
-    _rects = field_validator("rects")(AnnotationBody._rects.__func__)
 
 
 class HarvestWord(BaseModel):
@@ -1403,6 +1351,10 @@ def _embed_and_finish(doc_id: str) -> None:
             update_ingest_entry(doc_id, "indexed")
             clear_index_activity(doc_id)
             _maybe_auto_match(doc_id)
+            try:
+                _refresh_pdf_marks(read_metadata(doc_id))
+            except Exception:
+                logger.exception("could not read the marks in %s", doc_id)
         except Exception as exc:
             _fail_indexing(doc_id, str(exc) or exc.__class__.__name__)
 
@@ -1909,6 +1861,7 @@ def auto_ingest_worker() -> None:
     while not SHUTDOWN.is_set():
         try:
             _auto_ingest_scan()
+            _refresh_all_pdf_marks()
         except Exception:
             logger.exception("Automatic library scan failed")
         if SHUTDOWN.wait(AUTO_INGEST_INTERVAL_SECONDS):
@@ -2908,6 +2861,8 @@ def _highlight_quads(page, phrase: str):
 async def get_document_file(doc_id: str):
     stored = await asyncio.to_thread(_stored_file_path, doc_id)
     metadata = await asyncio.to_thread(read_metadata, doc_id)
+    if metadata.get("file_type") == "pdf":
+        stored = await asyncio.to_thread(effective_pdf_path, metadata)  # the annotated copy, if any
     return FileResponse(
         stored,
         media_type=media_type_for(metadata.get("file_type") or ""),
@@ -3492,11 +3447,14 @@ async def delete_vocabulary(word_id: str):
 
 
 # ---------------------------------------------------------- annotations --
+# The app has no annotation editor. A PDF opens in the reader's own viewer (the
+# browser's or the OS's), and whatever they mark there is read back out of the
+# file: highlights, underlines, strike-outs, typed text, notes and pen strokes.
+# The originals are never modified. A copy saved from a viewer is kept beside
+# the original as an "annotated copy", and that copy is what opens and is read.
 
 ANNOTATION_DIGEST_KIND = "annotations"
-ANNOTATION_INDEX_DELAY = float(os.getenv("ANNOTATION_INDEX_DELAY_SECONDS", "4"))
-_digest_timers: dict = {}
-_digest_timers_lock = threading.Lock()
+ANNOTATED_DIR = DATA_DIR / "annotated"
 
 
 def _is_digest(doc: dict) -> bool:
@@ -3511,37 +3469,28 @@ def _digest_doc(book_id: str) -> Optional[dict]:
     )
 
 
-def _cancel_digest_timer(book_id: str) -> None:
-    with _digest_timers_lock:
-        timers = [_digest_timers.pop(key, None) for key in (book_id, ("pdf", book_id))]
-    for timer in timers:
-        if timer:
-            timer.cancel()
+def annotated_copy_path(doc_id: str) -> Path:
+    return ANNOTATED_DIR / f"{doc_id}.pdf"
 
 
-def _schedule_digest(book_id: str, delay: Optional[float] = None, attempt: int = 0) -> None:
-    """Rebuild the book's searchable digest once the reader pauses: a burst of
-    highlighting would otherwise re-embed the whole digest after every stroke."""
-    delay = ANNOTATION_INDEX_DELAY if delay is None else delay
-    if delay <= 0:
-        _rebuild_digest(book_id, attempt)
-        return
-    timer = threading.Timer(delay, _rebuild_digest, args=(book_id, attempt))
-    timer.daemon = True
-    with _digest_timers_lock:
-        previous = _digest_timers.pop(book_id, None)
-        _digest_timers[book_id] = timer
-    if previous:
-        previous.cancel()
-    timer.start()
+def effective_pdf_path(metadata: dict) -> Path:
+    """The file to open and to read marks from: the annotated copy when there is
+    one that is not older than the original, otherwise the original itself."""
+    original = pdf_path(metadata)
+    copy = annotated_copy_path(metadata["document_id"])
+    try:
+        if copy.exists() and (not original.exists() or copy.stat().st_mtime_ns >= original.stat().st_mtime_ns):
+            return copy
+    except OSError:
+        pass
+    return original
 
 
-def _rebuild_digest(book_id: str, attempt: int = 0) -> None:
-    with _digest_timers_lock:
-        _digest_timers.pop(book_id, None)
+def _apply_digest(book_id: str, items: List[dict], attempt: int = 0) -> None:
+    """Make the book's searchable digest say what ``items`` say, creating,
+    updating or removing the Markdown document as needed."""
     try:
         book = read_metadata(book_id)
-        items = STORE.list_annotations(book_id)
         digest = _digest_doc(book_id)
         searchable = [a for a in items if (a.get("text") or "").strip() or (a.get("comment") or "").strip()]
         if not searchable:
@@ -3565,7 +3514,9 @@ def _rebuild_digest(book_id: str, attempt: int = 0) -> None:
         if digest.get("indexing_status") == "indexing" and attempt < 24:
             # The running extraction would finish on the old text and mark it
             # indexed; try again once it is done.
-            _schedule_digest(book_id, 5.0, attempt + 1)
+            timer = threading.Timer(5.0, _apply_digest, args=(book_id, items, attempt + 1))
+            timer.daemon = True
+            timer.start()
             return
         stored = pdf_path(digest)
         if stored.exists() and stored.read_text(encoding="utf-8") == text:
@@ -3581,183 +3532,165 @@ def _rebuild_digest(book_id: str, attempt: int = 0) -> None:
         logger.exception("could not refresh the annotation digest for %s", book_id)
 
 
-_pdf_sync_status: dict = {}
-
-
-def _schedule_pdf_sync(book_id: str, delay: Optional[float] = None) -> None:
-    """Write the reader's marks into the PDF file itself, once they settle."""
-    delay = ANNOTATION_INDEX_DELAY if delay is None else delay
-    if delay <= 0:
-        _sync_pdf(book_id)
-        return
-    timer = threading.Timer(delay, _sync_pdf, args=(book_id,))
-    timer.daemon = True
-    with _digest_timers_lock:
-        previous = _digest_timers.pop(("pdf", book_id), None)
-        _digest_timers[("pdf", book_id)] = timer
-    if previous:
-        previous.cancel()
-    timer.start()
-
-
-def _sync_pdf(book_id: str) -> None:
-    """Replace the stored PDF with a copy carrying the current marks. The very
-    first time, the untouched original is kept under DATA_DIR/originals. The
-    swap is atomic, so a page being rendered never sees a half-written file."""
-    with _digest_timers_lock:
-        _digest_timers.pop(("pdf", book_id), None)
+def _file_signature(path: Path) -> str:
     try:
-        book = read_metadata(book_id)
-        stored = pdf_path(book)
-        if book.get("file_type") != "pdf" or not stored.exists():
-            return
-        items = STORE.list_annotations(book_id)
-        with get_document_lock(book_id):
-            content = reader_annotations.bake(stored, items)
-            if content == stored.read_bytes():
-                _pdf_sync_status[book_id] = {"ok": True}
-                return
-            originals = DATA_DIR / "originals"
-            originals.mkdir(parents=True, exist_ok=True)
-            backup = originals / f"{book_id}.pdf"
-            if not backup.exists():
-                shutil.copy2(stored, backup)
-            temporary = stored.with_name(f".{stored.name}.{secrets.token_hex(4)}.tmp")
-            try:
-                temporary.write_bytes(content)
-                shutil.copymode(stored, temporary)
-                os.replace(temporary, stored)
-            finally:
-                temporary.unlink(missing_ok=True)
-            STORE.update(book_id, {"content_sha256": hashlib.sha256(content).hexdigest(), "updated_at": utc_now()})
-        _pdf_sync_status[book_id] = {"ok": True}
-    except Exception as exc:
-        logger.exception("could not write annotations into the PDF for %s", book_id)
-        _pdf_sync_status[book_id] = {"ok": False, "error": "The PDF file could not be written (is the library folder read-only?). Your marks are saved in the app."}
+        stat = path.stat()
+    except OSError:
+        return ""
+    return f"{stat.st_mtime_ns}:{stat.st_size}"
+
+
+def _refresh_pdf_marks(book: dict, *, force: bool = False) -> Optional[List[dict]]:
+    """Re-read a PDF's marks and bring the searchable digest up to date.
+
+    Cheap when nothing changed: a PDF is only opened when the size or modified
+    time of the original, or of its annotated copy, differs from the last scan.
+    When the original itself changed, a fingerprint of its text (which ignores
+    every annotation) says whether the book's content changed or the reader only
+    added marks. Only a real content change re-indexes the book. Returns the
+    marks found, or None when there was nothing to do.
+    """
+    book_id = book["document_id"]
+    if book.get("file_type") != "pdf" or book.get("record_type") == "standalone" \
+            or book.get("collection_id") == NOTES_COLLECTION_ID:
+        return None
+    original = pdf_path(book)
+    original_sig = _file_signature(original)
+    if not original_sig:
+        return None
+    signature = f"{original_sig}|{_file_signature(annotated_copy_path(book_id))}"
+    if not force and book.get("file_sig") == signature:
+        return None
+    previous_original = (book.get("file_sig") or "").split("|")[0]
+    changes = {"file_sig": signature}
+    reindex = False
+    if previous_original != original_sig or not book.get("text_sig"):
+        text_sig = reader_annotations.text_signature(original)
+        if text_sig:
+            changed_content = bool(book.get("text_sig")) and book["text_sig"] != text_sig
+            if changed_content or (previous_original and previous_original != original_sig):
+                changes["content_sha256"] = hash_file(original)
+            if changed_content:
+                reindex = True
+                changes["pipeline_version"] = -1
+            changes["text_sig"] = text_sig
+    STORE.update(book_id, changes)
+    if reindex:
+        logger.info("%s changed on disk; re-indexing it", book.get("filename") or book_id)
+        enqueue_index(IndexTask(book_id))
+    items = reader_annotations.scan_pdf_annotations(effective_pdf_path({**book, **changes}))
+    _apply_digest(book_id, items)
+    return items
+
+
+def _refresh_all_pdf_marks() -> int:
+    """Look at every indexed PDF for new or changed marks. Run by the
+    background scan; a library of unchanged files costs one stat per book."""
+    refreshed = 0
+    for doc in list_metadata():
+        if doc.get("file_type") != "pdf" or doc.get("indexing_status") != "indexed":
+            continue
+        try:
+            if _refresh_pdf_marks(doc) is not None:
+                refreshed += 1
+        except Exception:
+            logger.exception("could not read the marks in %s", doc.get("filename") or doc.get("document_id"))
+    if refreshed:
+        logger.info("Read the marks in %d PDF(s)", refreshed)
+    return refreshed
 
 
 def _annotatable_pdf(doc_id: str) -> dict:
     metadata = read_metadata(doc_id)
     if metadata.get("file_type") != "pdf" or metadata.get("collection_id") == NOTES_COLLECTION_ID:
-        raise HTTPException(status_code=400, detail="annotations are only available for PDF books")
+        raise HTTPException(status_code=400, detail="marks are only read from PDF books")
     return metadata
 
 
-def _annotation_data(body: AnnotationBody) -> dict:
-    return {"rects": body.rects, "paths": body.paths, "width": body.width, "size": body.size}
-
-
-@app.get("/documents/{doc_id}/page/{page}/words")
-async def get_page_words(doc_id: str, page: int):
-    """Word boxes for one page, normalised to it, in reading order. The reader
-    lays an invisible layer of these over the page image so words can be
-    selected, highlighted, and underlined."""
-    await asyncio.to_thread(_annotatable_pdf, doc_id)
-    stored = await asyncio.to_thread(_stored_paged_path, doc_id)
-
-    def words() -> dict:
-        with pymupdf.open(stored) as source:
-            if not 1 <= page <= source.page_count:
-                raise HTTPException(status_code=404, detail="page out of range")
-            return reader_annotations.page_words(source[page - 1])
-
-    return await asyncio.to_thread(words)
+def _marks_response(metadata: dict, items: List[dict]) -> dict:
+    using_copy = effective_pdf_path(metadata) == annotated_copy_path(metadata["document_id"])
+    return {"annotations": items, "source": "annotated-copy" if using_copy else "original"}
 
 
 @app.get("/documents/{doc_id}/annotations")
 async def list_annotations(doc_id: str):
-    await asyncio.to_thread(read_metadata, doc_id)
-    return {"annotations": await asyncio.to_thread(STORE.list_annotations, doc_id),
-            "pdf_sync": _pdf_sync_status.get(doc_id, {"ok": True})}
-
-
-@app.post("/documents/{doc_id}/annotations", status_code=201)
-async def create_annotation(doc_id: str, body: AnnotationBody):
+    """The marks currently in this book's PDF, read from the file."""
     metadata = await asyncio.to_thread(_annotatable_pdf, doc_id)
-    if metadata.get("pages") and body.page > metadata["pages"]:
-        raise HTTPException(status_code=422, detail="page out of range")
-    text = (body.text or "").strip()
-    if body.kind in ("highlight", "underline") and not body.rects:
-        raise HTTPException(status_code=422, detail="select some text to mark")
-    if body.kind == "text" and not (text and body.rects):
-        raise HTTPException(status_code=422, detail="a text box needs text and a place on the page")
-    if body.kind == "ink" and not any(len(stroke) > 1 for stroke in body.paths):
-        raise HTTPException(status_code=422, detail="draw something first")
-    now = utc_now()
-    record = {
-        "annotation_id": generate_id(),
-        "document_id": doc_id,
-        "page": body.page,
-        "kind": body.kind,
-        "color": body.color or reader_annotations.DEFAULT_COLORS[body.kind],
-        "text": text or None,
-        "comment": (body.comment or "").strip() or None,
-        "data_json": json.dumps(_annotation_data(body)),
-        "created_at": now,
-        "updated_at": now,
-    }
-    created = await asyncio.to_thread(STORE.create_annotation, record)
-    _schedule_digest(doc_id)
-    _schedule_pdf_sync(doc_id)
-    return created
+    path = await asyncio.to_thread(effective_pdf_path, metadata)
+    if not await asyncio.to_thread(path.exists):
+        raise HTTPException(status_code=404, detail="the source PDF is missing")
+    items = await asyncio.to_thread(reader_annotations.scan_pdf_annotations, path)
+    return _marks_response(metadata, items)
 
 
-@app.put("/annotations/{annotation_id}")
-async def update_annotation(annotation_id: str, body: AnnotationPatch):
-    existing = await asyncio.to_thread(STORE.get_annotation, annotation_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="annotation not found")
-    changes = {"updated_at": utc_now()}
-    sent = body.model_dump(exclude_unset=True)
-    if "color" in sent and sent["color"]:
-        changes["color"] = sent["color"]
-    if "text" in sent:
-        text = (sent["text"] or "").strip()
-        if existing["kind"] == "text" and not text:
-            raise HTTPException(status_code=422, detail="a text box needs text")
-        changes["text"] = text or None
-    if "comment" in sent:
-        changes["comment"] = (sent["comment"] or "").strip() or None
-    geometry = {key: existing.get(key) for key in ("rects", "paths", "width", "size")}
-    if sent.get("rects"):
-        geometry["rects"] = sent["rects"]
-    if sent.get("size"):
-        geometry["size"] = sent["size"]
-    changes["data_json"] = json.dumps(geometry)
-    updated = await asyncio.to_thread(STORE.update_annotation, annotation_id, changes)
-    _schedule_digest(existing["document_id"])
-    _schedule_pdf_sync(existing["document_id"])
-    return updated
-
-
-@app.delete("/annotations/{annotation_id}")
-async def delete_annotation(annotation_id: str):
-    try:
-        removed = await asyncio.to_thread(STORE.delete_annotation, annotation_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="annotation not found") from exc
-    _schedule_digest(removed["document_id"])
-    _schedule_pdf_sync(removed["document_id"])
-    return {"ok": True}
-
-
-@app.get("/documents/{doc_id}/annotated.pdf")
-async def download_annotated_pdf(doc_id: str):
-    """The PDF with the reader's marks written in as standard PDF annotations.
-    The stored file itself is never changed."""
+@app.post("/documents/{doc_id}/annotations/rescan")
+async def rescan_annotations(doc_id: str):
+    """Read the PDF again now and refresh the searchable digest, instead of
+    waiting for the background scan."""
     metadata = await asyncio.to_thread(_annotatable_pdf, doc_id)
-    stored = await asyncio.to_thread(_stored_paged_path, doc_id)
-    items = await asyncio.to_thread(STORE.list_annotations, doc_id)
+    items = await asyncio.to_thread(_refresh_pdf_marks, metadata, force=True)
+    if items is None:
+        raise HTTPException(status_code=404, detail="the source PDF is missing")
+    return _marks_response(metadata, items)
+
+
+@app.post("/documents/{doc_id}/annotated-copy")
+async def upload_annotated_copy(doc_id: str, file: UploadFile = File(...)):
+    """Attach a copy of this book's PDF that was marked up in a viewer and saved.
+    It is kept beside the original (never replacing it), opens in its place, and
+    its marks are read and indexed."""
+    metadata = await asyncio.to_thread(_annotatable_pdf, doc_id)
+    ANNOTATED_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = ANNOTATED_DIR / f".{doc_id}.{secrets.token_hex(4)}.uploading"
+    total = 0
     try:
-        content = await asyncio.to_thread(reader_annotations.bake, stored, items)
-    except Exception as exc:
-        raise _sanitized_http_error(500, "could not write the annotated PDF", exc, log_context=doc_id) from exc
-    stem = re.sub(r"[^\w.\- ]+", "", Path(metadata.get("filename") or "book").stem).strip() or "book"
-    return Response(
-        content=content,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{stem}-annotated.pdf"'},
-    )
+        with temporary.open("wb") as destination:
+            while chunk := await file.read(1024 * 1024):
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"file exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit",
+                    )
+                destination.write(chunk)
+        if total == 0:
+            raise HTTPException(status_code=400, detail="uploaded file is empty")
+
+        def validate() -> None:
+            try:
+                with pymupdf.open(temporary) as document:
+                    if document.needs_pass:
+                        raise HTTPException(status_code=422, detail="this PDF is password-protected")
+                    expected = metadata.get("pages") or 0
+                    if expected and document.page_count != expected:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                f"this file has {document.page_count} pages but the book has {expected}. "
+                                "If it is a different edition, add it to the library as a new book."
+                            ),
+                        )
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=422, detail="this does not look like a readable PDF") from exc
+
+        await asyncio.to_thread(validate)
+        os.replace(temporary, annotated_copy_path(doc_id))
+    finally:
+        temporary.unlink(missing_ok=True)
+        await file.close()
+    items = await asyncio.to_thread(_refresh_pdf_marks, metadata, force=True)
+    return _marks_response(metadata, items or [])
+
+
+@app.delete("/documents/{doc_id}/annotated-copy")
+async def remove_annotated_copy(doc_id: str):
+    """Go back to the original PDF."""
+    metadata = await asyncio.to_thread(_annotatable_pdf, doc_id)
+    await asyncio.to_thread(lambda: annotated_copy_path(doc_id).unlink(missing_ok=True))
+    items = await asyncio.to_thread(_refresh_pdf_marks, metadata, force=True)
+    return _marks_response(metadata, items or [])
 
 
 @app.post("/documents/{doc_id}/underlined-words")
@@ -3765,14 +3698,12 @@ async def scan_underlined_words(doc_id: str):
     """Find the single words underlined in a book, for the vocabulary notebook
     to collect. Nothing is saved: the reader reviews the list first."""
     metadata = await asyncio.to_thread(_annotatable_pdf, doc_id)
-    stored = await asyncio.to_thread(_stored_paged_path, doc_id)
+    stored = await asyncio.to_thread(effective_pdf_path, metadata)
+    if not await asyncio.to_thread(stored.exists):
+        raise HTTPException(status_code=404, detail="the source PDF is missing")
 
     def scan() -> dict:
-        marks: dict = {}
-        for item in STORE.list_annotations(doc_id):
-            if item["kind"] == "underline" and item.get("rects"):
-                marks.setdefault(item["page"], []).append(item["rects"])
-        found = reader_annotations.find_underlined_words(stored, marks)
+        found = reader_annotations.find_underlined_words(stored)
         saved = {entry["normalized_word"] for entry in STORE.list_vocabulary(doc_id)}
         return {
             "document_id": doc_id,
@@ -4357,6 +4288,7 @@ def _delete_document_blocking(metadata: dict) -> None:
         delete_document_vectors(doc_id)
         artifacts = [EXTRACTED_DIR / f"{doc_id}.json", CHUNKS_DIR / f"{doc_id}.json"]
         artifacts.extend(THUMBNAILS_DIR.glob(f"{doc_id}-*.jpg"))
+        artifacts.append(annotated_copy_path(doc_id))
         # Only remove the PDF itself when we own it (an upload). A
         # referenced library file is left exactly where the reader put it.
         if metadata.get("record_type") != "standalone" and not (metadata.get("source_path") or "").strip():
@@ -4374,7 +4306,6 @@ async def delete_document(doc_id: str):
     metadata = await asyncio.to_thread(read_metadata, doc_id)
 
     def delete_all() -> None:
-        _cancel_digest_timer(doc_id)
         digest = _digest_doc(doc_id)
         if digest:
             _delete_document_blocking(digest)
