@@ -14,7 +14,7 @@ page actually says under the mark, not what an app guessed.
 import hashlib
 import re
 from collections import OrderedDict
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pymupdf
 
@@ -316,6 +316,28 @@ def _scan_ink(page_number: int, snap: dict, words: list, comment: str) -> dict:
     return _item(page_number, kind, snap, _quote(ordered), comment)
 
 
+# Typed text, notes and shapes that repeat verbatim on this many pages are not
+# something a reader wrote by hand: they are a stamp or watermark the file came
+# with (an ebook site's "Download at ..." line on every chapter opener).
+_BOILERPLATE_PAGES = 3
+_BOILERPLATE_KINDS = ("text", "note", "shape")
+
+
+def _drop_boilerplate(items: List[dict]) -> List[dict]:
+    """Remove stamped text that repeats across pages. Highlights, underlines and
+    strike-outs are never dropped: marking the same phrase twice can be real."""
+    pages: Dict[tuple, set] = {}
+    for item in items:
+        if item["kind"] in _BOILERPLATE_KINDS:
+            key = (item["kind"], " ".join((item["text"] or item["comment"]).split()).casefold())
+            pages.setdefault(key, set()).add(item["page"])
+    return [
+        item for item in items
+        if item["kind"] not in _BOILERPLATE_KINDS
+        or len(pages[(item["kind"], " ".join((item["text"] or item["comment"]).split()).casefold())]) < _BOILERPLATE_PAGES
+    ]
+
+
 def scan_pdf_annotations(path) -> List[dict]:
     """Every mark a reader made in the PDF at ``path``, in book order.
 
@@ -352,7 +374,7 @@ def scan_pdf_annotations(path) -> List[dict]:
             continue
         seen.add(key)
         unique.append({k: v for k, v in item.items() if not k.startswith("_")})
-    return unique
+    return _drop_boilerplate(unique)
 
 
 def text_signature(path) -> Optional[str]:

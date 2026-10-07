@@ -20,7 +20,7 @@ LINES = [
 
 
 def blank_page(document=None, lines=LINES, top=100, step=14):
-    document = document or fitz.open()
+    document = fitz.open() if document is None else document
     page = document.new_page()
     for number, text in enumerate(lines):
         page.insert_text((72, top + number * step), text, fontsize=12)
@@ -108,6 +108,24 @@ def test_typed_text_and_sticky_notes_are_read(tmp_path):
     items = scan(saved(document, tmp_path / "typed.pdf"))
     assert [i["text"] for i in only(items, "text")] == ["Check this against chapter 4"]
     assert [i["comment"] for i in only(items, "note")] == ["Come back to this"]
+
+
+def test_a_stamp_repeated_on_many_pages_is_not_a_margin_note(tmp_path):
+    document = fitz.open()
+    for number in range(4):
+        _, page = blank_page(document, ["Chapter text for the stamp test."])
+        stamp = page.add_freetext_annot(fitz.Rect(200, 700, 400, 720), "Download at SomeEbookSite.com", fontsize=10)
+        stamp.set_info(content="Download at SomeEbookSite.com")
+        stamp.update()
+        if number < 2:  # a note typed on only two pages is the reader's own
+            mine = page.add_freetext_annot(fitz.Rect(200, 600, 400, 620), "Check the source", fontsize=10)
+            mine.set_info(content="Check the source")
+            mine.update()
+    page = document[0]
+    page.add_highlight_annot(page.search_for("stamp test")[0])
+    items = scan(saved(document, tmp_path / "stamp.pdf"))
+    assert [i["text"] for i in only(items, "text")] == ["Check the source", "Check the source"]
+    assert len(only(items, "highlight")) == 1
 
 
 def test_a_text_box_over_a_highlight_is_not_quoted_as_book_text(tmp_path):
