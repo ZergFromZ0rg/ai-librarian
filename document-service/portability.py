@@ -1,20 +1,23 @@
 """Portable export/import archive for the reader's own data.
 
 The archive holds only what the reader created or corrected: catalogue
-metadata, reading state, ratings and reviews, notes, vocabulary, and custom
-covers. Source files, search indexes, models, thumbnails that can be
+metadata, reading state, ratings and reviews, notes, vocabulary, custom
+covers, and the annotated PDF copies the reader attached to their books. The
+library's own source files, search indexes, models, thumbnails that can be
 regenerated, and job state are deliberately left out. Every file is plain
-JSON, Markdown or JPEG, so the data can be recovered without this app.
+JSON, Markdown, JPEG or PDF, so the data can be recovered without this app.
 """
 
 import hashlib
 import json
 import re
+import time
 import zipfile
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
-SCHEMA_VERSION = 1
+# 2 added annotated PDF copies (annotated/<id>.pdf). Version 1 archives still import.
+SCHEMA_VERSION = 2
 FORMAT_NAME = "ai-librarian-export"
 
 # Everything the reader owns about a book. Pipeline state (pages, chunks,
@@ -32,8 +35,12 @@ VOCABULARY_FIELDS = (
     "source_page", "source_quote", "definition_source", "created_at", "updated_at",
 )
 
-MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_ENTRY_BYTES = 25 * 1024 * 1024
+# An annotated PDF copy is a whole book, so it gets its own, larger limit. It is
+# only ever streamed, never held in memory.
+MAX_PDF_ENTRY_BYTES = 1024 * 1024 * 1024
+_CHUNK = 1024 * 1024
 MAX_ENTRIES = 50_000
 MAX_RATIO = 200
 
@@ -45,11 +52,14 @@ notes.json       Your notes with the book and page each one is linked to.
 notes/<id>.md    The same notes as plain Markdown, one file per note.
 vocabulary.json  Your word list with definitions and source passages.
 covers/<id>.jpg  Covers you chose yourself (not covers taken from the books).
+annotated/<id>.pdf  PDFs you marked up in a viewer and attached to a book. They
+                 are ordinary PDFs; any PDF app opens them with your marks.
 manifest.json    Format version, counts and a SHA-256 checksum for every file.
 
-Source books and documents are NOT included; they stay where they are.
+The library's own books and documents are NOT included; they stay where they are.
 To restore, scan your library first, then import this file: books are matched
-by the SHA-256 of their content, so renamed or moved files are still found.
+by the SHA-256 of their content, so renamed or moved files are still found, and
+each annotated copy is re-attached to its book.
 """
 
 
@@ -90,6 +100,7 @@ def build_archive(
     notes: Iterable[dict],
     vocabulary: Iterable[dict],
     covers: Iterable[tuple],
+    annotated: Iterable[tuple] = (),
     app_version: str,
     created_at: str,
     timezone_name: str,
@@ -97,11 +108,13 @@ def build_archive(
     """Write the archive to `destination` and return its manifest.
 
     `books` and `notes` are already-shaped records (see book_record and
-    note_record); `covers` yields (document_id, path) pairs. The file is
-    written entry by entry, so the library is never held in memory at once.
+    note_record); `covers` and `annotated` yield (document_id, path)
+    pairs. The file is written entry by entry, and annotated PDFs are streamed
+    in chunks, so neither the library nor a large PDF is held in memory.
     """
     checksums: Dict[str, str] = {}
-    counts = {"books": 0, "notes": 0, "vocabulary": 0, "covers": 0}
+    counts = {"books": 0, "notes": 0, "vocabulary": 0, "covers": 0, "annotated_copies": 0}
+    skipped_copies: List[str] = []
 
     with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as archive:
         def add(name: str, data: bytes) -> None:
@@ -123,6 +136,17 @@ def build_archive(
                 continue
             add(f"covers/{document_id}.jpg", data)
             counts["covers"] += 1
+        for document_id, path in annotated:
+            name = f"annotated/{document_id}.pdf"
+            try:
+                digest = _stream_into(archive, name, Path(path))
+            except OSError:
+                continue
+            if digest is None:  # larger than an archive may carry
+                skipped_copies.append(document_id)
+                continue
+            checksums[name] = digest
+            counts["annotated_copies"] += 1
         counts.update(books=len(books), notes=len(notes), vocabulary=len(vocabulary))
         add("README.txt", README.encode("utf-8"))
         manifest = {
@@ -133,16 +157,38 @@ def build_archive(
             "timezone": timezone_name,
             "includes_source_files": False,
             "counts": counts,
+            "skipped_annotated_copies": skipped_copies,
             "checksums": checksums,
         }
         archive.writestr("manifest.json", _json_bytes(manifest))
     return manifest
 
 
+def _stream_into(archive: "zipfile.ZipFile", name: str, path: Path) -> Optional[str]:
+    """Copy a file into the archive in chunks and return its SHA-256, computed
+    over exactly the bytes written (so a file that changes mid-export still
+    matches its checksum). Returns None, writing nothing, for a file too large."""
+    if path.stat().st_size > MAX_PDF_ENTRY_BYTES:
+        return None
+    digest = hashlib.sha256()
+    info = zipfile.ZipInfo(name, date_time=time.localtime(path.stat().st_mtime)[:6])
+    info.compress_type = zipfile.ZIP_STORED  # a PDF is already compressed
+    with path.open("rb") as source, archive.open(info, "w", force_zip64=True) as target:
+        while chunk := source.read(_CHUNK):
+            digest.update(chunk)
+            target.write(chunk)
+    return digest.hexdigest()
+
+
 _ALLOWED_NAME = re.compile(
     r"^(?:manifest\.json|README\.txt|books\.json|notes\.json|vocabulary\.json"
-    r"|notes/[A-Za-z0-9_-]{1,64}\.md|covers/[A-Za-z0-9_-]{1,64}\.jpg)$"
+    r"|notes/[A-Za-z0-9_-]{1,64}\.md|covers/[A-Za-z0-9_-]{1,64}\.jpg"
+    r"|annotated/[A-Za-z0-9_-]{1,64}\.pdf)$"
 )
+
+
+def _is_pdf_entry(name: str) -> bool:
+    return name.startswith("annotated/")
 
 
 class Archive:
@@ -179,7 +225,8 @@ class Archive:
                 continue
             if not _ALLOWED_NAME.fullmatch(info.filename):
                 raise ArchiveError(f"The archive contains an unexpected file: {info.filename[:80]!r}.")
-            if info.file_size > MAX_ENTRY_BYTES:
+            limit = MAX_PDF_ENTRY_BYTES if _is_pdf_entry(info.filename) else MAX_ENTRY_BYTES
+            if info.file_size > limit:
                 raise ArchiveError(f"{info.filename} is too large.")
             if info.file_size > 1_000_000 and info.file_size > MAX_RATIO * max(info.compress_size, 1):
                 raise ArchiveError(f"{info.filename} looks like a decompression bomb.")
@@ -204,10 +251,22 @@ class Archive:
         for name, expected in checksums.items():
             if name not in names:
                 raise ArchiveError(f"{name} is listed in the manifest but missing from the archive.")
-            if hashlib.sha256(self._read(name)).hexdigest() != expected:
+            actual = self._stream_digest(name) if _is_pdf_entry(name) else hashlib.sha256(self._read(name)).hexdigest()
+            if actual != expected:
                 raise ArchiveError(f"{name} does not match its checksum; the archive is damaged.")
         self.manifest = manifest
         self._names = names
+
+    def _stream_digest(self, name: str) -> str:
+        """SHA-256 of an entry read in chunks, refusing more than a PDF may hold."""
+        digest, total = hashlib.sha256(), 0
+        with self._zip.open(name) as handle:
+            while chunk := handle.read(_CHUNK):
+                total += len(chunk)
+                if total > MAX_PDF_ENTRY_BYTES:
+                    raise ArchiveError(f"{name} is too large.")
+                digest.update(chunk)
+        return digest.hexdigest()
 
     def _read(self, name: str) -> bytes:
         # Read through a bounded stream rather than trusting the declared size.
@@ -243,3 +302,22 @@ class Archive:
     def cover(self, document_id: str) -> Optional[bytes]:
         name = f"covers/{document_id}.jpg"
         return self._read(name) if name in self._names else None
+
+    def has_annotated_copy(self, document_id: str) -> bool:
+        return f"annotated/{document_id}.pdf" in self._names
+
+    def extract_annotated_copy(self, document_id: str, destination: Path) -> bool:
+        """Stream an annotated PDF out to ``destination``. False if the archive
+        has none for this book. The entry was checksummed when the archive was
+        opened; the size is bounded again here rather than trusted."""
+        name = f"annotated/{document_id}.pdf"
+        if name not in self._names:
+            return False
+        total = 0
+        with self._zip.open(name) as source, destination.open("wb") as target:
+            while chunk := source.read(_CHUNK):
+                total += len(chunk)
+                if total > MAX_PDF_ENTRY_BYTES:
+                    raise ArchiveError(f"{name} is too large.")
+                target.write(chunk)
+        return True

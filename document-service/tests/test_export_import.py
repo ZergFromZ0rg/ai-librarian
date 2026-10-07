@@ -4,6 +4,7 @@ import io
 import json
 import zipfile
 
+import pytest
 from conftest import make_pdf, wait_for_status
 from PIL import Image
 
@@ -68,7 +69,7 @@ def test_archive_is_human_readable_and_excludes_regenerable_data(service):
         assert not any(name.endswith((".pdf", ".db")) for name in names)
         assert "Absurd indeed." in archive.read(f"notes/{note}.md").decode()
         manifest = json.loads(archive.read("manifest.json"))
-        assert manifest["counts"] == {"books": 2, "notes": 1, "vocabulary": 1, "covers": 1}
+        assert manifest["counts"] == {"books": 2, "notes": 1, "vocabulary": 1, "covers": 1, "annotated_copies": 0}
         assert manifest["includes_source_files"] is False
         books = {item["document_id"]: item for item in json.loads(archive.read("books.json"))}
         assert books[source]["review"] == "Stayed with me." and books[source]["genres"] == ["Philosophy"]
@@ -202,3 +203,152 @@ def test_decompression_bomb_is_rejected(tmp_path):
         assert "bomb" in str(exc)
     else:
         raise AssertionError("expected the archive to be refused")
+
+
+# ------------------------------------------------- annotated PDF copies
+def pdf_with_mark(pages=1, comment="my mark"):
+    import fitz
+    document = fitz.open()
+    for number in range(pages):
+        page = document.new_page()
+        page.insert_text((72, 100), f"The absurd and freedom. Page {number + 1}.", fontsize=12)
+    page = document[0]
+    mark = page.add_highlight_annot(page.search_for("absurd and freedom")[0])
+    mark.set_info(content=comment)
+    mark.update()
+    return document.tobytes()
+
+
+def write_archive(path, **kwargs):
+    base = dict(books=[], notes=[], vocabulary=[], covers=[], app_version="test", created_at="now", timezone_name="UTC")
+    return portability.build_archive(path, **{**base, **kwargs})
+
+
+def test_archive_carries_annotated_pdfs_byte_for_byte_with_checksums(tmp_path):
+    pdf = tmp_path / "copy.pdf"
+    pdf.write_bytes(pdf_with_mark())
+    archive_path = tmp_path / "out.zip"
+    manifest = write_archive(archive_path, annotated=[("abc123", pdf)])
+    assert manifest["counts"]["annotated_copies"] == 1 and manifest["schema_version"] == 2
+    assert manifest["checksums"]["annotated/abc123.pdf"] == hashlib.sha256(pdf.read_bytes()).hexdigest()
+    with portability.Archive(archive_path) as archive:
+        assert archive.has_annotated_copy("abc123") and not archive.has_annotated_copy("nope")
+        target = tmp_path / "restored.pdf"
+        assert archive.extract_annotated_copy("abc123", target) is True
+        assert target.read_bytes() == pdf.read_bytes()
+        assert archive.extract_annotated_copy("nope", tmp_path / "x.pdf") is False
+
+
+def test_a_damaged_annotated_pdf_is_caught_by_its_checksum(tmp_path):
+    pdf = tmp_path / "copy.pdf"
+    pdf.write_bytes(pdf_with_mark())
+    good = tmp_path / "good.zip"
+    write_archive(good, annotated=[("abc123", pdf)])
+    tampered = tmp_path / "tampered.zip"
+    with zipfile.ZipFile(good) as source, zipfile.ZipFile(tampered, "w") as target:
+        for info in source.infolist():
+            data = source.read(info.filename)
+            if info.filename == "annotated/abc123.pdf":
+                data = data[:-5] + b"XXXXX"
+            target.writestr(info.filename, data)
+    with pytest.raises(portability.ArchiveError, match="checksum"):
+        portability.Archive(tampered)
+
+
+def test_a_pdf_too_large_for_the_archive_is_skipped_on_export_and_refused_on_import(tmp_path, monkeypatch):
+    pdf = tmp_path / "copy.pdf"
+    pdf.write_bytes(pdf_with_mark())
+    monkeypatch.setattr(portability, "MAX_PDF_ENTRY_BYTES", 100)
+    skipped = tmp_path / "skipped.zip"
+    manifest = write_archive(skipped, annotated=[("abc123", pdf)])
+    assert manifest["counts"]["annotated_copies"] == 0 and manifest["skipped_annotated_copies"] == ["abc123"]
+    monkeypatch.setattr(portability, "MAX_PDF_ENTRY_BYTES", 1024 * 1024 * 1024)
+    big = tmp_path / "big.zip"
+    write_archive(big, annotated=[("abc123", pdf)])
+    monkeypatch.setattr(portability, "MAX_PDF_ENTRY_BYTES", 100)
+    with pytest.raises(portability.ArchiveError, match="too large"):
+        portability.Archive(big)
+
+
+def test_pdf_entries_are_streamed_not_held_in_memory(tmp_path, monkeypatch):
+    pdf = tmp_path / "copy.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n" + b"x" * (3 * 1024 * 1024))
+    archive_path = tmp_path / "out.zip"
+    write_archive(archive_path, annotated=[("abc123", pdf)])
+    reads = []
+    original = portability.Archive._read
+    monkeypatch.setattr(portability.Archive, "_read", lambda self, name: (reads.append(name), original(self, name))[1])
+    with portability.Archive(archive_path):
+        pass
+    assert "annotated/abc123.pdf" not in reads
+
+
+def annotate_stored_copy(module, client, doc_id, comment="my mark", pages=None):
+    stored = module.pdf_path(module.read_metadata(doc_id))
+    import fitz
+    with fitz.open(stored) as document:
+        page = document[0]
+        mark = page.add_highlight_annot(page.search_for("absurd and freedom")[0])
+        mark.set_info(content=comment)
+        mark.update()
+        data = document.tobytes()
+    response = client.post(f"/documents/{doc_id}/annotated-copy", files={"file": ("a.pdf", data, "application/pdf")})
+    assert response.status_code == 200, response.text
+    return data
+
+
+def test_exported_annotated_copies_are_restored_after_the_library_loses_them(service):
+    module, client, _ = service
+    source, book, note, word = seed(client)
+    data = annotate_stored_copy(module, client, source)
+    exported = export_bytes(client)
+    with zipfile.ZipFile(io.BytesIO(exported)) as archive:
+        assert f"annotated/{source}.pdf" in archive.namelist()
+        assert json.loads(archive.read("manifest.json"))["counts"]["annotated_copies"] == 1
+        assert archive.read(f"annotated/{source}.pdf") == data
+
+    module.annotated_copy_path(source).unlink()
+    module.STORE.update(source, {"file_sig": None})
+    assert client.get(f"/documents/{source}/annotations").json()["source"] == "original"
+
+    preview = import_archive(client, exported).json()  # dry run is the default
+    assert preview["dry_run"] is True and preview["annotated_copies"] == {"restored": 1, "kept": 0}
+    assert not module.annotated_copy_path(source).exists(), "a dry run must not write anything"
+
+    report = import_archive(client, exported, dry_run="false").json()
+    assert report["annotated_copies"]["restored"] == 1 and report["problems"] == []
+    assert module.annotated_copy_path(source).read_bytes() == data
+    restored = client.get(f"/documents/{source}/annotations").json()
+    assert restored["source"] == "annotated-copy"
+    assert any(mark["comment"] == "my mark" for mark in restored["annotations"])
+
+
+def test_an_existing_annotated_copy_is_kept_unless_the_file_is_preferred(service):
+    module, client, _ = service
+    source, *_ = seed(client)
+    annotate_stored_copy(module, client, source, comment="from the backup")
+    exported = export_bytes(client)
+    newer = annotate_stored_copy(module, client, source, comment="made since")
+
+    kept = import_archive(client, exported, dry_run="false").json()
+    assert kept["annotated_copies"] == {"restored": 0, "kept": 1}
+    assert module.annotated_copy_path(source).read_bytes() == newer
+
+    replaced = import_archive(client, exported, dry_run="false", conflict="replace").json()
+    assert replaced["annotated_copies"]["restored"] == 1
+    assert any(m["comment"] == "from the backup" for m in client.get(f"/documents/{source}/annotations").json()["annotations"])
+
+
+def test_an_annotated_copy_with_the_wrong_page_count_is_reported_not_attached(service, tmp_path):
+    module, client, _ = service
+    source, *_ = seed(client)
+    book = module.read_metadata(source)
+    wrong = tmp_path / "wrong.pdf"
+    wrong.write_bytes(pdf_with_mark(pages=3))
+    archive_path = tmp_path / "wrong.zip"
+    record = portability.book_record(book)
+    write_archive(archive_path, books=[record], annotated=[(source, wrong)])
+    report = import_archive(client, archive_path.read_bytes(), dry_run="false").json()
+    assert report["annotated_copies"] == {"restored": 0, "kept": 0}
+    assert any("annotated copy was skipped" in message and "pages" in message for message in report["problems"])
+    assert not module.annotated_copy_path(source).exists()

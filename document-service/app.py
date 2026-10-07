@@ -3634,6 +3634,28 @@ async def rescan_annotations(doc_id: str):
     return _marks_response(metadata, items)
 
 
+def _check_annotated_pdf(path: Path, metadata: dict) -> None:
+    """Refuse a file that cannot be this book's annotated copy: not a readable
+    PDF, password-protected, or with a different number of pages."""
+    try:
+        with pymupdf.open(path) as document:
+            if document.needs_pass:
+                raise HTTPException(status_code=422, detail="this PDF is password-protected")
+            expected = metadata.get("pages") or 0
+            if expected and document.page_count != expected:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"this file has {document.page_count} pages but the book has {expected}. "
+                        "If it is a different edition, add it to the library as a new book."
+                    ),
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="this does not look like a readable PDF") from exc
+
+
 @app.post("/documents/{doc_id}/annotated-copy")
 async def upload_annotated_copy(doc_id: str, file: UploadFile = File(...)):
     """Attach a copy of this book's PDF that was marked up in a viewer and saved.
@@ -3656,26 +3678,7 @@ async def upload_annotated_copy(doc_id: str, file: UploadFile = File(...)):
         if total == 0:
             raise HTTPException(status_code=400, detail="uploaded file is empty")
 
-        def validate() -> None:
-            try:
-                with pymupdf.open(temporary) as document:
-                    if document.needs_pass:
-                        raise HTTPException(status_code=422, detail="this PDF is password-protected")
-                    expected = metadata.get("pages") or 0
-                    if expected and document.page_count != expected:
-                        raise HTTPException(
-                            status_code=422,
-                            detail=(
-                                f"this file has {document.page_count} pages but the book has {expected}. "
-                                "If it is a different edition, add it to the library as a new book."
-                            ),
-                        )
-            except HTTPException:
-                raise
-            except Exception as exc:
-                raise HTTPException(status_code=422, detail="this does not look like a readable PDF") from exc
-
-        await asyncio.to_thread(validate)
+        await asyncio.to_thread(_check_annotated_pdf, temporary, metadata)
         os.replace(temporary, annotated_copy_path(doc_id))
     finally:
         temporary.unlink(missing_ok=True)
@@ -3986,8 +3989,14 @@ def _export_archive(destination: Path) -> dict:
         for doc in documents
         if doc.get("collection_id") != NOTES_COLLECTION_ID and (THUMBNAILS_DIR / f"{doc['document_id']}-custom.jpg").exists()
     ]
+    annotated = [
+        (doc["document_id"], annotated_copy_path(doc["document_id"]))
+        for doc in documents
+        if doc.get("file_type") == "pdf" and doc.get("record_type") != "standalone"
+        and doc.get("collection_id") != NOTES_COLLECTION_ID and annotated_copy_path(doc["document_id"]).exists()
+    ]
     return portability.build_archive(
-        destination, books=books, notes=notes, vocabulary=STORE.list_vocabulary(), covers=covers,
+        destination, books=books, notes=notes, vocabulary=STORE.list_vocabulary(), covers=covers, annotated=annotated,
         app_version=APP_VERSION, created_at=utc_now(), timezone_name=time.tzname[0],
     )
 
@@ -4054,6 +4063,34 @@ def _validated_book_record(record: dict) -> dict:
     return record
 
 
+def _import_annotated_copy(archive, source_id, local, label, dry_run, replace, report, problem) -> None:
+    """Re-attach an exported annotated PDF to its book. An existing copy is kept
+    unless the reader chose to use the file's values. The file is checked the
+    same way an uploaded one is, even on a dry run, so the preview is honest."""
+    target = annotated_copy_path(local["document_id"])
+    if target.exists() and not replace:
+        report["annotated_copies"]["kept"] += 1
+        return
+    ANNOTATED_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = ANNOTATED_DIR / f".{local['document_id']}.{secrets.token_hex(4)}.importing"
+    try:
+        archive.extract_annotated_copy(source_id, temporary)
+        try:
+            _check_annotated_pdf(temporary, local)
+        except HTTPException as exc:
+            problem(f"{label}: its annotated copy was skipped, {exc.detail}")
+            return
+        report["annotated_copies"]["restored"] += 1
+        if not dry_run:
+            os.replace(temporary, target)
+            try:
+                _refresh_pdf_marks(read_metadata(local["document_id"]), force=True)
+            except Exception:
+                logger.exception("could not read the marks in the restored copy for %s", local["document_id"])
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _import_archive(archive: "portability.Archive", dry_run: bool, replace: bool) -> dict:
     documents = list_metadata()
     by_id = {doc["document_id"]: doc for doc in documents}
@@ -4067,6 +4104,7 @@ def _import_archive(archive: "portability.Archive", dry_run: bool, replace: bool
         "notes": {"created": 0, "unchanged": 0, "skipped": 0},
         "vocabulary": {"created": 0, "unchanged": 0},
         "covers": {"restored": 0},
+        "annotated_copies": {"restored": 0, "kept": 0},
         "problems": [],
         "archive": {"created_at": archive.manifest.get("created_at"), "app_version": archive.manifest.get("app_version"),
                     "counts": archive.manifest.get("counts")},
@@ -4136,6 +4174,8 @@ def _import_archive(archive: "portability.Archive", dry_run: bool, replace: bool
                     _save_custom_cover(target_id, cover)
             except HTTPException:
                 problem(f"{label}: its saved cover could not be read")
+        if source_id and local is not None and local.get("file_type") == "pdf" and archive.has_annotated_copy(source_id):
+            _import_annotated_copy(archive, source_id, local, label, dry_run, replace, report, problem)
 
     existing_notes = {
         (doc.get("source_document_id"), doc.get("note_text"))

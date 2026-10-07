@@ -133,9 +133,12 @@ Books without a cover get a cloth binding in one of twelve colours. The colour
 comes from the book's ID, so it never changes when you sort or filter.
 
 **Settings → Backup** exports everything you created as one ZIP of plain
-JSON and Markdown: book details, reading state, ratings and reviews, notes
-(also as `notes/<id>.md`), vocabulary, and custom covers, with a manifest and a
-SHA-256 for every file. Source books are not included. To restore into a fresh
+JSON, Markdown and PDF: book details, reading state, ratings and reviews, notes
+(also as `notes/<id>.md`), vocabulary, custom covers, and the annotated PDF copies
+you attached to books (`annotated/<id>.pdf`), with a manifest and a SHA-256 for
+every file. The library's own books are not included, so the file stays small
+unless you keep many annotated PDFs. Import re-attaches each annotated copy to its
+book (checking it is a readable PDF with the same page count) and reads its marks again. To restore into a fresh
 install, scan your library first, then **Import from file**: books are matched
 by content hash, so renamed or moved files are still found. Import always shows
 what would change first, keeps values you have already set unless you choose
@@ -268,7 +271,7 @@ The app has no PDF editor of its own. **Read PDF** opens the file in your browse
 - A copy **saved from a browser's viewer** goes to your Downloads, so attach it with **Add saved copy** on the book page. It is kept beside the original (never replacing it, so a read-only library is fine) and opens in its place. **Use original** goes back.
 - Underlined single words feed the vocabulary notebook the same way.
 
-Annotated copies live in `data/annotated/` and are not part of the export archive; back that folder up if you rely on it.
+Annotated copies live in `data/app/annotated/` and are included in **Settings → Backup** exports.
 
 ### Supported formats and OCR
 
@@ -507,6 +510,7 @@ Everything the library needs lives under `data/`:
 | --- | --- | --- |
 | `data/app/library.db` | document metadata and indexing state | no |
 | `data/app/documents/` | PDFs added via **Upload** (the only copy); files imported from `/library` stay on the source disk | no |
+| `data/app/annotated/` | annotated PDF copies you attached to books (also in the Backup export) | no |
 | `data/app/conversations.db` | saved Ask-mode conversations | no (but not essential) |
 | `data/app/settings.json` | the designated library folder ([Browsing and importing](#browsing-and-importing-from-a-server-folder)) | no (but not essential — resets to the whole mount) |
 | `data/app/extracted/`, `data/app/chunks/` | extracted text and passages | yes, from the PDFs |

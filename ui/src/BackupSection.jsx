@@ -14,9 +14,12 @@ function Summary({ report }) {
     return parts.length ? <li key={key}><strong>{label}:</strong> {parts.join(", ")}</li> : null;
   }).filter(Boolean);
   if (report.covers.restored) rows.push(<li key="covers"><strong>covers:</strong> {report.covers.restored} {report.dry_run ? "to restore" : "restored"}</li>);
+  const copies = report.annotated_copies || { restored: 0, kept: 0 };
+  const copyParts = [copies.restored && `${copies.restored} ${report.dry_run ? "to restore" : "restored"}`, copies.kept && `${copies.kept} already here`].filter(Boolean);
+  if (copyParts.length) rows.push(<li key="copies"><strong>annotated PDFs:</strong> {copyParts.join(", ")}</li>);
   return <div className="backup-report" role="status">
     {(() => {
-      const changes = ["books", "notes", "vocabulary"].some((key) => report[key].created || report[key].updated) || report.covers.restored > 0;
+      const changes = ["books", "notes", "vocabulary"].some((key) => report[key].created || report[key].updated) || report.covers.restored > 0 || (report.annotated_copies?.restored || 0) > 0;
       return <>
         <strong>{!changes ? "Nothing to import" : report.dry_run ? "This file would change:" : "Import finished:"}</strong>
         {!changes && <p>Everything in this file is already in your library.</p>}
@@ -57,14 +60,15 @@ export default function BackupSection({ apiBase, onImported }) {
     if (!chosen) return;
     setFile(chosen); setReport(null); send(true, chosen);
   }
-  const hasChanges = report?.dry_run && ["books", "notes", "vocabulary"].some((key) => report[key].created || report[key].updated) || (report?.dry_run && report.covers.restored > 0);
+  const hasChanges = report?.dry_run && ["books", "notes", "vocabulary"].some((key) => report[key].created || report[key].updated) || (report?.dry_run && (report.covers.restored > 0 || (report.annotated_copies?.restored || 0) > 0));
 
   return <section className="settings-section">
     <h3>Backup</h3>
     <p className="settings-note">
-      Export your ratings, reviews, notes, vocabulary, book details and custom covers as one ZIP of
-      plain JSON and Markdown. Your books themselves are not included. To restore, scan your library
-      first, then import.
+      Export your ratings, reviews, notes, vocabulary, book details, custom covers and the annotated
+      PDF copies you attached as one ZIP of plain JSON, Markdown and PDF files. Your library's own
+      books are not included. To restore, scan your library first, then import. The file can be large
+      if you have many annotated PDFs.
     </p>
     <div className="backup-actions">
       <button type="button" className="secondary" onClick={() => window.location.assign(`${apiBase}/export`)}>Export library</button>
