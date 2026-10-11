@@ -225,5 +225,6 @@ def test_a_title_that_is_a_body_of_work_gets_the_author_the_library_already_know
     essays = client.post("/documents", files={"file": ("Essays of Arthur Schopenhauer.pdf", make_pdf("e"), "application/pdf")}).json()
     assert known["author"] == "Arthur Schopenhauer"
     assert essays["author"] == "Arthur Schopenhauer"  # named by its own title
+    assert essays["title"] == "Essays of Arthur Schopenhauer"  # and the name stays in it
     other = client.post("/documents", files={"file": ("Life of Arthur Schopenhauer.pdf", make_pdf("l"), "application/pdf")}).json()
     assert other["author"] is None  # about him, not by him

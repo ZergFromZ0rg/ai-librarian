@@ -185,7 +185,7 @@ def test_a_lone_surname_is_completed_from_the_opening_pages():
     # Extraction can put the title and the author on one line: the title's words are not the name.
     assert shelves.complete_surname("Benatar", ["Better Never to Have Been David Benatar"]) == "David Benatar"
     assert shelves.complete_surname("Westlake", ["THE AX Donald E. Westlake"]) == "Donald E. Westlake"
-    assert shelves.complete_surname("Tolkien", ["The Hobbit J. R. R. Tolkien"]) == "J. R. R. Tolkien"
+    assert shelves.complete_surname("Tolkien", ["The Hobbit J. R. R. Tolkien"]) is None  # initials alone are not a completion
     assert shelves.complete_surname("Camus", ["ALBERT CAMUS", "A. Camus", "Albert Camus"]) == "Albert Camus"  # one person, spelled two ways
     assert shelves.complete_surname("Hamsun", ["Hunger\nby Hamsun"]) is None  # nothing beside it
     # Title and author run together by extraction: a word of the title is not a first name.
@@ -213,3 +213,20 @@ def test_pick_author_completes_a_lone_surname_from_the_title_page_when_the_libra
     assert shelves.pick_author(None, "Better Never - Benatar.pdf", lambda: pages, ["Daniel Benatar"]) == "Daniel Benatar"
     # And nothing beside the surname: it stays a surname.
     assert shelves.pick_author(None, "Hunger - Hamsun.pdf", lambda: ["Hunger"]) == "Hamsun"
+
+
+def test_a_title_that_names_its_author_as_part_of_itself_keeps_the_name():
+    # Found on the live library: this became "Essays of".
+    assert shelves.title_from_filename("Essays of Arthur Schopenhauer.pdf", "Arthur Schopenhauer") == "Essays of Arthur Schopenhauer"
+    assert shelves.title_from_filename("Collected Works of Arthur Schopenhauer.epub", "Arthur Schopenhauer") == "Collected Works of Arthur Schopenhauer"
+    assert shelves.title_from_filename("Life of Albert Camus.pdf", "Albert Camus") == "Life of Albert Camus"
+    # An author glued on at the end of an ordinary title still comes off.
+    assert shelves.title_from_filename("0 The Hobbit Tolkien.pdf", "J. R. R. Tolkien") == "0 The Hobbit"
+    assert shelves.title_from_filename("Code Charles Petzold.pdf", "Charles Petzold") == "Code"
+
+
+def test_a_completed_surname_needs_a_given_name_not_only_initials():
+    assert shelves.complete_surname("Meerloo", ["The Rape of the Mind\nM. Meerloo\nPublished by Harper"]) is None
+    assert shelves.complete_surname("Meerloo", ["Joost A. M. Meerloo"]) == "Joost A. M. Meerloo"
+    assert shelves.complete_surname("Tolkien", ["The Hobbit J. R. R. Tolkien"]) is None  # initials alone: left as the surname
+    assert shelves.complete_surname("Westlake", ["THE AX Donald E. Westlake"]) == "Donald E. Westlake"

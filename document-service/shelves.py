@@ -288,8 +288,12 @@ def title_from_filename(filename: str, author: Optional[str] = None) -> str:
             return lead.group(1).strip()
         if title.lower().endswith(" " + name.lower()):
             rest = re.sub(r"\s+by$", "", title[: -len(name)].rstrip(" -–—,:"), flags=re.IGNORECASE).strip()
-            if re.search(r"[^\W\d_]", rest):
+            if re.search(r"[^\W\d_]", rest) and rest.split()[-1].casefold() not in _SMALL_WORDS:
                 return rest
+            # "Essays of Arthur Schopenhauer" names its author as part of itself: taking
+            # the name off would leave "Essays of", and a shorter name would leave
+            # "Essays of Arthur". The title is already right.
+            return title
     return title
 
 
@@ -358,7 +362,8 @@ def complete_surname(surname: str, texts: Iterable[str], title: str = "") -> Opt
                 # Only the words right before the surname that look like a name.
                 keep = []
                 for token in reversed(tokens):
-                    if token.lower().strip(".") in _NOT_A_FIRST_NAME or not re.match(r"^[A-ZÀ-Þa-zß-ÿ]", token):
+                    is_initial = re.fullmatch(r"[A-Z]\.", token) is not None  # "A." is an initial, not the article "a"
+                    if (token.lower().strip(".") in _NOT_A_FIRST_NAME and not is_initial) or not re.match(r"^[A-ZÀ-Þa-zß-ÿ]", token):
                         break
                     if token.casefold().strip(".") in in_title:
                         break  # a word of the title, not of the name
@@ -370,7 +375,9 @@ def complete_surname(surname: str, texts: Iterable[str], title: str = "") -> Opt
                 if not keep:
                     continue
                 name = normalize_author(" ".join(keep + [surname]))
-                if name and _surname(name) == surname.casefold() and " " in name:
+                given = [word for word in (name or "").split()[:-1] if len(word.strip(".")) > 1]
+                # "M. Meerloo" is no more complete than "Meerloo": it needs a given name.
+                if name and _surname(name) == surname.casefold() and given:
                     counts[name] = counts.get(name, 0) + 1
     # Two people with one surname on the page ("John Gray", "Alasdair Gray") is
     # ambiguous; one person spelled two ways ("A. Camus", "Albert Camus") is not.
