@@ -44,7 +44,7 @@ def test_author_from_filename_and_title_page():
         # The commonest hand-kept style: "Title - Author", a lone surname included.
         ("A Hapy Death - Camus.pdf", "A Hapy Death", "Camus"),
         ("Anarchist Cookbook - William Powell.pdf", "Anarchist Cookbook", "William Powell"),
-        ("All Tomorrows - C.M. Kosemen .pdf", "All Tomorrows", "C.M. Kosemen"),
+        ("All Tomorrows - C.M. Kosemen .pdf", "All Tomorrows", "C. M. Kosemen"),
         ("A History of Mathematics - 3rd Edition - Merzbach and Boyer.pdf", "A History of Mathematics - 3rd Edition", "Merzbach"),
         ("The Meme Machine (Susan Blackmore, Richard Dawkins).pdf", "The Meme Machine", "Susan Blackmore"),
         ("Electrical Engineering 101 [by Darren Ashby].pdf", "Electrical Engineering 101", "Darren Ashby"),
@@ -98,7 +98,7 @@ def test_pick_author_prefers_the_file_name_over_a_translator_in_the_metadata():
     assert shelves.pick_author("Florida Memorial", "The Making of the Slave - Willie Lynch.pdf") == "Willie Lynch"
     # ...unless the metadata agrees on the surname, in which case its spelling is kept.
     assert shelves.pick_author("Albert Camus", "The Fall - Camus.epub") == "Albert Camus"
-    assert shelves.pick_author("Mark P.O. Morford", "Classical Mythology (Mark Morford).pdf") == "Mark P.O. Morford"
+    assert shelves.pick_author("Mark P.O. Morford", "Classical Mythology (Mark Morford).pdf") == "Mark P. O. Morford"
     # Without one: the metadata, then the title page, then nothing.
     assert shelves.pick_author("J. R. R. Tolkien", "0 The Hobbit Tolkien.pdf") == "J. R. R. Tolkien"
     assert shelves.pick_author("python-docx", "notes.docx", ["by Ann Writer"]) == "Ann Writer"
@@ -149,3 +149,67 @@ def test_author_count_does_not_count_roles_as_people():
     assert shelves.author_count("Arthur Schopenhauer; T. Bailey Saunders, trans.") == 2
     assert shelves.author_count("Ann Smith; Bob Jones; Cy Lee, eds.") == 3
     assert shelves.author_count("Stolz, J., Fugelsang, J. & Fernandes, M.") == 3
+
+
+# --- fixes 3, 4 and 5: surnames completed, spellings merged, authors in titles ---
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("E.M. Cioran", "E. M. Cioran"),
+        ("E. M. Cioran", "E. M. Cioran"),
+        ("J.R.R. Tolkien", "J. R. R. Tolkien"),
+        ("C.M. Kosemen", "C. M. Kosemen"),
+        ("Dr. Wasif Naeem", "Wasif Naeem"),
+        ("Prof. Jane Doe", "Jane Doe"),
+        ("Donald E. Westlake", "Donald E. Westlake"),
+    ],
+)
+def test_one_author_is_one_spelling(raw, expected):
+    assert shelves.normalize_author(raw) == expected
+
+
+def test_authors_the_library_spells_two_ways_are_merged():
+    names = ["E. M. Cioran"] * 3 + ["Emil Cioran", "Albert Camus", "Isaac Asimov", "Janet Asimov", "Camus"]
+    assert shelves.canonical_authors(names) == {"Emil Cioran": "E. M. Cioran"}  # Janet is not Isaac; a surname alone is left
+    assert shelves.canonical_authors(["Ann Lee", "Ann Lee"]) == {}
+    # With no clear majority the fuller spelling wins.
+    assert shelves.canonical_authors(["E. M. Cioran", "Emil M. Cioran"]) == {"E. M. Cioran": "Emil M. Cioran"}
+
+
+def test_a_lone_surname_is_completed_from_the_opening_pages():
+    assert shelves.complete_surname("Camus", ["THE STRANGER\n\nALBERT CAMUS\n\nTranslated by Matthew Ward"]) == "Albert Camus"
+    assert shelves.complete_surname("Benatar", ["Better Never to Have Been\nDavid Benatar\nOxford University Press"]) == "David Benatar"
+    assert shelves.complete_surname("Hamsun", ["Hunger by Knut Hamsun"]) == "Knut Hamsun"
+    # Extraction can put the title and the author on one line: the title's words are not the name.
+    assert shelves.complete_surname("Benatar", ["Better Never to Have Been David Benatar"]) == "David Benatar"
+    assert shelves.complete_surname("Westlake", ["THE AX Donald E. Westlake"]) == "Donald E. Westlake"
+    assert shelves.complete_surname("Tolkien", ["The Hobbit J. R. R. Tolkien"]) == "J. R. R. Tolkien"
+    assert shelves.complete_surname("Camus", ["ALBERT CAMUS", "A. Camus", "Albert Camus"]) == "Albert Camus"  # one person, spelled two ways
+    assert shelves.complete_surname("Hamsun", ["Hunger\nby Hamsun"]) is None  # nothing beside it
+    # Title and author run together by extraction: a word of the title is not a first name.
+    assert shelves.complete_surname("Camus", ["A HAPPY DEATH CAMUS"], title="A Hapy Death") is None
+    assert shelves.complete_surname("Camus", ["THE FALL ALBERT CAMUS"], title="The Fall") == "Albert Camus"
+    assert shelves.complete_surname("Gray", ["John Gray, with Alasdair Gray"]) is None  # two people
+    assert shelves.complete_surname("Camus", ["translated by Stuart Gilbert, Camus"]) is None
+    assert shelves.complete_surname("Albert Camus", ["Albert Camus"]) is None  # already a full name
+
+
+def test_a_title_that_is_a_body_of_work_names_its_author():
+    known = ["Arthur Schopenhauer", "Albert Camus", "Camus"]
+    assert shelves.author_in_title("Essays of Arthur Schopenhauer", known) == "Arthur Schopenhauer"
+    assert shelves.author_in_title("Collected Works of Arthur Schopenhauer", known) == "Arthur Schopenhauer"
+    assert shelves.author_in_title("Albert Camus's Notebooks", known) == "Albert Camus"
+    assert shelves.author_in_title("Life of Albert Camus", known) is None  # about them, not by them
+    assert shelves.author_in_title("Essays of Somebody Else", known) is None
+    assert shelves.pick_author(None, "Essays of Arthur Schopenhauer.pdf", known_authors=known) == "Arthur Schopenhauer"
+
+
+def test_pick_author_completes_a_lone_surname_from_the_title_page_when_the_library_does_not_know_it():
+    pages = ["Better Never to Have Been\nDavid Benatar\nOxford University Press"]
+    assert shelves.pick_author(None, "Better Never to Have Been - Benatar.pdf", lambda: pages) == "David Benatar"
+    # The library's own spelling comes first.
+    assert shelves.pick_author(None, "Better Never - Benatar.pdf", lambda: pages, ["Daniel Benatar"]) == "Daniel Benatar"
+    # And nothing beside the surname: it stays a surname.
+    assert shelves.pick_author(None, "Hunger - Hamsun.pdf", lambda: ["Hunger"]) == "Hamsun"

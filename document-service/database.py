@@ -60,6 +60,11 @@ COLUMNS = (
     "author_count",
     "book_form",
     "book_form_override",
+    # JSON about the text itself -- {"words", "past", "english", "weak"} -- and
+    # what a local model said when "AI sort" looked at the book ({"fiction",
+    # "kind", "confidence", "model", "at"}): doc_kind reads both.
+    "text_stats",
+    "ai_json",
     # Reader-set: 1/0 whether they own a copy (books only), NULL = not said.
     "owned",
     # When the reader marked it read; NULL = unread.
@@ -160,6 +165,8 @@ CREATE TABLE IF NOT EXISTS documents (
     author_count          INTEGER,
     book_form             TEXT,
     book_form_override    TEXT,
+    text_stats            TEXT,
+    ai_json               TEXT,
     owned                 INTEGER,
     read_at               TEXT,
     author                TEXT,
@@ -276,6 +283,8 @@ class MetadataStore:
             ("author_count", "INTEGER"),
             ("book_form", "TEXT"),
             ("book_form_override", "TEXT"),
+            ("text_stats", "TEXT"),
+            ("ai_json", "TEXT"),
             ("owned", "INTEGER"),
             ("read_at", "TEXT"),
             ("author", "TEXT"),

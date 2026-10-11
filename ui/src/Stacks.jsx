@@ -81,7 +81,7 @@ function CollectionBar({ collections, activeId, onSelect, onCreate, onUpdate, on
           >
             <span className={`collection-dot${collection.auto_scan ? " on" : ""}`} aria-hidden="true" />
             {collection.name}
-            <span className="collection-chip-count">{collection.document_count || 0}</span>
+            <span className="collection-chip-count" title="Books in this collection (papers and documents are in Documents)">{collection.book_count ?? collection.document_count ?? 0}</span>
           </button>
         ))}
         <button type="button" className="text-button collection-manage" aria-expanded={managing} onClick={() => { setManaging((open) => !open); if (managing) setAdding(false); }}>

@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from starlette.background import BackgroundTask
 from starlette.datastructures import Headers, MutableHeaders
 
+import ai_sort
 import annotations as reader_annotations
 import catalogue
 import doc_kind
@@ -537,7 +538,7 @@ class DocumentPatch(BaseModel):
     read: Optional[bool] = None
     kind: Optional[str] = Field(default=None, pattern=r"^(book|paper|document|auto)$")
     # A book's form; "auto" drops the reader's choice.
-    form: Optional[str] = Field(default=None, pattern=r"^(auto|novel|short_story|collection|nonfiction)$")
+    form: Optional[str] = Field(default=None, pattern=r"^(auto|novel|novella|short_story|collection|nonfiction)$")
     # A working document's type; "auto" drops the reader's choice.
     doc_type: Optional[str] = Field(default=None, pattern=r"^(auto|paper|report|manual|slides|data|writing|legal|other)$")
     # "Books/Philosophy/Albert Camus"; null or "" goes back to the suggestion.
@@ -1179,6 +1180,14 @@ def _genres_of(doc: dict) -> List[str]:
     return [str(genre) for genre in genres] if isinstance(genres, list) else []
 
 
+def _json_of(value) -> dict:
+    try:
+        parsed = json.loads(value or "{}")
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _kind_fields(doc_id: str, metadata: dict) -> dict:
     """Book / paper / document and the signals behind it (see doc_kind.py), from
     the text extraction already wrote. Best effort: {} when it can not be read."""
@@ -1199,12 +1208,15 @@ def _kind_fields(doc_id: str, metadata: dict) -> dict:
             title=f"{metadata.get('title') or ''} {metadata.get('subtitle') or ''}",
             subject=metadata.get("subject"),
             genres=_genres_of(metadata),
+            ai=_json_of(metadata.get("ai_json")),
         )
+        stats = {"words": verdict.words, "past": verdict.past, "english": verdict.english, "weak": verdict.weak}
         return {
             "kind": verdict.kind,
             "kind_rules": doc_kind.RULES_VERSION,
             "prose_score": verdict.prose_score,
             "author_count": verdict.authors,
+            "text_stats": json.dumps(stats),
         }
     except Exception:
         logger.warning("Could not detect the kind of document %s", doc_id, exc_info=True)
@@ -1212,18 +1224,18 @@ def _kind_fields(doc_id: str, metadata: dict) -> dict:
 
 
 def _form_fields(doc: dict) -> dict:
-    """A book's form -- novel, short story, collection or non-fiction -- from
-    what is already known about it; nothing for anything that is not a book.
-    `doc` is the record with any pending changes merged in."""
+    """A book's form -- novel, novella, short story, collection or non-fiction
+    -- from what is already known about it; nothing for anything that is not a
+    book. `doc` is the record with any pending changes merged in."""
     if (doc.get("kind_override") or doc.get("kind")) != "book":
         return {"book_form": None}
     title = f"{doc.get('title') or ''} {doc.get('subtitle') or ''}"
-    fiction = doc_kind.is_fiction(doc.get("prose_score"), title, doc.get("subject"), _genres_of(doc))
-    return {
-        "book_form": doc_kind.book_form(
-            doc.get("page_count") or doc.get("pages"), fiction, doc.get("author_count") or 0, title, doc.get("author") or ""
-        )
-    }
+    stats = _json_of(doc.get("text_stats"))
+    fiction = doc_kind.is_fiction(
+        doc.get("prose_score"), title, doc.get("subject"), _genres_of(doc), stats.get("past"), _json_of(doc.get("ai_json")).get("fiction")
+    )
+    pages = doc_kind.length_pages(doc.get("page_count"), stats.get("words") or 0, doc.get("pages"))
+    return {"book_form": doc_kind.book_form(pages, fiction, doc.get("author_count") or 0, title, doc.get("author") or "")}
 
 
 def backfill_document_kinds() -> None:
@@ -1323,7 +1335,7 @@ def _shelf_fields(metadata: dict, kind: Optional[str]) -> dict:
             author = shelves.pick_author(
                 document_author(pdf_path(metadata)),
                 metadata.get("filename") or "",
-                lambda: _first_page_texts(doc_id),
+                lambda: _first_page_texts(doc_id, 6),
                 _known_authors(),
             )
             subject = shelves.classify_subject(_document_vector(doc_id), _subject_vectors())
@@ -1351,15 +1363,17 @@ def suggest_document_shelf(doc_id: str) -> Optional[dict]:
     return STORE.update(doc_id, fields) if fields else None
 
 
-def _filename_detail_changes(doc: dict, known_authors: Sequence[str]) -> dict:
-    """The author and tidier title the file name and the file's own properties
-    give a record made before the parser understood "Title - Author". Only
-    guesses are touched: a record the reader edited, a catalogue match, or a
-    title that is not the old file-name guess is left exactly as it is.
+def _filename_detail_changes(doc: dict, known_authors: Sequence[str], spellings: Optional[dict] = None) -> dict:
+    """The author and tidier title the file name, the file's own properties and
+    the library give a record. Only guesses are touched: a record the reader
+    edited, a catalogue match, or a title that is not the old file-name guess is
+    left exactly as it is.
 
     An author already stored is replaced only when the file name credits
     someone with a different surname (the stored one was a translator, an
-    editor or an institution); otherwise it stays."""
+    editor or an institution), or to make it the library's one spelling of
+    that person ("E.M. Cioran" -> "E. M. Cioran"); a lone surname is completed
+    from the library or the title page."""
     filename = doc.get("filename") or ""
     if (
         not filename
@@ -1369,17 +1383,30 @@ def _filename_detail_changes(doc: dict, known_authors: Sequence[str]) -> dict:
         or doc.get("metadata_source")
     ):
         return {}
+    spellings = spellings or {}
     changes: dict = {}
     author = doc.get("author")
+    pages_text = None
+
+    def opening_pages() -> List[str]:
+        nonlocal pages_text
+        if pages_text is None:
+            pages_text = _first_page_texts(doc["document_id"], 6) if doc.get("indexing_status") == "indexed" else []
+        return pages_text
+
     if not author:
         try:
             embedded = document_author(pdf_path(doc))
         except Exception:
             embedded = None
-        # The title page is read at index time (_shelf_fields), which wins over this.
-        author = shelves.pick_author(embedded, filename, known_authors=known_authors)
+        # The title page of an indexed book counts too; before indexing there is none.
+        author = shelves.pick_author(embedded, filename, opening_pages, known_authors)
     elif shelves.author_from_filename(filename):
-        author = shelves.pick_author(author, filename, known_authors=known_authors) or author
+        author = shelves.pick_author(author, filename, opening_pages, known_authors) or author
+    elif " " not in author.strip():
+        author = shelves.complete_surname(author, opening_pages(), doc.get("title") or "") or author
+    if author:
+        author = spellings.get(shelves.normalize_author(author) or author) or shelves.normalize_author(author) or author
     if author and author != doc.get("author"):
         changes["author"] = author
     if doc.get("title") == _legacy_title_from_filename(filename):
@@ -1395,12 +1422,13 @@ def _filename_detail_changes(doc: dict, known_authors: Sequence[str]) -> dict:
 
 def backfill_filename_details() -> None:
     documents = list_metadata()
-    known = [doc["author"] for doc in documents if doc.get("author")]
+    known = [shelves.normalize_author(doc["author"]) or doc["author"] for doc in documents if doc.get("author")]
+    spellings = shelves.canonical_authors(known)
     for doc in documents:
         if SHUTDOWN.is_set():
             return
         try:
-            changes = _filename_detail_changes(doc, known)
+            changes = _filename_detail_changes(doc, known, spellings)
             if changes:
                 STORE.update(doc["document_id"], changes)
                 if changes.get("author"):
@@ -4105,6 +4133,454 @@ async def apply_catalogue_metadata(doc_id: str, body: CatalogueApply):
     return updated
 
 
+# ---------------------------------------------------------------- AI sort --
+# The Library's "AI sort files" button: go through the books, tidy what the rules
+# can tidy, look each book up in the online catalogue (optional), and have the
+# reader's own Ollama confirm which catalogue entry is the same work and who
+# wrote it. See ai_sort.py for what it will and will not believe. Everything
+# applied is logged with its before and after values so it can be undone; what is
+# not certain is left as a suggestion; what the reader edited is never touched.
+
+AI_SORT_FILE = DATA_DIR / "ai_sort.json"
+AI_SORT_SOURCE = "AI sort"
+# Every field a sort can change, so one snapshot can restore it.
+_AI_SORT_TOUCHED = (
+    "title", "subtitle", "author", "subject", "description", "publisher", "language", "isbn_10", "isbn_13",
+    "published_year", "page_count", "genres_json", "metadata_edited", "metadata_source", "metadata_source_id",
+    "shelf_suggested", "book_form", "kind_override", "doc_type", "ai_json",
+)
+_AI_SORT_LOCK = threading.RLock()
+_AI_SORT_CANCEL = threading.Event()
+_AI_SORT_THREAD: Optional[threading.Thread] = None
+_AI_SORT_REPORT: dict = {}
+
+
+def _ai_sort_blank() -> dict:
+    return {
+        "state": "idle", "run_id": None, "started_at": None, "finished_at": None, "options": {}, "model": None,
+        "total": 0, "done": 0, "current": None, "applied": [], "suggestions": [], "skipped": {}, "unchanged": 0,
+        "notes": [], "stats": {"model_calls": 0, "model_failures": 0, "lookups": 0, "lookup_failures": 0},
+    }
+
+
+def _ai_sort_running() -> bool:
+    return _AI_SORT_THREAD is not None and _AI_SORT_THREAD.is_alive()
+
+
+def _ai_sort_report() -> dict:
+    """The last run's report, loaded from disk the first time it is asked for. A
+    run that was cut off by a restart is shown as interrupted, with what it did."""
+    global _AI_SORT_REPORT
+    with _AI_SORT_LOCK:
+        if not _AI_SORT_REPORT:
+            try:
+                _AI_SORT_REPORT = {**_ai_sort_blank(), **read_json(AI_SORT_FILE)}
+            except Exception:
+                _AI_SORT_REPORT = _ai_sort_blank()
+        if _AI_SORT_REPORT.get("state") == "running" and not _ai_sort_running():
+            _AI_SORT_REPORT["state"] = "interrupted"
+        return _AI_SORT_REPORT
+
+
+def _ai_sort_save() -> None:
+    with _AI_SORT_LOCK:
+        try:
+            atomic_write_json(AI_SORT_FILE, _AI_SORT_REPORT)
+        except Exception:
+            logger.warning("Could not save the AI sort report", exc_info=True)
+
+
+def _ai_sort_skip_reason(doc: dict, include_checked: bool) -> Optional[str]:
+    """Why this record is not sorted, or None when it should be."""
+    if doc.get("record_type") == "standalone":
+        return "has no file"
+    if doc.get("collection_id") == NOTES_COLLECTION_ID or (doc.get("kind_override") or doc.get("kind")) == "note":
+        return "a note"
+    if doc.get("file_type") not in {"pdf", "epub"}:
+        return "not a PDF or EPUB"
+    kind = _library_kind(doc)
+    weak = bool(_json_of(doc.get("text_stats")).get("weak"))
+    if kind not in {"book", "pending"} and not weak:
+        return "a paper or document"
+    if doc.get("metadata_edited") and not doc.get("metadata_source"):
+        return "edited by you"
+    if not include_checked and (doc.get("metadata_source") or _json_of(doc.get("ai_json")).get("checked_at")):
+        return "already checked"
+    return None
+
+
+def _ai_sort_texts(doc_id: str) -> List[str]:
+    try:
+        pages = read_json(EXTRACTED_DIR / f"{doc_id}.json").get("pages") or []
+    except Exception:
+        return []
+    return [page.get("text") or "" for page in pages]
+
+
+def _ai_sort_change(field: str, before, after, source: str, reason: str) -> dict:
+    return {"field": field, "before": before, "after": after, "source": source, "reason": reason}
+
+
+def _apply_sort(doc_id: str, *, quiet: Optional[dict] = None, patch: Optional[dict] = None, source: Optional[str] = None,
+                source_id: Optional[str] = None, ai: Optional[dict] = None, cover: Optional[bytes] = None) -> dict:
+    """Write one book's changes and return what is needed to undo them.
+
+    `quiet` are fixes the rules are sure of, written as they are (like the
+    startup backfill); `patch` goes through the same validation as the book
+    editor, which also marks the details as settled; `ai` is a model verdict to
+    remember; `cover` a catalogue cover for a book that has none."""
+    doc = read_metadata(doc_id)
+    before = {key: doc.get(key) for key in _AI_SORT_TOUCHED}
+    if quiet:
+        STORE.update(doc_id, quiet)
+    if patch:
+        asyncio.run(patch_document(doc_id, DocumentPatch(**patch)))
+    extra: dict = {}
+    if source:
+        extra.update(metadata_source=source, metadata_source_id=source_id)
+    if ai is not None:
+        extra["ai_json"] = json.dumps({**_json_of(doc.get("ai_json")), **ai})
+    if extra:
+        STORE.update(doc_id, extra)
+    after_doc = read_metadata(doc_id)
+    kind = after_doc.get("kind_override") or after_doc.get("kind")
+    settled = dict(_form_fields(after_doc))
+    if {"author", "subject"} & {key for key in _AI_SORT_TOUCHED if after_doc.get(key) != before.get(key)}:
+        doc_type = None if kind == "book" else after_doc.get("doc_type")
+        settled["shelf_suggested"] = _shelf_suggestion(kind, doc_type, after_doc.get("subject"), after_doc.get("author"))
+    STORE.update(doc_id, settled)
+    cover_added = False
+    if cover and not (THUMBNAILS_DIR / f"{doc_id}-custom.jpg").exists():
+        try:
+            _save_custom_cover(doc_id, cover)
+            cover_added = True
+        except Exception:
+            logger.info("AI sort could not store a cover for %s", doc_id)
+    final = read_metadata(doc_id)
+    changed = [key for key in _AI_SORT_TOUCHED if final.get(key) != before.get(key)]
+    return {
+        "before": {key: before.get(key) for key in changed},
+        "after": {key: final.get(key) for key in changed},
+        "cover_added": cover_added,
+    }
+
+
+def _ai_sort_match_fields(doc: dict, match: dict) -> dict:
+    """The details a confirmed catalogue match may fill in: only what is empty."""
+    return {
+        key: match[key]
+        for key in _AUTO_MATCH_FIELDS
+        if match.get(key) not in (None, "", []) and not doc.get("genres_json" if key == "genres" else key)
+    }
+
+
+def _ai_sort_one(doc: dict, ctx: dict, report: dict) -> None:
+    doc_id = doc["document_id"]
+    texts = _ai_sort_texts(doc_id)
+    try:
+        embedded = document_author(pdf_path(doc))
+    except Exception:
+        embedded = None
+    # 1. What the rules can settle on their own: spelling, a surname from the library or the title page.
+    quiet = {key: value for key, value in _filename_detail_changes(doc, ctx["known"], ctx["spellings"]).items()}
+    work = {**doc, **quiet}
+    author, title = work.get("author"), work.get("title") or ""
+    stats = _json_of(doc.get("text_stats"))
+    pages = doc_kind.length_pages(doc.get("page_count"), stats.get("words") or 0, doc.get("pages"))
+    needs_author = not author or " " not in author.strip()
+    in_doubt = doc_kind.fiction_in_doubt(doc.get("prose_score"), stats.get("past")) and (doc.get("kind_override") or doc.get("kind")) in {"book", None}
+    form_unknown = (doc.get("kind_override") or doc.get("kind")) == "book" and not (doc.get("book_form_override") or doc.get("book_form"))
+    weak = bool(stats.get("weak"))
+    needs = needs_author or in_doubt or form_unknown or weak or ctx["online"]
+
+    plan = ai_sort.Plan()
+    checked = False
+    if needs and (ctx["online"] or ctx["model"]):
+        candidates: List[dict] = []
+        if ctx["online"]:
+            try:
+                report["stats"]["lookups"] += 1
+                found = catalogue.search(catalogue.clean_query(f"{title} {author or ''}"), 5)
+                candidates = [dict(item) for item in found if item.get("score", 0) >= 0.5][:4]
+                ctx["lookup_errors"] = 0
+                checked = True
+            except catalogue.CatalogueError as exc:
+                report["stats"]["lookup_failures"] += 1
+                ctx["lookup_errors"] += 1
+                if ctx["lookup_errors"] >= 3:
+                    ctx["online"] = False
+                    report["notes"].append(f"The online catalogue stopped answering ({exc}); the rest was checked without it.")
+        ev = ai_sort.Evidence(
+            filename=doc.get("filename") or "", title=title, author=author, embedded_author=embedded,
+            opening=ai_sort.clip_opening(texts), excerpt=ai_sort.clip_excerpt(texts), pages=pages,
+            words=stats.get("words") or 0, kind=doc.get("kind_override") or doc.get("kind"), form=doc.get("book_form"),
+            weak=weak, fiction_in_doubt=in_doubt,
+            title_untouched=not doc.get("metadata_edited"), candidates=candidates,
+        )
+        answer = None
+        if ctx["model"]:
+            try:
+                report["stats"]["model_calls"] += 1
+                answer = ai_sort.parse_answer(ai_sort.ask_local_model(ctx["model"], ai_sort.build_prompt(ev)), len(candidates))
+                ctx["model_errors"] = 0
+                checked = True
+            except ai_sort.AiError as exc:
+                report["stats"]["model_failures"] += 1
+                ctx["model_errors"] += 1
+                logger.info("AI sort: %s", exc)
+                if ctx["model_errors"] >= 3:
+                    ctx["model"] = None
+                    report["notes"].append(f"The local model stopped answering ({exc}); the rest was checked without it.")
+        plan = ai_sort.plan_book(ev, answer, use_catalogue=bool(candidates))
+        plan.notes = [f"{title}: {note}" for note in plan.notes]
+
+    applied: List[dict] = []
+    for field in ("author", "title"):
+        if field in quiet:
+            applied.append(_ai_sort_change(field, doc.get(field), quiet[field], "rules", "from the file name, the library or the title page"))
+    patch: dict = {}
+    for change in plan.auto:
+        if change.field in {"author", "title"}:
+            patch[change.field] = change.after
+            applied = [item for item in applied if item["field"] != change.field]
+            applied.append(_ai_sort_change(change.field, doc.get(change.field), change.after, change.source, change.reason))
+        elif change.field == "fiction":
+            applied.append(_ai_sort_change("fiction", None, change.after, change.source, change.reason))
+    cover = None
+    if plan.match:
+        details = _ai_sort_match_fields(work, plan.match)
+        if details:
+            patch.update(details)
+            applied.append(_ai_sort_change("details", None, ", ".join(sorted(details)), _provider_label(plan.match["id"]), "filled in from the catalogue match"))
+        if plan.match.get("cover_id") and not (THUMBNAILS_DIR / f"{doc_id}-custom.jpg").exists():
+            try:
+                cover = _normalised_cover_jpeg(catalogue.fetch_cover(plan.match["cover_id"]))
+            except Exception:
+                cover = None
+    quiet_write = {key: value for key, value in quiet.items() if key not in patch}
+    ai = {**plan.ai, "checked_at": utc_now(), "model": ctx["model"]} if checked else None
+    if quiet_write or patch or ai is not None or cover:
+        undo = _apply_sort(
+            doc_id, quiet=quiet_write, patch=patch or None,
+            source=(_provider_label(plan.match["id"]) if plan.match and (patch or cover) else (AI_SORT_SOURCE if patch else None)),
+            source_id=(plan.match["id"] if plan.match and (patch or cover) else None), ai=ai, cover=cover,
+        )
+    else:
+        undo = {"before": {}, "after": {}, "cover_added": False}
+    # Only what really changed is worth showing and undoing.
+    meaningful = [item for item in applied if item["field"] in {"fiction", "details"} or item["before"] != item["after"]]
+    if meaningful and (undo["after"] or undo["cover_added"]):
+        final = read_metadata(doc_id)
+        with _AI_SORT_LOCK:
+            report["applied"].append({
+                "id": uuid.uuid4().hex[:10], "document_id": doc_id, "title": final.get("title") or doc.get("filename"),
+                "changes": meaningful, "undo": undo, "via": "auto",
+            })
+    else:
+        with _AI_SORT_LOCK:
+            report["unchanged"] += 1
+    for change in plan.suggestions:
+        patch_field = {"kind": change.after} if change.field == "kind" else {change.field: change.after}
+        with _AI_SORT_LOCK:
+            report["suggestions"].append({
+                "id": uuid.uuid4().hex[:10], "document_id": doc_id, "title": title,
+                **_ai_sort_change(change.field, change.before, change.after, change.source, change.reason), "patch": patch_field,
+            })
+    with _AI_SORT_LOCK:
+        report["notes"].extend(plan.notes)
+
+
+def _run_ai_sort(options: dict) -> None:
+    report = _ai_sort_report()
+    try:
+        include_checked = bool(options.get("include_checked"))
+        docs = [doc for doc in list_metadata() if doc.get("indexing_status") != "catalogued"]
+        eligible, skipped = [], {}
+        for doc in docs:
+            reason = _ai_sort_skip_reason(doc, include_checked)
+            if reason:
+                skipped[reason] = skipped.get(reason, 0) + 1
+            else:
+                eligible.append(doc)
+        eligible.sort(key=lambda doc: (doc.get("title") or doc.get("filename") or "").lower())
+        known = [shelves.normalize_author(doc["author"]) or doc["author"] for doc in docs if doc.get("author")]
+        ctx = {
+            "online": bool(options.get("online")) and not catalogue._offline(), "model": options.get("model"),
+            "known": known, "spellings": shelves.canonical_authors(known), "model_errors": 0, "lookup_errors": 0,
+        }
+        with _AI_SORT_LOCK:
+            report.update(total=len(eligible), skipped=skipped, model=ctx["model"])
+        _ai_sort_save()
+        for index, doc in enumerate(eligible):
+            if _AI_SORT_CANCEL.is_set() or SHUTDOWN.is_set():
+                break
+            with _AI_SORT_LOCK:
+                report["current"] = doc.get("title") or doc.get("filename")
+            try:
+                _ai_sort_one(doc, ctx, report)
+            except Exception:
+                logger.warning("AI sort failed on %s", doc.get("document_id"), exc_info=True)
+                with _AI_SORT_LOCK:
+                    report["notes"].append(f"{doc.get('title') or doc.get('filename')}: could not be checked.")
+            with _AI_SORT_LOCK:
+                report["done"] = index + 1
+            if index % 10 == 9:
+                _ai_sort_save()
+        with _AI_SORT_LOCK:
+            report["state"] = "cancelled" if _AI_SORT_CANCEL.is_set() else "done"
+    except Exception:
+        logger.exception("AI sort failed")
+        with _AI_SORT_LOCK:
+            report["state"] = "error"
+            report["notes"].append("The sort stopped because of an unexpected error; what it did is kept.")
+    finally:
+        with _AI_SORT_LOCK:
+            report["current"] = None
+            report["finished_at"] = utc_now()
+        _ai_sort_save()
+
+
+class AiSortOptions(BaseModel):
+    online: bool = True
+    model: Optional[str] = Field(default=None, max_length=120)
+    include_checked: bool = False
+
+
+@app.get("/library/ai-sort/models")
+async def ai_sort_models():
+    """What the AI sort can use: the reader's own Ollama models, and whether the
+    online catalogue is allowed (OFFLINE mode forbids it)."""
+    models = await asyncio.to_thread(ai_sort.list_local_models)
+    return {
+        "models": models, "default": ai_sort.pick_model(None, models), "ollama_configured": bool(ai_sort.ollama_url()),
+        "online_allowed": not catalogue._offline(), "providers": catalogue._providers(),
+    }
+
+
+def _ai_sort_public() -> dict:
+    """The report as the UI needs it: the undo data stays on the server."""
+    with _AI_SORT_LOCK:
+        report = json.loads(json.dumps(_ai_sort_report()))
+    report["applied"] = [{key: value for key, value in item.items() if key != "undo"} for item in report["applied"]]
+    return report
+
+
+@app.get("/library/ai-sort")
+async def ai_sort_status():
+    return _ai_sort_public()
+
+
+@app.post("/library/ai-sort", status_code=202)
+async def ai_sort_start(body: AiSortOptions):
+    global _AI_SORT_THREAD, _AI_SORT_REPORT
+    models = await asyncio.to_thread(ai_sort.list_local_models)
+    model = ai_sort.pick_model(body.model, models)
+    online = body.online and not catalogue._offline()
+    with _AI_SORT_LOCK:
+        if _ai_sort_running():
+            raise HTTPException(status_code=409, detail="an AI sort is already running")
+        _AI_SORT_CANCEL.clear()
+        _AI_SORT_REPORT = {
+            **_ai_sort_blank(), "state": "running", "run_id": uuid.uuid4().hex[:10], "started_at": utc_now(), "model": model,
+            "options": {"online": online, "model": model, "include_checked": body.include_checked},
+        }
+        if not model:
+            _AI_SORT_REPORT["notes"].append(
+                "No local Ollama model was found, so nothing was confirmed by a model: only the rules"
+                + (" and the strictest catalogue matches were used." if online else " were used.")
+            )
+        _AI_SORT_THREAD = threading.Thread(
+            target=_run_ai_sort, args=({"online": online, "model": model, "include_checked": body.include_checked},),
+            daemon=True, name="ai-sort",
+        )
+        _AI_SORT_THREAD.start()
+    return _ai_sort_public()
+
+
+@app.post("/library/ai-sort/cancel")
+async def ai_sort_cancel():
+    _AI_SORT_CANCEL.set()
+    return {"cancelling": _ai_sort_running()}
+
+
+class AiSortIds(BaseModel):
+    ids: List[str] = Field(max_length=500)
+
+
+def _ai_sort_apply_suggestions(ids: List[str]) -> dict:
+    report = _ai_sort_report()
+    done, failed = 0, []
+    for suggestion in list(report["suggestions"]):
+        if suggestion["id"] not in ids:
+            continue
+        try:
+            undo = _apply_sort(suggestion["document_id"], patch=suggestion["patch"], source=AI_SORT_SOURCE, ai={"reviewed_at": utc_now()})
+        except Exception as exc:
+            failed.append(f"{suggestion['title']}: {getattr(exc, 'detail', exc)}")
+            continue
+        with _AI_SORT_LOCK:
+            report["suggestions"].remove(suggestion)
+            report["applied"].append({
+                "id": uuid.uuid4().hex[:10], "document_id": suggestion["document_id"], "title": suggestion["title"], "via": "review",
+                "changes": [{k: suggestion[k] for k in ("field", "before", "after", "source", "reason")}], "undo": undo,
+            })
+        done += 1
+    _ai_sort_save()
+    return {"applied": done, "failed": failed}
+
+
+@app.post("/library/ai-sort/apply")
+async def ai_sort_apply(body: AiSortIds):
+    return await asyncio.to_thread(_ai_sort_apply_suggestions, body.ids)
+
+
+@app.post("/library/ai-sort/dismiss")
+async def ai_sort_dismiss(body: AiSortIds):
+    report = _ai_sort_report()
+    with _AI_SORT_LOCK:
+        before = len(report["suggestions"])
+        report["suggestions"] = [item for item in report["suggestions"] if item["id"] not in body.ids]
+        dismissed = before - len(report["suggestions"])
+    _ai_sort_save()
+    return {"dismissed": dismissed}
+
+
+def _ai_sort_undo() -> dict:
+    report = _ai_sort_report()
+    restored, skipped = 0, []
+    for item in reversed(list(report["applied"])):
+        if item.get("undone"):
+            continue
+        undo = item.get("undo") or {}
+        try:
+            current = read_metadata(item["document_id"])
+        except KeyError:
+            skipped.append(f"{item['title']}: no longer in the library")
+            continue
+        if any(current.get(key) != value for key, value in (undo.get("after") or {}).items()):
+            skipped.append(f"{item['title']}: changed since, so left as it is")
+            continue
+        if undo.get("before"):
+            STORE.update(item["document_id"], undo["before"])
+        if undo.get("cover_added"):
+            (THUMBNAILS_DIR / f"{item['document_id']}-custom.jpg").unlink(missing_ok=True)
+        with _AI_SORT_LOCK:
+            item["undone"] = True
+        restored += 1
+    with _AI_SORT_LOCK:
+        if not report["applied"] or all(item.get("undone") for item in report["applied"]):
+            report["state"] = "undone" if report["state"] in {"done", "cancelled", "interrupted"} else report["state"]
+    _ai_sort_save()
+    return {"restored": restored, "skipped": skipped}
+
+
+@app.post("/library/ai-sort/undo")
+async def ai_sort_undo():
+    if _ai_sort_running():
+        raise HTTPException(status_code=409, detail="wait for the sort to finish, or cancel it, before undoing")
+    return await asyncio.to_thread(_ai_sort_undo)
+
+
 # ------------------------------------------------------ export and import --
 
 APP_VERSION = "0.3.0"
@@ -5156,12 +5632,29 @@ class CollectionPatch(BaseModel):
     auto_scan: Optional[bool] = None
 
 
+def _library_kind(doc: dict) -> str:
+    """Where a file belongs: "book", "paper", "document", "note", or "pending"
+    for a PDF not classified yet. The same rule as libraryKind() in the UI's
+    storage.js, so a collection's badge counts what the Library lists."""
+    kind = doc.get("kind_override") or doc.get("kind")
+    if kind:
+        return kind
+    file_type = str(doc.get("file_type") or "").lower()
+    if doc.get("record_type") == "standalone" or file_type == "epub":
+        return "book"
+    return "pending" if file_type in ("pdf", "") else "document"
+
+
 def _collection_response() -> List[dict]:
     all_documents = list_metadata()
     docs = [doc for doc in all_documents if doc.get("collection_id") != NOTES_COLLECTION_ID]
     notes = sum(1 for doc in all_documents if doc.get("collection_id") == NOTES_COLLECTION_ID)
     return [
-        {**collection, "document_count": sum(_belongs_to_collection(doc, collection) for doc in docs)}
+        {
+            **collection,
+            "document_count": sum(_belongs_to_collection(doc, collection) for doc in docs),
+            "book_count": sum(_belongs_to_collection(doc, collection) and _library_kind(doc) in {"book", "pending"} for doc in docs),
+        }
         for collection in configured_collections()
     ] + [
         {
@@ -5171,6 +5664,7 @@ def _collection_response() -> List[dict]:
             "auto_scan": False,
             "builtin": True,
             "document_count": notes,
+            "book_count": notes,
         }
     ]
 

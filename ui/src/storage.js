@@ -146,7 +146,7 @@ export function libraryKind(doc) {
 
 // A book's form: novel, short story, collection or non-fiction. The reader's
 // correction first, else the server's guess; null when it has none.
-export const FORM_LABELS = { novel: "Novel", short_story: "Short story", collection: "Collection", nonfiction: "Non-fiction" };
+export const FORM_LABELS = { novel: "Novel", novella: "Novella", short_story: "Short story", collection: "Collection", nonfiction: "Non-fiction" };
 export function bookForm(doc) {
   return doc?.book_form_override || doc?.book_form || null;
 }

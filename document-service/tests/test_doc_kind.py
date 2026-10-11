@@ -123,8 +123,10 @@ def test_file_types_settle_some_kinds_outright():
         (320, False, 0, "", "", "nonfiction"),
         (320, True, 0, "The Plague", "Albert Camus", "novel"),
         (151, True, 0, "", "", "novel"),
-        (150, True, 0, "", "", "short_story"),  # "150 pages or less"
-        (56, True, 0, "A Hapy Death", "Albert Camus", "short_story"),
+        (150, True, 0, "", "", "novella"),  # "150 pages or less" is not a novel
+        (50, True, 0, "", "", "novella"),
+        (49, True, 0, "", "", "short_story"),
+        (56, True, 0, "A Hapy Death", "Albert Camus", "novella"),
         (320, True, 3, "Witches", "Isaac Asimov", "collection"),  # several authors
         (320, True, 0, "Asimov's Magical Worlds of Fantasy", "Isaac Asimov", "collection"),  # an editor's name
         (59, True, 0, "4 Plays", "Camus", "collection"),
@@ -156,3 +158,85 @@ def test_bylines_count_other_authors_but_not_the_translator_the_designer_or_the_
     ]
     assert doc_kind.distinct_bylines(front, author="Albert Camus") == 3
     assert doc_kind.distinct_bylines(front[:1] + front[2:], author="Albert Camus") == 0
+
+
+# --- fix 1 and 2: two signals, a grey zone, a language guard, estimated length --
+
+PRESENT_TENSE = "She says that he is late and they are not asking her why it is so, but he does not say. " * 40
+SPANISH = "El hombre dijo que ella estaba cansada y que los dos habian llegado tarde a la casa de su madre en la ciudad. " * 60
+
+
+def test_the_tense_of_the_verbs_is_a_second_signal():
+    fiction = doc_kind.text_profile(_pages(FICTION))
+    essay = doc_kind.text_profile(_pages(ESSAY))
+    present = doc_kind.text_profile(_pages(PRESENT_TENSE))
+    assert fiction.past > 80
+    assert essay.past is None or essay.past < 40
+    assert present.score > 8 and present.past < 20  # lots of pronouns, but in the present
+    assert doc_kind.is_fiction(present.score, past=present.past) is False
+    assert doc_kind.is_fiction(fiction.score, past=fiction.past) is True
+    # Without a tense reading the narrative score alone decides, as before.
+    assert doc_kind.is_fiction(9.0) is True and doc_kind.is_fiction(7.0) is False
+
+
+@pytest.mark.parametrize(
+    "score, past, expected",
+    [
+        (13.0, 93, False),  # The Stranger
+        (8.1, 51, True),  # The Ax: first person, only half past tense
+        (8.7, 60, True),  # The Fall
+        (7.3, 48, True),  # How to Talk to Anyone: a self-help book that says "you" and "he said"
+        (7.2, 23, False),  # The Temptation to Exist: aphorisms in the present
+        (5.5, 36, True),  # The Rape of the Mind
+        (4.5, 12, False),  # Schopenhauer
+        (None, None, True),  # a scan, or another language
+    ],
+)
+def test_fiction_in_doubt_marks_the_grey_zone_for_a_model(score, past, expected):
+    assert doc_kind.fiction_in_doubt(score, past) is expected
+
+
+def test_the_borderline_novels_of_the_real_library_are_still_fiction_and_the_essays_are_not():
+    assert doc_kind.is_fiction(8.09, past=51) is True  # The Ax
+    assert doc_kind.is_fiction(8.67, past=60) is True  # The Fall
+    assert doc_kind.is_fiction(7.31, past=48) is False  # How to Talk to Anyone
+    assert doc_kind.is_fiction(7.25, past=23) is False  # The Temptation to Exist
+    assert doc_kind.is_fiction(6.12, past=54) is False  # Personal Writings
+    assert doc_kind.is_fiction(8.33, past=76) is True  # The Fellowship of the Ring
+
+
+def test_text_in_another_language_is_not_judged_at_all():
+    profile = doc_kind.text_profile(_pages(SPANISH))
+    assert (profile.english, profile.score, profile.past) == (False, None, None)
+    assert doc_kind.is_fiction(profile.score, "Pedro Paramo") is None  # unknown, not "non-fiction"
+    assert doc_kind.classify(_pages(SPANISH), 99, author="Juan Rulfo", file_type="epub").kind == "book"
+
+
+def test_length_is_the_printed_page_count_else_an_estimate_from_the_words():
+    assert doc_kind.length_pages(300, 90_000, 77) == 300  # the catalogue knows
+    assert doc_kind.length_pages(None, 36_000, 77) == 124  # The Stranger: 77 epub pages, 123 in print
+    assert doc_kind.length_pages(None, 500, 4) == 4  # too little text to estimate from
+    assert doc_kind.length_pages(None, 0, None) is None
+
+
+def test_a_model_breaks_ties_only_where_the_length_prior_decided():
+    # 112 pages, an author but nothing else: the prior says book; a model that read it says document.
+    assert doc_kind.detect_kind(_pages(ESSAY), 112, author="A. Name") == "book"
+    assert doc_kind.detect_kind(_pages(ESSAY), 112, author="A. Name", ai={"kind": "document"}) == "document"
+    # An anonymous 30-page text is a document by default; a model may say it is a book.
+    assert doc_kind.detect_kind(_pages(ESSAY), 30, ai={"kind": "book"}) == "book"
+    # Evidence in the text is not overruled: a copyright page is a copyright page.
+    pages = ["Title", "Copyright © 2001 Jane Doe. All rights reserved. Published by Example Press."]
+    assert doc_kind.detect_kind(pages, 30, ai={"kind": "document"}) == "book"
+    assert doc_kind.detect_kind(["Title\nAbstract. We study.\nKeywords: a", "x"], 9, ai={"kind": "book"}) == "paper"
+    # A model's fiction verdict stands in for the text's, and a genre still outranks it.
+    assert doc_kind.is_fiction(4.0, "Untitled", ai=True) is True
+    assert doc_kind.is_fiction(11.0, "Untitled", ai=False) is False
+    assert doc_kind.is_fiction(11.0, "Untitled", genres=["Nonfiction"], ai=True) is False
+
+
+def test_the_verdict_says_whether_the_length_prior_alone_decided():
+    assert doc_kind.classify(_pages(ESSAY), 112, author="A. Name").weak is True
+    assert doc_kind.classify(_pages(ESSAY), 30).weak is True
+    assert doc_kind.classify(_pages(FICTION), 112).weak is False  # the text says fiction
+    assert doc_kind.classify(_pages(ESSAY), 300).weak is False

@@ -89,6 +89,10 @@ _SURNAME_FIRST = re.compile(rf"^({_NAME_WORD}), ({_NAME_WORD}(?: {_NAME_WORD})*)
 _BY_LINE = re.compile(rf"^[ \t]*[Bb][Yy][ \t]+({_NAME_WORD}(?:[ \t]+{_NAME_WORD}){{1,3}})[ \t]*$", re.MULTILINE)
 
 
+# "Dr. Wasif Naeem" is Wasif Naeem on a shelf.
+_HONORIFIC = re.compile(r"^(?:dr|prof|professor|mr|mrs|ms|sir)\.?\s+", re.IGNORECASE)
+
+
 def normalize_author(raw: Optional[str]) -> Optional[str]:
     """One clean author name ("Albert Camus") from a metadata or filename
     string, or None when it is missing, junk, or not name-shaped."""
@@ -99,6 +103,7 @@ def normalize_author(raw: Optional[str]) -> Optional[str]:
         return None
     if text.lower() in _JUNK_AUTHORS:
         return None
+    text = _HONORIFIC.sub("", text)
     # "Camus, Albert" (exactly one comma, surname first) -> "Albert Camus"
     match = _SURNAME_FIRST.match(text)
     if match and text.count(",") == 1:
@@ -108,6 +113,8 @@ def normalize_author(raw: Optional[str]) -> Optional[str]:
         text = re.split(r"\s*(?:;|&|,|\band\b|\bwith\b)\s*", text)[0].strip()
     if text.isupper() or text.islower():
         text = text.title()
+    # "E.M. Cioran" and "E. M. Cioran" are one author: always the spaced form.
+    text = re.sub(r"\b([A-Z])\.(?=[A-Z])", r"\1. ", text)
     return text if _NAME.match(text) else None
 
 
@@ -299,26 +306,148 @@ def resolve_surname(surname: str, known_authors: Iterable[str]) -> str:
     return ranked[0][0]
 
 
-def pick_author(embedded: Optional[str], filename: str, first_pages=None, known_authors: Iterable[str] = ()) -> Optional[str]:
+# "Essays of Arthur Schopenhauer", "Arthur Schopenhauer's Letters": a title that
+# names its author because it is a body of work, not because it is about them.
+_WORK_OF = re.compile(
+    r"\b(?:essays|works|writings|letters|aphorisms|poems|stories|tales|plays|selected|collected|complete|"
+    r"collection|anthology|philosophy|diaries|notebooks)\b[^.]{0,30}?\bof\b",
+    re.IGNORECASE,
+)
+
+
+def author_in_title(title: str, known_authors: Iterable[str]) -> Optional[str]:
+    """A full-name author the library already knows, named by a title that is
+    a collection of their work ("Essays of Arthur Schopenhauer"). A title merely
+    about someone ("Life of Albert Camus") does not credit them."""
+    text = " ".join(str(title or "").split())
+    if not text:
+        return None
+    best = None
+    for name in set(known_authors or ()):
+        name = (name or "").strip()
+        if " " not in name:
+            continue
+        match = re.search(rf"\b{re.escape(name)}(?:['’]s)?\b", text, re.IGNORECASE)
+        if not match:
+            continue
+        before = text[: match.start()]
+        possessive = match.group(0).lower().endswith(("'s", "’s"))
+        if (possessive or _WORK_OF.search(before + "of")) and (best is None or len(name) > len(best)):
+            best = name
+    return best
+
+
+_NAME_TOKEN = r"(?:[A-ZÀ-Þ][\w'’-]*\.?|[A-Z]\.)"
+_NOT_A_FIRST_NAME = frozenset({"by", "the", "a", "an", "and", "of", "to", "edited", "translated", "written", "with", "from"})
+
+
+def complete_surname(surname: str, texts: Iterable[str], title: str = "") -> Optional[str]:
+    """A lone surname ("Camus") as the full name printed beside it in the opening
+    pages ("ALBERT CAMUS" on the title page), when that is unambiguous. Extraction
+    can run the title and the author together ("A HAPPY DEATH CAMUS"), so a word
+    that is in the book's own `title` is never taken for part of the name."""
+    if not surname or " " in surname.strip():
+        return None
+    in_title = set(re.sub(r"[^\w']+", " ", (title or "").casefold()).split())
+    counts: dict = {}
+    pattern = re.compile(rf"((?:{_NAME_TOKEN}[ \t]+){{1,3}}){re.escape(surname)}\b", re.IGNORECASE)
+    for text in texts or ():
+        for line in str(text or "").splitlines():
+            for match in pattern.finditer(line):
+                tokens = match.group(1).split()
+                # Only the words right before the surname that look like a name.
+                keep = []
+                for token in reversed(tokens):
+                    if token.lower().strip(".") in _NOT_A_FIRST_NAME or not re.match(r"^[A-ZÀ-Þa-zß-ÿ]", token):
+                        break
+                    if token.casefold().strip(".") in in_title:
+                        break  # a word of the title, not of the name
+                    if not (token[0].isupper() or token.isupper()):
+                        break
+                    keep.insert(0, token.title() if len(token) > 2 and token.isupper() else token)
+                    if not re.fullmatch(r"[A-Z]\.?", token):
+                        break  # a given name ends the walk back; initials ("J. R. R.") continue it
+                if not keep:
+                    continue
+                name = normalize_author(" ".join(keep + [surname]))
+                if name and _surname(name) == surname.casefold() and " " in name:
+                    counts[name] = counts.get(name, 0) + 1
+    # Two people with one surname on the page ("John Gray", "Alasdair Gray") is
+    # ambiguous; one person spelled two ways ("A. Camus", "Albert Camus") is not.
+    by_initial: dict = {}
+    for name, count in counts.items():
+        by_initial[name[0].casefold()] = by_initial.get(name[0].casefold(), 0) + count
+    ranked_initials = sorted(by_initial.values(), reverse=True)
+    if not ranked_initials or (len(ranked_initials) > 1 and ranked_initials[1] * 2 > ranked_initials[0]):
+        return None
+    top = max(by_initial, key=by_initial.get)
+    candidates = [(name, count) for name, count in counts.items() if name[0].casefold() == top]
+    return sorted(candidates, key=lambda item: (-item[1], -len(item[0]), item[0]))[0][0]
+
+
+def _author_key(name: str) -> tuple:
+    words = re.sub(r"[.,]", " ", name or "").split()
+    return (words[-1].casefold(), words[0][0].casefold()) if len(words) >= 2 else ("", "")
+
+
+def canonical_authors(names: Iterable[str]) -> dict:
+    """{variant: canonical spelling} for authors the library spells more than one
+    way ("E. M. Cioran" / "Emil Cioran"): the spelling used most, else the fuller
+    one. Same surname and first initial means the same person."""
+    groups: dict = {}
+    for name in names or ():
+        name = (name or "").strip()
+        key = _author_key(name)
+        if key[0]:
+            counter = groups.setdefault(key, {})
+            counter[name] = counter.get(name, 0) + 1
+    mapping = {}
+    for counter in groups.values():
+        if len(counter) > 1:
+            best = sorted(counter.items(), key=lambda item: (-item[1], -len(item[0]), item[0]))[0][0]
+            mapping.update({variant: best for variant in counter if variant != best})
+    return mapping
+
+
+def pick_author(
+    embedded: Optional[str], filename: str, first_pages=None, known_authors: Iterable[str] = (),
+) -> Optional[str]:
     """The best author available.
 
     A name in the file name wins: someone typed it on purpose, while a file's
     own metadata is often a translator, an editor or an institution ("Florida
     Memorial"). The metadata still supplies the fuller spelling when it agrees
     on the surname, and a lone surname is completed from the full name the
-    library already uses for it. With no author in the file name: the file's
-    metadata, then a "by ..." line on the title page (a callable, so pages
-    are only read when needed)."""
+    library already uses for it, or the one printed beside it on the title
+    page. With no author in the file name: the file's metadata, then a "by ..."
+    line on the title page (`first_pages` may be a callable, so pages are only
+    read when needed), then a known author a title like "Essays of Arthur
+    Schopenhauer" names."""
     named = author_from_filename(filename)
     metadata = normalize_author(embedded)
+    pages = None
+
+    def read_pages():
+        nonlocal pages
+        if pages is None:
+            pages = list(first_pages() if callable(first_pages) else first_pages or [])
+        return pages
+
     if named:
         if metadata and _surname(metadata) == _surname(named):
             return metadata
-        return named if " " in named else resolve_surname(named, known_authors)
+        if " " in named:
+            return named
+        full = resolve_surname(named, known_authors)
+        if " " in full:
+            return full
+        return complete_surname(named, read_pages(), parse_filename(filename)[0]) or named
     if metadata:
         return metadata
-    pages = first_pages() if callable(first_pages) else first_pages
-    return author_from_text(pages or [])
+    return (
+        author_from_text(read_pages())
+        or author_in_title(parse_filename(filename)[0], known_authors)
+    )
 
 
 def author_from_text(first_pages: Iterable[str]) -> Optional[str]:

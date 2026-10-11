@@ -100,6 +100,7 @@ describe("the library holds books, and a book has a form", () => {
   const mixed = [
     { document_id: "n", title: "The Plague", kind: "book", file_type: "epub", book_form: "novel" },
     { document_id: "s", title: "A Happy Death", kind: "book", file_type: "pdf", book_form: "short_story" },
+    { document_id: "v", title: "The Stranger", kind: "book", file_type: "epub", book_form: "novella" },
     { document_id: "c", title: "Magical Worlds", kind: "book", file_type: "epub", book_form: "collection" },
     { document_id: "e", title: "The Rebel", kind: "book", file_type: "pdf", book_form: "nonfiction" },
     { document_id: "o", title: "Reread as a novel", kind: "book", file_type: "pdf", book_form: "short_story", book_form_override: "novel" },
@@ -113,16 +114,17 @@ describe("the library holds books, and a book has a form", () => {
   const ids = (filters) => filterLibrary(mixed, filters).map((doc) => doc.document_id).sort();
 
   it("keeps papers and documents out, but not a PDF still waiting to be classified", () => {
-    expect(libraryBooks(mixed).map((doc) => doc.document_id)).toEqual(["n", "s", "c", "e", "o", "u", "w", "z"]);
+    expect(libraryBooks(mixed).map((doc) => doc.document_id)).toEqual(["n", "s", "v", "c", "e", "o", "u", "w", "z"]);
   });
 
   it("filters by form, with the reader's correction counting, and by not classified", () => {
     expect(ids({ form: "novel" })).toEqual(["n", "o"]);
     expect(ids({ form: "short_story" })).toEqual(["s"]);
+    expect(ids({ form: "novella" })).toEqual(["v"]);
     expect(ids({ form: "collection" })).toEqual(["c"]);
     expect(ids({ form: "nonfiction" })).toEqual(["e"]);
     expect(ids({ form: "unknown" })).toEqual(["u", "w", "z"]);
-    expect(ids({})).toHaveLength(8);
+    expect(ids({})).toHaveLength(9);
   });
 
   it("says the form in words and keeps it in the shareable address", () => {

@@ -1,5 +1,5 @@
 """Guess what a file is -- a book, a paper, or a working document -- and, for a
-book, what form it takes (novel, short story, collection, non-fiction).
+book, what form it takes (novel, novella, short story, collection, non-fiction).
 
 The Library holds books; papers and documents are tracked separately in the
 Documents library. Page count is the prior, not the verdict:
@@ -22,14 +22,21 @@ and, for a book (the reader can correct every one of these):
   not fiction                                                 -> non-fiction
   fiction by several authors (credited, or a different byline
     on each story), or titled "Stories", "Plays", "Asimov's..." -> collection
-  fiction of 150 pages or less                                -> short story
+  fiction of under 50 pages                                   -> short story
+  fiction of 50 to 150 pages                                  -> novella
   fiction of more than 150 pages                              -> novel
 
+Length is the book's printed pages when the catalogue or the reader gave them,
+else an estimate from its word count (about 290 words a page), because the
+number of pages in an EPUB, or in a PDF of a scan, says little about the book.
+
 "Fiction" is told from the text: narrative prose is thick with pronouns and
-past tense ("she said", "he was"), which essays, textbooks and manuals are
-not. A genre from the catalogue or a hint in the title ("A True Story",
-"Plays") settles the borderline cases. It only ever reads text already
-extracted during indexing.
+past tense ("she said", "he was") where essays, textbooks and manuals use the
+present ("it is"). Two signals have to agree, a text in another language is not
+judged at all, and a book that lands in the grey zone between the two is flagged
+so a model can look at it (see ai_sort.py). A genre from the catalogue, a hint
+in the title ("A True Story", "Plays") or a model's verdict settles borderline
+cases. It only ever reads text already extracted during indexing.
 """
 
 import re
@@ -39,17 +46,25 @@ from typing import Iterable, Optional
 import doc_types
 
 KINDS = ("book", "paper", "document")
-FORMS = ("novel", "short_story", "collection", "nonfiction")
-FORM_LABELS = {"novel": "Novel", "short_story": "Short story", "collection": "Collection", "nonfiction": "Non-fiction"}
+FORMS = ("novel", "novella", "short_story", "collection", "nonfiction")
+FORM_LABELS = {
+    "novel": "Novel", "novella": "Novella", "short_story": "Short story",
+    "collection": "Collection", "nonfiction": "Non-fiction",
+}
 
 # Bump when the rules above change: the startup backfill re-reads every
 # record that was classified under an older version.
-RULES_VERSION = 3
+RULES_VERSION = 4
 
-SHORT_STORY_MAX_PAGES = 150  # "150 pages or less is a short story"
+LONG_PAGES = 150  # more than this is a novel, or a long book: "150 pages or less" is shorter
 SHORT_WORK_PAGES = 50  # under this a file is a document unless it reads as fiction
+WORDS_PER_PAGE = 290  # printed fiction runs 280-350; measured on the reference library
 MIN_PROSE_WORDS = 3000  # about ten pages: less text than this says nothing about style
-FICTION_SCORE = 8.0  # narrative score that reads as fiction with nothing else to go on
+MIN_ENGLISH_SHARE = 0.25  # of the words in a sample, the common English ones; novels run 0.47-0.53
+FICTION_SCORE = 8.0  # narrative score that reads as fiction...
+FICTION_PAST = 45.0  # ...when this share of its was/had/said-style verbs is past tense
+FICTION_SCORE_PAST = 6.0  # ...or a lower score if the text is almost all past tense
+FICTION_PAST_HIGH = 60.0
 FICTION_SCORE_SUPPORTED = 6.0  # ...when the subject says literature
 FICTION_SCORE_HINTED = 3.0  # ...when the title says "Stories" or "Plays"
 THREE_AUTHORS = 3
@@ -93,6 +108,15 @@ _BYLINE_PAGES = 80
 
 _NARRATIVE = frozenset("he she him her his hers they them their said asked replied was were had would could".split())
 _FIRST_PERSON = frozenset("i me my mine we our us".split())
+_PAST = frozenset("was were had said asked replied went came saw took made knew thought looked turned felt".split())
+_PRESENT = frozenset("is are am has does do".split())
+_ENGLISH = frozenset(
+    "the of and to in a is that it was for with as his he on be at by this had not are but from or have an they "
+    "which you were her all she there would their we him been has when who will more no if out so said what up its "
+    "about into than them can only other could these then do any my now such like our over me most made after also "
+    "did many before must through back where much your way well down should because each just those how too very "
+    "make see get here between both under never same another know while".split()
+)
 _WORD = re.compile(r"[A-Za-z']+")
 
 # Front and back matter: where copyright pages live.
@@ -101,28 +125,66 @@ _BACK_PAGES = 4
 
 
 @dataclass(frozen=True)
+class TextProfile:
+    words: int  # every word in the file
+    score: Optional[float]  # narrative score; None when there is too little English text to judge
+    past: Optional[float]  # % of was/had/said-style verbs that are past tense; None likewise
+    english: bool  # False when the text is clearly another language
+
+
+@dataclass(frozen=True)
 class Verdict:
     kind: str
-    prose_score: Optional[float]  # narrative score, None when there was too little text to judge
+    prose_score: Optional[float]
     authors: int = 0  # people credited: in the metadata, the file name, or a byline per story
+    words: int = 0
+    past: Optional[float] = None
+    english: bool = True
+    weak: bool = False  # decided by the length prior alone, not by evidence in the text
 
 
-def prose_score(page_texts: Iterable[str]) -> Optional[float]:
+def text_profile(page_texts: Iterable[str]) -> TextProfile:
     """How much the text reads as narrative fiction: the share of words that
     are third-person pronouns and past-tense narration, plus half the share of
-    first-person ones (a narrator's "I"). Novels score 8 and up; essays,
-    textbooks and manuals score under 5. None when there is too little text.
+    first-person ones (a narrator's "I"), and how much of its verbs are past
+    tense. Novels score 8 and up and are 50-90% past; essays, textbooks and
+    manuals score under 5.5. Nothing is judged without ten pages of English.
 
     Front matter is skipped and a long book is sampled from its opening, so a
     copyright page or a bibliography does not tilt it."""
     pages = [text or "" for text in page_texts]
+    total = sum(len(_WORD.findall(text)) for text in pages)
     body = pages[3:83] if len(pages) > 8 else pages
     words = [word.lower() for word in _WORD.findall("\n".join(body))]
     if len(words) < MIN_PROSE_WORDS:
-        return None
+        return TextProfile(total, None, None, True)
+    if sum(1 for word in words if word in _ENGLISH) / len(words) < MIN_ENGLISH_SHARE:
+        return TextProfile(total, None, None, False)
     narrative = sum(1 for word in words if word in _NARRATIVE)
     first_person = sum(1 for word in words if word in _FIRST_PERSON)
-    return round(100.0 * (narrative + 0.5 * first_person) / len(words), 2)
+    past = sum(1 for word in words if word in _PAST)
+    present = sum(1 for word in words if word in _PRESENT)
+    return TextProfile(
+        total,
+        round(100.0 * (narrative + 0.5 * first_person) / len(words), 2),
+        round(100.0 * past / (past + present), 1) if past + present >= 200 else None,
+        True,
+    )
+
+
+def prose_score(page_texts: Iterable[str]) -> Optional[float]:
+    """The narrative score alone (see text_profile)."""
+    return text_profile(page_texts).score
+
+
+def length_pages(printed_pages: Optional[int], words: int = 0, file_pages: Optional[int] = None) -> Optional[int]:
+    """How long a book is, in pages: the printed count when the catalogue or the
+    reader gave one, else an estimate from its words, else the file's pages."""
+    if printed_pages:
+        return printed_pages
+    if words >= MIN_PROSE_WORDS:
+        return max(1, round(words / WORDS_PER_PAGE))
+    return file_pages or None
 
 
 def genres_say_fiction(genres: Iterable[str]) -> Optional[bool]:
@@ -135,14 +197,43 @@ def genres_say_fiction(genres: Iterable[str]) -> Optional[bool]:
     return None
 
 
-def is_fiction(score: Optional[float], title: str = "", subject: Optional[str] = None, genres: Iterable[str] = ()) -> Optional[bool]:
+def reads_as_fiction(score: float, past: Optional[float] = None) -> bool:
+    """The text alone: a narrative score of 8 with at least 45% past tense, or
+    6 when it is nearly all past tense. Without a tense reading, 8 alone."""
+    if past is None:
+        return score >= FICTION_SCORE
+    return (score >= FICTION_SCORE and past >= FICTION_PAST) or (
+        score >= FICTION_SCORE_PAST and past >= FICTION_PAST_HIGH
+    )
+
+
+def fiction_in_doubt(score: Optional[float], past: Optional[float] = None) -> bool:
+    """True when the text does not clearly say fiction or non-fiction (or says
+    nothing, as for a scan or another language), so a model should look."""
+    if score is None:
+        return True
+    clear_fiction = score >= 9.0 and (past is None or past >= 60.0)
+    clear_nonfiction = score < 5.5 or (past is not None and past < 35.0)
+    return not (clear_fiction or clear_nonfiction)
+
+
+def is_fiction(
+    score: Optional[float],
+    title: str = "",
+    subject: Optional[str] = None,
+    genres: Iterable[str] = (),
+    past: Optional[float] = None,
+    ai: Optional[bool] = None,
+) -> Optional[bool]:
     """Whether a book is fiction; None when there is nothing to go on (a scan
-    with no text, a catalogue entry). A catalogue genre decides; then a title
-    that says what it is; then the text, with a lower bar when the subject
-    agrees."""
+    with no text, another language, a catalogue entry). A catalogue genre
+    decides; then a model's verdict (ai_sort.py); then a title that says what it
+    is; then the text, with a lower bar when the subject agrees."""
     by_genre = genres_say_fiction(genres)
     if by_genre is not None:
         return by_genre
+    if ai is not None:
+        return bool(ai)
     if _NONFICTION_TITLE.search(title or ""):
         return False
     if score is None:
@@ -151,7 +242,7 @@ def is_fiction(score: Optional[float], title: str = "", subject: Optional[str] =
         return True
     if subject == "Literature & Fiction" and score >= FICTION_SCORE_SUPPORTED:
         return True
-    return score >= FICTION_SCORE
+    return reads_as_fiction(score, past)
 
 
 def distinct_bylines(page_texts: Iterable[str], author: str = "") -> int:
@@ -171,8 +262,9 @@ def distinct_bylines(page_texts: Iterable[str], author: str = "") -> int:
 
 
 def book_form(pages: Optional[int], fiction: Optional[bool], authors: int = 0, title: str = "", author: str = "") -> Optional[str]:
-    """Novel, short story, collection or non-fiction, for a book; None while
-    it is unknown whether it is fiction, or how long a work of fiction is."""
+    """Novel, novella, short story, collection or non-fiction, for a book;
+    None while it is unknown whether it is fiction, or how long a work of
+    fiction is. `pages` is length_pages()."""
     if fiction is None:
         return None
     if not fiction:
@@ -184,7 +276,9 @@ def book_form(pages: Optional[int], fiction: Optional[bool], authors: int = 0, t
         return "collection"
     if not pages:
         return None
-    return "novel" if pages > SHORT_STORY_MAX_PAGES else "short_story"
+    if pages > LONG_PAGES:
+        return "novel"
+    return "novella" if pages >= SHORT_WORK_PAGES else "short_story"
 
 
 def _has_copyright_page(edges: list) -> bool:
@@ -203,29 +297,43 @@ def classify(
     title: str = "",
     subject: Optional[str] = None,
     genres: Iterable[str] = (),
+    ai: Optional[dict] = None,
 ) -> Verdict:
     """`page_texts` in page order; `page_count` is the PDF's real page count
     (which can exceed the texts given if some pages had no text layer).
     `author` is the named author when one is known (file name, file properties
-    or title page) and `authors` how many the metadata or file name credit."""
+    or title page) and `authors` how many the metadata or file name credit.
+    `ai` is a model's verdict from ai_sort.py, {"fiction": bool, "kind": str}:
+    it breaks ties where only the length prior decided, and never overrules
+    evidence in the text (an ISBN, a DOI, chapters)."""
     pages = [text or "" for text in page_texts]
-    score = prose_score(pages)
+    profile = text_profile(pages)
+    ai = ai or {}
+    ai_kind = ai.get("kind") if ai.get("kind") in KINDS else None
+    fiction = bool(is_fiction(profile.score, title, subject, genres, profile.past, ai.get("fiction")))
+
+    def verdict(kind: str, authors_: int = authors, weak: bool = False) -> Verdict:
+        if weak and ai_kind:
+            kind = ai_kind
+        if kind == "book" and fiction:
+            authors_ = max(authors_, distinct_bylines(pages, author))
+        return Verdict(kind, profile.score, authors_, profile.words, profile.past, profile.english, weak)
+
     if file_type == "epub":
-        return _book(pages, score, authors, author, title, subject, genres)
+        return verdict("book")
     if file_type in {"excel", "csv", "powerpoint"}:
-        return Verdict("document", score, authors)
+        return verdict("document")
 
     edges = pages[:_FRONT_PAGES] + pages[-_BACK_PAGES:]
     if any(_ISBN.search(text) for text in edges) or _has_copyright_page(edges):
-        return _book(pages, score, authors, author, title, subject, genres)
+        return verdict("book")
 
     full = "\n".join(pages)
     if page_count >= 60 and len(_CHAPTER.findall(full)) >= 3:
-        return _book(pages, score, authors, author, title, subject, genres)
+        return verdict("book")
 
-    fiction = bool(is_fiction(score, title, subject, genres))
     first = "\n".join(pages[:2])
-    if page_count <= SHORT_STORY_MAX_PAGES and not fiction:
+    if page_count <= LONG_PAGES and not fiction:
         paper = bool(_DOI.search(first) or _ARXIV.search(first)) or (
             bool(_ABSTRACT.search(first))
             and (bool(_REFERENCES.search(full)) or bool(_KEYWORDS.search(first)) or bool(_EMAIL.search(first)))
@@ -233,24 +341,15 @@ def classify(
         # Several authors alone only make a paper of a short text: a 50-150 page
         # book with an editor and a translator on its cover is still a book.
         if paper or (authors >= THREE_AUTHORS and page_count < SHORT_WORK_PAGES):
-            return Verdict("paper", score, authors)
+            return verdict("paper")
+        if doc_types.reads_as_working_document(pages[:3], page_count):
+            return verdict("document")
 
-    if page_count <= SHORT_STORY_MAX_PAGES and not fiction and doc_types.reads_as_working_document(pages[:3], page_count):
-        return Verdict("document", score, authors)
-
-    if page_count > SHORT_STORY_MAX_PAGES or (page_count >= SHORT_WORK_PAGES and (fiction or author)) or (
-        page_count < SHORT_WORK_PAGES and fiction
-    ):
-        return _book(pages, score, authors, author, title, subject, genres)
-    return Verdict("document", score, authors)
-
-
-def _book(pages, score, authors, author, title, subject, genres) -> Verdict:
-    """A book verdict, carrying how many authors the text credits so a
-    collection can be told from a novel later."""
-    if is_fiction(score, title, subject, genres):
-        authors = max(authors, distinct_bylines(pages, author))
-    return Verdict("book", score, authors)
+    if page_count > LONG_PAGES:
+        return verdict("book")
+    if page_count >= SHORT_WORK_PAGES:
+        return verdict("book" if (fiction or author) else "document", weak=not fiction)
+    return verdict("book" if fiction else "document", weak=not fiction)
 
 
 def detect_kind(page_texts: Iterable[str], page_count: int, **context) -> str:

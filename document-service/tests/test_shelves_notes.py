@@ -102,10 +102,10 @@ def test_backfill_replaces_a_translators_name_only_when_the_file_name_disagrees(
     module.backfill_filename_details()
     assert _doc(client, doc["document_id"])["author"] == "Arthur Schopenhauer"
 
-    # An author that agrees with the file name is left exactly as it is.
+    # One person is one spelling: an initial form becomes the library's fuller one.
     module.STORE.update(doc["document_id"], {"author": "A. Schopenhauer"})
     module.backfill_filename_details()
-    assert _doc(client, doc["document_id"])["author"] == "A. Schopenhauer"
+    assert _doc(client, doc["document_id"])["author"] == "Arthur Schopenhauer"
 
 
 def test_accepting_and_moving_shelves_and_searching_one(service):
@@ -189,3 +189,41 @@ def test_models_unload_after_idle_and_extraction_starts_lazily(service):
     assert module.EXTRACTION_EXECUTOR is None
     _upload(client, "lazy.pdf", "Freedom.")
     assert module.EXTRACTION_EXECUTOR is not None
+
+
+def test_a_lone_surname_becomes_the_full_name_printed_on_the_title_page(service):
+    module, client, _indexed = service
+    added = client.post("/documents", files={"file": ("Better Never to Have Been - Benatar.pdf", make_pdf("Better Never to Have Been\nDavid Benatar\nOxford University Press"), "application/pdf")}).json()
+    assert added["author"] == "Benatar"  # all the file name says, at once
+    wait_for_status(client, added["document_id"], "indexed")
+    assert _doc(client, added["document_id"])["author"] == "David Benatar"  # once the title page can be read
+
+    # An older record that kept the surname is completed by the startup backfill.
+    module.STORE.update(added["document_id"], {"author": "Benatar"})
+    module.backfill_filename_details()
+    assert _doc(client, added["document_id"])["author"] == "David Benatar"
+
+
+def test_the_librarys_spellings_of_one_author_are_merged_but_not_the_readers_own(service):
+    module, client, _indexed = service
+    ids = {}
+    for name in ("One - Cioran.pdf", "Two - Cioran.pdf", "Three - Cioran.pdf"):
+        doc = client.post("/documents", files={"file": (name, make_pdf(name), "application/pdf")}).json()
+        wait_for_status(client, doc["document_id"], "indexed")
+        ids[name] = doc["document_id"]
+    module.STORE.update(ids["One - Cioran.pdf"], {"author": "E. M. Cioran"})
+    module.STORE.update(ids["Two - Cioran.pdf"], {"author": "E.M. Cioran"})
+    module.STORE.update(ids["Three - Cioran.pdf"], {"author": "Emil Cioran", "metadata_edited": 1})  # the reader's choice
+    module.backfill_filename_details()
+    assert _doc(client, ids["Two - Cioran.pdf"])["author"] == "E. M. Cioran"
+    assert _doc(client, ids["Three - Cioran.pdf"])["author"] == "Emil Cioran"
+
+
+def test_a_title_that_is_a_body_of_work_gets_the_author_the_library_already_knows(service):
+    module, client, _indexed = service
+    known = client.post("/documents", files={"file": ("The Wisdom of Life - Arthur Schopenhauer.pdf", make_pdf("w"), "application/pdf")}).json()
+    essays = client.post("/documents", files={"file": ("Essays of Arthur Schopenhauer.pdf", make_pdf("e"), "application/pdf")}).json()
+    assert known["author"] == "Arthur Schopenhauer"
+    assert essays["author"] == "Arthur Schopenhauer"  # named by its own title
+    other = client.post("/documents", files={"file": ("Life of Arthur Schopenhauer.pdf", make_pdf("l"), "application/pdf")}).json()
+    assert other["author"] is None  # about him, not by him
