@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import AskThread, { AskRail } from "./AskThread.jsx";
 import Console from "./Console.jsx";
@@ -22,6 +22,9 @@ import useAsk from "./useAsk.js";
 // prefix is needed there) -- an empty string must NOT fall back to "/api". The
 // dev server (`npm run dev`) leaves VITE_API_BASE unset and relies on
 // vite.config.js's own /api proxy to a standalone backend instead.
+// PDF.js is large, so the reader is only fetched when a PDF is first opened.
+const PdfReader = lazy(() => import("./PdfReader.jsx"));
+
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 const THEME_KEY = "ai-librarian.theme";
 const ACTIVE_CHAT_KEY = "ai-librarian.ask.active";
@@ -166,6 +169,7 @@ export default function App() {
 
   const [inquiries, setInquiries] = useState(loadInquiries);
   const [source, setSource] = useState(null);
+  const [pdfReader, setPdfReader] = useState(null);
   const [bookId, setBookId] = useState(() => window.location.hash.match(/^#book\/([a-zA-Z0-9-]+)$/)?.[1] || null);
   const [bookPassage, setBookPassage] = useState(null);
   useEffect(() => {
@@ -862,19 +866,34 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // A PDF opens in the browser's own viewer, on the right page, where the
-  // reader marks it up with that viewer's tools (highlight, underline, text,
-  // draw). The server reads those marks back out of the file. Everything else
-  // (notes, EPUBs, Office files) previews in the in-app reader.
+  // A PDF opens in the in-app reader, on the right page, where the reader marks
+  // it up (highlight, text, draw) and every mark is saved to the library as it
+  // is made and again on close. The server reads the marks back out of the saved
+  // copy. Everything else (notes, EPUBs, Office files) previews in SourceViewer.
   function openSource(next) {
     const doc = documents.find((item) => item.document_id === next.documentId);
     if (doc?.file_type === "pdf" && doc.collection_id !== "notes") {
       const page = next.page || 1;
-      window.open(`${API_BASE}/documents/${next.documentId}/file#page=${page}`, "_blank", "noopener");
+      setPdfReader({ doc, page });
       rememberReadingPage(next.documentId, page);
       return;
     }
     setSource(next);
+  }
+
+  // Opening a book page is the moment to start fetching the PDF reader, so it is
+  // ready when "Read PDF" is clicked.
+  useEffect(() => {
+    if (bookId) import("./PdfReader.jsx").then((module) => module.warmPdfReader()).catch(() => {});
+  }, [bookId]);
+
+  function closePdfReader(lastPage) {
+    const open = pdfReader;
+    setPdfReader(null);
+    if (open) {
+      rememberReadingPage(open.doc.document_id, lastPage || open.page);
+      refreshDocuments(); // the saved marks reach the notes digest and search
+    }
   }
 
   async function removeDocument(document) {
@@ -1128,6 +1147,11 @@ export default function App() {
           onClose={closeBook} onRead={openSource} onChanged={refreshDocuments}
           onCoverChanged={() => window.dispatchEvent(new Event("book-cover-changed"))}
           onAsk={({ documentId, documentName }) => { closeBook(); setMode("ask"); scopeTo(documentId, documentName); }} />
+      )}
+      {pdfReader && (
+        <Suspense fallback={<div className="pdf-reader"><p className="pdf-reader-note muted">Opening the reader…</p></div>}>
+          <PdfReader apiBase={API_BASE} key={pdfReader.doc.document_id} doc={pdfReader.doc} page={pdfReader.page} onClose={closePdfReader} />
+        </Suspense>
       )}
       {source && (
         <SourceViewer
