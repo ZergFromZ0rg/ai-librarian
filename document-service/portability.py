@@ -25,7 +25,7 @@ FORMAT_NAME = "ai-librarian-export"
 BOOK_FIELDS = (
     "document_id", "record_type", "filename", "file_type", "content_sha256", "source_path",
     "collection_id", "uploaded_at", "title", "subtitle", "author", "subject", "shelf",
-    "kind_override", "owned", "description", "publisher", "published_year", "page_count",
+    "kind_override", "book_form_override", "owned", "description", "publisher", "published_year", "page_count",
     "language", "isbn_10", "isbn_13", "acquisition_source", "reading_status", "started_at",
     "finished_at", "current_page", "reading_progress", "last_read_at", "rating", "review",
     "liked", "review_spoiler", "reread", "metadata_source", "metadata_source_id",

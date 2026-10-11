@@ -16,6 +16,14 @@ describe("documents library", () => {
     expect(docs.filter(isWorkDocument).map((doc) => doc.document_id)).toEqual(["1", "2", "3", "4"]);
   });
 
+  it("leaves a PDF still waiting to be classified in the Library, and takes office files at once", () => {
+    expect(isWorkDocument({ file_type: "pdf" })).toBe(false);
+    expect(isWorkDocument({ file_type: "epub" })).toBe(false);
+    expect(isWorkDocument({ file_type: "excel" })).toBe(true);
+    expect(isWorkDocument({ file_type: "pdf", kind: "paper" })).toBe(true);
+    expect(isWorkDocument({ file_type: "pdf", kind: "document", kind_override: "book" })).toBe(false);
+  });
+
   it("prefers the reader's type, and shows unclassified files as other", () => {
     expect(docType(docs[5])).toBe("report");
     expect(docType(docs[6])).toBe("other");

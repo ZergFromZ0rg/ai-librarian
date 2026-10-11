@@ -111,17 +111,202 @@ def normalize_author(raw: Optional[str]) -> Optional[str]:
     return text if _NAME.match(text) else None
 
 
+_FILE_EXTENSION = re.compile(r"\.(?:pdf|epub|mobi|azw3?|djvu|docx?|xlsx?|pptx?|txt|csv|md)$", re.IGNORECASE)
+# Where a file was downloaded from, and the "(1)" a browser adds to a duplicate.
+_DOWNLOAD_NOISE = re.compile(r"[\(\[]\s*(?:pdfdrive|z-?lib|libgen)[^)\]]*[\)\]]|\b(?:pdfdrive(?:\.com)?|z-library|libgen)\b", re.IGNORECASE)
+_COPY_MARK = re.compile(r"\s*\(\s*\d{1,2}\s*\)\s*$")
+_SPACED_DASH = re.compile(r"\s+[-–—]\s+")
+_TRAILING_BRACKET = re.compile(r"\s*[\(\[]\s*(?:by\s+)?([^()\[\]]+?)\s*[\)\]]$", re.IGNORECASE)
+_BY_AUTHOR = re.compile(r"\s+by\s+(.+)$", re.IGNORECASE)
+_LEADING_ARTICLE = re.compile(r"^(?:the|a|an|on|of)\s", re.IGNORECASE)
+_LONE_SURNAME = re.compile(r"^[A-ZÀ-Þ][^\W\d_]{2,}(?:[-'’][^\W\d_]+)?$")
+# Words that end a file name without being anyone's surname ("Make - Electronics").
+_NOT_A_SURNAME = frozenset({
+    "annotated", "book", "books", "collection", "complete", "cookbook", "copy", "datasheet", "draft",
+    "edition", "electronics", "essays", "final", "guide", "handbook", "introduction", "lectures",
+    "manual", "notes", "novel", "ocr", "part", "plays", "poems", "preview", "readings", "review",
+    "sample", "scan", "scanned", "slides", "solutions", "stories", "summary", "textbook", "theory",
+    "translated", "version", "vol", "volume",
+})
+_SMALL_WORDS = frozenset({"a", "an", "and", "as", "at", "but", "by", "for", "from", "in", "nor", "of", "on", "or", "the", "to", "vs", "with"})
+
+
+def _author_candidate(text: str) -> Optional[str]:
+    """``normalize_author``, but a lone capitalised surname ("Camus") passes
+    too: that is how most file names in a hand-kept library credit an author.
+    A lone surname must be the whole text (or two of them: "Merzbach and
+    Boyer"), never the start of a list -- "Principles, Techniques, and Tools"
+    is a subtitle, not an author."""
+    name = normalize_author(text)
+    if name:
+        return name
+    words = [word for word in re.split(r"\s+(?:and|&)\s+", str(text or "").strip(" .;,")) if word]
+    if 1 <= len(words) <= 2 and all(
+        _LONE_SURNAME.match(word) and word.lower() not in _NOT_A_SURNAME for word in words
+    ):
+        return words[0]
+    return None
+
+
+def _file_stem(filename: str) -> str:
+    """A file name as readable text: no extension (however many), no download
+    noise, and the separators people use for spaces and punctuation undone."""
+    stem = (filename or "").strip()
+    while True:
+        shorter = _FILE_EXTENSION.sub("", stem)
+        if shorter == stem:
+            break
+        stem = shorter
+    hyphenated = " " not in stem.strip() and stem.count("-") >= 2  # "automation-and-robotics"
+    stem = _DOWNLOAD_NOISE.sub(" ", stem)
+    stem = _COPY_MARK.sub("", stem.strip())
+    stem = re.sub(r"(?<=[A-Za-z])_s\b", "'s", stem)  # "Beginner_s Guide"
+    stem = re.sub(r"_\s+", ": ", stem)  # "Psychology_ In and Out"
+    stem = stem.replace("_", " ")
+    stem = re.sub(r"(?<=\w)-\s+", ": ", stem)  # "Econometrics- A Modern Approach"
+    if hyphenated:
+        stem = stem.replace("-", " ")
+    return " ".join(stem.split()).strip(" -–—.")
+
+
+def _tidy_title(text: str) -> str:
+    """Capitalise a title that came out of a file name in a single case
+    ("automation and robotics"); one already in mixed case is left alone."""
+    text = " ".join(text.split()).strip(" -–—.,:")
+    if not text or text not in {text.lower(), text.upper()}:
+        return text
+    words = text.lower().split()
+    return " ".join(
+        word if (index and word in _SMALL_WORDS) else word[:1].upper() + word[1:]
+        for index, word in enumerate(words)
+    )
+
+
+def _parse(filename: str) -> tuple:
+    """(title, author, credit text) -- the credit text is the part of the file
+    name that named the author(s), as written."""
+    stem = _file_stem(filename)
+    match = _TRAILING_BRACKET.search(stem)
+    if match:
+        name = normalize_author(match.group(1))
+        if name:
+            return _tidy_title(stem[: match.start()]), name, match.group(1)
+    match = _BY_AUTHOR.search(stem)
+    if match:
+        name = normalize_author(match.group(1))
+        if name:
+            return _tidy_title(stem[: match.start()]), name, match.group(1)
+    parts = [part.strip() for part in _SPACED_DASH.split(stem) if part.strip()]
+    if len(parts) >= 2:
+        # "Title - Author". The reverse ("Tolkien - The Silmarillion") reads the
+        # same as "Computer Networks - A Systems Approach", so it is only
+        # recognised when the file's own metadata names the author (see
+        # title_from_filename).
+        credited = None if _LEADING_ARTICLE.match(parts[-1]) else _author_candidate(parts[-1])
+        if credited:
+            return _tidy_title(" - ".join(parts[:-1])), credited, parts[-1]
+    return _tidy_title(stem), None, None
+
+
+def parse_filename(filename: str) -> tuple:
+    """The (title, author) a file name spells out; author is None when it
+    does not credit one.
+
+    ``The Meme Machine (Susan Blackmore, Richard Dawkins).pdf``,
+    ``The Stranger by Albert Camus.epub`` and ``A Happy Death - Camus.pdf`` (the
+    commonest hand-kept style, a lone surname included) all give back the
+    book's own title without the author tacked on. ``Title Surname.pdf`` with
+    no separator can not be told apart from a longer title, so it is left
+    whole."""
+    title, author, _credit = _parse(filename)
+    return title, author
+
+
+def author_count(raw: Optional[str]) -> int:
+    """How many people an author string names: "Susan Blackmore, Richard
+    Dawkins" is 2, "Camus, Albert" is 1, "Stolz, J., Fugelsang, J. & Fernandes,
+    M." is 3. 0 for nothing or a tool name."""
+    text = " ".join(str(raw or "").replace("\x00", "").split()).strip(" .;,")
+    if not text or text.lower() in _JUNK_AUTHORS:
+        return 0
+    if _SURNAME_FIRST.match(text) and text.count(",") == 1:
+        return 1
+    # Bare initials ("J.") belong to the name before them, not a person of their own.
+    names = [part for part in re.split(r"\s*(?:;|&|,|\band\b)\s*", text) if re.search(r"[^\W\d_]{2,}", part.replace(".", ""))]
+    return len(names)
+
+
+def credit_count(filename: str) -> int:
+    """How many authors a file name credits."""
+    return author_count(_parse(filename)[2])
+
+
 def author_from_filename(filename: str) -> Optional[str]:
     """``The Meme Machine (Susan Blackmore, Richard Dawkins).pdf`` ->
-    "Susan Blackmore"; ``The Stranger by Albert Camus.epub`` -> "Albert Camus"."""
-    stem = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", filename or "").replace("_", " ")
-    match = re.search(r"\(([^()]+)\)\s*$", stem)
-    if match:
-        return normalize_author(match.group(1))
-    match = re.search(r"\bby\s+(.+)$", stem, re.IGNORECASE)
-    if match:
-        return normalize_author(match.group(1))
-    return None
+    "Susan Blackmore"; ``The Stranger by Albert Camus.epub`` -> "Albert Camus";
+    ``A Happy Death - Camus.pdf`` -> "Camus"."""
+    return parse_filename(filename)[1]
+
+
+def _surname(name: str) -> str:
+    words = re.sub(r"[.,]", " ", name or "").split()
+    return words[-1].casefold() if words else ""
+
+
+def title_from_filename(filename: str, author: Optional[str] = None) -> str:
+    """A readable title for a file name. ``author`` is whatever else is known
+    about who wrote it (the file's own metadata): a title that merely ends or
+    starts with their name ("The Hobbit Tolkien", "Tolkien - The Silmarillion")
+    loses it."""
+    title, named = parse_filename(filename)
+    if named or not author or not title:
+        return title
+    for name in (author, author.split()[-1].strip(".,")):
+        if len(name) < 3:
+            continue
+        lead = re.match(rf"{re.escape(name)}\s+[-–—]\s+(.+)$", title, re.IGNORECASE)
+        if lead:
+            return lead.group(1).strip()
+        if title.lower().endswith(" " + name.lower()):
+            rest = re.sub(r"\s+by$", "", title[: -len(name)].rstrip(" -–—,:"), flags=re.IGNORECASE).strip()
+            if re.search(r"[^\W\d_]", rest):
+                return rest
+    return title
+
+
+def resolve_surname(surname: str, known_authors: Iterable[str]) -> str:
+    """A lone surname ("Camus") as the full name the library already uses for
+    it ("Albert Camus"), when that is unambiguous; else the surname as given."""
+    counts: dict = {}
+    for name in known_authors:
+        if name and " " in name.strip() and _surname(name) == surname.casefold():
+            counts[name] = counts.get(name, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: -item[1])
+    if not ranked or (len(ranked) > 1 and ranked[0][1] == ranked[1][1]):
+        return surname
+    return ranked[0][0]
+
+
+def pick_author(embedded: Optional[str], filename: str, first_pages=None, known_authors: Iterable[str] = ()) -> Optional[str]:
+    """The best author available.
+
+    A name in the file name wins: someone typed it on purpose, while a file's
+    own metadata is often a translator, an editor or an institution ("Florida
+    Memorial"). The metadata still supplies the fuller spelling when it agrees
+    on the surname, and a lone surname is completed from the full name the
+    library already uses for it. With no author in the file name: the file's
+    metadata, then a "by ..." line on the title page (a callable, so pages
+    are only read when needed)."""
+    named = author_from_filename(filename)
+    metadata = normalize_author(embedded)
+    if named:
+        if metadata and _surname(metadata) == _surname(named):
+            return metadata
+        return named if " " in named else resolve_surname(named, known_authors)
+    if metadata:
+        return metadata
+    pages = first_pages() if callable(first_pages) else first_pages
+    return author_from_text(pages or [])
 
 
 def author_from_text(first_pages: Iterable[str]) -> Optional[str]:

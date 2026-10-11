@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from functools import partial
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 import pymupdf
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
@@ -34,6 +34,7 @@ from starlette.datastructures import Headers, MutableHeaders
 
 import annotations as reader_annotations
 import catalogue
+import doc_kind
 import generation
 import portability
 import shelves
@@ -46,7 +47,6 @@ from chunking import (
 )
 from conversations import ConversationStore
 from database import MetadataStore
-from doc_kind import detect_kind
 from doc_types import LABELS as DOC_TYPE_LABELS, TYPES as DOC_TYPES, classify_document
 from embeddings import (
     DEFAULT_MODEL as EMBEDDING_MODEL,
@@ -536,6 +536,8 @@ class DocumentPatch(BaseModel):
     owned: Optional[bool] = None
     read: Optional[bool] = None
     kind: Optional[str] = Field(default=None, pattern=r"^(book|paper|document|auto)$")
+    # A book's form; "auto" drops the reader's choice.
+    form: Optional[str] = Field(default=None, pattern=r"^(auto|novel|short_story|collection|nonfiction)$")
     # A working document's type; "auto" drops the reader's choice.
     doc_type: Optional[str] = Field(default=None, pattern=r"^(auto|paper|report|manual|slides|data|writing|legal|other)$")
     # "Books/Philosophy/Albert Camus"; null or "" goes back to the suggestion.
@@ -790,9 +792,14 @@ def generate_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
-def title_from_filename(filename: str) -> str:
-    name = Path(filename).stem
-    return name.replace("_", " ").replace("-", " ").strip().title()
+def title_from_filename(filename: str, author: Optional[str] = None) -> str:
+    return shelves.title_from_filename(filename, author)
+
+
+def _legacy_title_from_filename(filename: str) -> str:
+    """What records made before the file-name parser got as their title, so the
+    backfill can tell an untouched guess from a title someone chose."""
+    return Path(filename).stem.replace("_", " ").replace("-", " ").strip().title()
 
 
 def atomic_write_json(path: Path, value) -> None:
@@ -1164,32 +1171,82 @@ def _request_ocr_approval(doc_id: str, page_count: int) -> None:
     _fail_indexing(doc_id, message)
 
 
-def _detect_document_kind(doc_id: str, page_count: int) -> Optional[str]:
-    """Book / paper / document, from the text extraction already wrote.
-    Best effort: a missing or unreadable extraction just leaves it unset."""
+def _genres_of(doc: dict) -> List[str]:
+    try:
+        genres = json.loads(doc.get("genres_json") or "[]")
+    except ValueError:
+        return []
+    return [str(genre) for genre in genres] if isinstance(genres, list) else []
+
+
+def _kind_fields(doc_id: str, metadata: dict) -> dict:
+    """Book / paper / document and the signals behind it (see doc_kind.py), from
+    the text extraction already wrote. Best effort: {} when it can not be read."""
     try:
         extracted = read_json(EXTRACTED_DIR / f"{doc_id}.json")
         texts = [page.get("text") or "" for page in extracted.get("pages") or []]
-        return detect_kind(texts, page_count or len(texts))
+        author = metadata.get("author") or shelves.author_from_text(texts[:3]) or ""
+        authors = max(
+            shelves.author_count(document_author(pdf_path(metadata))),
+            shelves.credit_count(metadata.get("filename") or ""),
+        )
+        verdict = doc_kind.classify(
+            texts,
+            metadata.get("pages") or len(texts),
+            file_type=metadata.get("file_type"),
+            author=author,
+            authors=authors,
+            title=f"{metadata.get('title') or ''} {metadata.get('subtitle') or ''}",
+            subject=metadata.get("subject"),
+            genres=_genres_of(metadata),
+        )
+        return {
+            "kind": verdict.kind,
+            "kind_rules": doc_kind.RULES_VERSION,
+            "prose_score": verdict.prose_score,
+            "author_count": verdict.authors,
+        }
     except Exception:
         logger.warning("Could not detect the kind of document %s", doc_id, exc_info=True)
-        return None
+        return {}
+
+
+def _form_fields(doc: dict) -> dict:
+    """A book's form -- novel, short story, collection or non-fiction -- from
+    what is already known about it; nothing for anything that is not a book.
+    `doc` is the record with any pending changes merged in."""
+    if (doc.get("kind_override") or doc.get("kind")) != "book":
+        return {"book_form": None}
+    title = f"{doc.get('title') or ''} {doc.get('subtitle') or ''}"
+    fiction = doc_kind.is_fiction(doc.get("prose_score"), title, doc.get("subject"), _genres_of(doc))
+    return {
+        "book_form": doc_kind.book_form(
+            doc.get("page_count") or doc.get("pages"), fiction, doc.get("author_count") or 0, title, doc.get("author") or ""
+        )
+    }
 
 
 def backfill_document_kinds() -> None:
-    """Classify documents indexed before kind detection existed. Runs once
-    per start, in the background, and only touches rows with no kind yet."""
+    """Classify documents indexed before kind detection existed, and re-read
+    those classified under older rules (doc_kind.RULES_VERSION). Runs once per
+    start, in the background. The reader's own choices -- kind, shelf, edited
+    details -- are never touched."""
     for doc in list_metadata():
         if SHUTDOWN.is_set():
             return
-        if doc.get("kind") or doc.get("indexing_status") != "indexed":
+        if doc.get("indexing_status") != "indexed" or (doc.get("kind") and (doc.get("kind_rules") or 0) >= doc_kind.RULES_VERSION):
             continue
-        kind = _detect_document_kind(doc["document_id"], doc.get("pages") or 0)
-        if kind:
-            try:
-                STORE.update(doc["document_id"], {"kind": kind})
-            except KeyError:
-                pass
+        fields = _kind_fields(doc["document_id"], doc)
+        if not fields:
+            continue
+        try:
+            merged = {**doc, **fields}
+            kind = merged.get("kind_override") or merged["kind"]
+            fields.update(_shelf_fields(merged, kind))
+            fields.update(_form_fields({**merged, **fields}))
+            STORE.update(doc["document_id"], fields)
+        except KeyError:
+            pass
 
 
 _SUBJECT_VECTORS: dict = {}
@@ -1247,26 +1304,40 @@ def _shelf_suggestion(kind: Optional[str], doc_type: Optional[str], subject: Opt
     return shelves.suggest_shelf(kind, subject, author)
 
 
+def _known_authors() -> List[str]:
+    """Every author recorded in the library, so a lone surname from a file name
+    ("Camus") can be completed the way the library already spells it."""
+    return [doc["author"] for doc in list_metadata() if doc.get("author")]
+
+
 def _shelf_fields(metadata: dict, kind: Optional[str]) -> dict:
     """A document's author, subject, type and suggested shelf (see shelves.py),
     for ``kind`` (the reader's override, else the detected kind). Never the
-    reader's own ``shelf``. Best effort: {} when anything fails."""
+    reader's own ``shelf``. The title too, when it is still a guess from the
+    file name that the author just learned makes tidier ("The Hobbit Tolkien").
+    Best effort: {} when anything fails."""
     doc_id = metadata["document_id"]
     try:
         author = subject = None
         if kind != "note":
-            author = (
-                shelves.normalize_author(document_author(pdf_path(metadata)))
-                or shelves.author_from_filename(metadata.get("filename") or "")
-                or shelves.author_from_text(_first_page_texts(doc_id))
+            author = shelves.pick_author(
+                document_author(pdf_path(metadata)),
+                metadata.get("filename") or "",
+                lambda: _first_page_texts(doc_id),
+                _known_authors(),
             )
             subject = shelves.classify_subject(_document_vector(doc_id), _subject_vectors())
         if metadata.get("metadata_edited"):
             author, subject = metadata.get("author"), metadata.get("subject")
         doc_type = _document_type(metadata, kind)
         fields = {"author": author, "subject": subject, "shelf_suggested": _shelf_suggestion(kind, doc_type, subject, author)}
-        if doc_type:
-            fields["doc_type"] = doc_type
+        fields["doc_type"] = doc_type  # None clears a stale type once a document turns out to be a book
+        filename = metadata.get("filename") or ""
+        if author and filename and not metadata.get("metadata_edited") and not metadata.get("metadata_source"):
+            untouched_guess = {title_from_filename(filename), _legacy_title_from_filename(filename)}
+            tidier = title_from_filename(filename, author)
+            if metadata.get("title") in untouched_guess and tidier != metadata.get("title"):
+                fields["title"] = tidier
         return fields
     except Exception:
         logger.warning("Could not suggest a shelf for document %s", doc_id, exc_info=True)
@@ -1280,9 +1351,71 @@ def suggest_document_shelf(doc_id: str) -> Optional[dict]:
     return STORE.update(doc_id, fields) if fields else None
 
 
+def _filename_detail_changes(doc: dict, known_authors: Sequence[str]) -> dict:
+    """The author and tidier title the file name and the file's own properties
+    give a record made before the parser understood "Title - Author". Only
+    guesses are touched: a record the reader edited, a catalogue match, or a
+    title that is not the old file-name guess is left exactly as it is.
+
+    An author already stored is replaced only when the file name credits
+    someone with a different surname (the stored one was a translator, an
+    editor or an institution); otherwise it stays."""
+    filename = doc.get("filename") or ""
+    if (
+        not filename
+        or doc.get("record_type") == "standalone"
+        or doc.get("collection_id") == NOTES_COLLECTION_ID
+        or doc.get("metadata_edited")
+        or doc.get("metadata_source")
+    ):
+        return {}
+    changes: dict = {}
+    author = doc.get("author")
+    if not author:
+        try:
+            embedded = document_author(pdf_path(doc))
+        except Exception:
+            embedded = None
+        # The title page is read at index time (_shelf_fields), which wins over this.
+        author = shelves.pick_author(embedded, filename, known_authors=known_authors)
+    elif shelves.author_from_filename(filename):
+        author = shelves.pick_author(author, filename, known_authors=known_authors) or author
+    if author and author != doc.get("author"):
+        changes["author"] = author
+    if doc.get("title") == _legacy_title_from_filename(filename):
+        title = title_from_filename(filename, author)
+        if title and title != doc["title"]:
+            changes["title"] = title
+    kind = doc.get("kind_override") or doc.get("kind")
+    if "author" in changes and doc.get("shelf_suggested") and kind != "note":
+        doc_type = None if kind == "book" else doc.get("doc_type")
+        changes["shelf_suggested"] = _shelf_suggestion(kind, doc_type, doc.get("subject"), author)
+    return changes
+
+
+def backfill_filename_details() -> None:
+    documents = list_metadata()
+    known = [doc["author"] for doc in documents if doc.get("author")]
+    for doc in documents:
+        if SHUTDOWN.is_set():
+            return
+        try:
+            changes = _filename_detail_changes(doc, known)
+            if changes:
+                STORE.update(doc["document_id"], changes)
+                if changes.get("author"):
+                    known.append(changes["author"])
+        except KeyError:
+            pass  # deleted while the backfill ran
+        except Exception:
+            logger.warning("Could not read details from the file name of %s", doc.get("document_id"), exc_info=True)
+
+
 def backfill_document_details() -> None:
-    """Once per start, in the background: classify documents indexed before
-    kind detection, then suggest shelves for those indexed before shelves."""
+    """Once per start, in the background: read the author and title out of file
+    names, classify documents indexed before kind detection, then suggest
+    shelves for those indexed before shelves."""
+    backfill_filename_details()
     backfill_document_kinds()
     for doc in list_metadata():
         if SHUTDOWN.is_set():
@@ -1335,7 +1468,10 @@ def _embed_and_finish(doc_id: str) -> None:
                 )
             set_index_activity(doc_id, "finalizing", progress=95)
             metadata = read_metadata(doc_id)
-            kind = "book" if metadata.get("file_type") == "epub" else _detect_document_kind(doc_id, metadata.get("pages") or 0)
+            kind_fields = _kind_fields(doc_id, metadata)
+            kind = kind_fields.get("kind")
+            shelf_fields = _shelf_fields(metadata, metadata.get("kind_override") or kind)
+            form_fields = _form_fields({**metadata, **kind_fields, **shelf_fields})
             # One update: a document is never seen as indexed without its shelf.
             update_metadata(
                 doc_id,
@@ -1345,8 +1481,9 @@ def _embed_and_finish(doc_id: str) -> None:
                 embedding_model=EMBEDDING_MODEL,
                 vector_dim=vector_dim,
                 index_schema_version=INDEX_SCHEMA_VERSION,
-                kind=kind,
-                **_shelf_fields(metadata, metadata.get("kind_override") or kind),
+                **kind_fields,
+                **shelf_fields,
+                **form_fields,
             )
             update_ingest_entry(doc_id, "indexed")
             clear_index_activity(doc_id)
@@ -1651,13 +1788,18 @@ def create_document(
     """
     doc_id = doc_id or generate_id()
     now = utc_now()
+    # Everything the file name and the file's own properties say, right away:
+    # waiting for extraction and embedding would leave a queued book "Unknown
+    # author" for as long as the queue is long.
+    author = shelves.pick_author(document_author(stored_path), filename, known_authors=_known_authors())
     metadata = {
         "document_id": doc_id,
         "record_type": "source",
         "filename": filename,
         "file_type": file_type_for_path(filename) or "document",
         "title": (epub_title(stored_path) if file_type_for_path(filename) == "epub" else None)
-        or title_from_filename(filename),
+        or title_from_filename(filename, author),
+        "author": author,
         "stored_filename": stored_path.name,
         "content_sha256": content_sha256,
         "source_path": source_path,
@@ -3155,6 +3297,8 @@ async def patch_document(doc_id: str, patch: DocumentPatch):
         changes["read_at"] = f"{finished}T00:00:00Z"
     if "kind" in sent and patch.kind is not None:
         changes["kind_override"] = None if patch.kind == "auto" else patch.kind
+    if "form" in sent and patch.form is not None:
+        changes["book_form_override"] = None if patch.form == "auto" else patch.form
     if "doc_type" in sent and patch.doc_type is not None:
         changes["doc_type_override"] = None if patch.doc_type == "auto" else patch.doc_type
     if "shelf" in sent:
@@ -3179,6 +3323,9 @@ async def patch_document(doc_id: str, patch: DocumentPatch):
         if doc_type:
             changes["doc_type"] = doc_type
         changes["shelf_suggested"] = _shelf_suggestion(kind, doc_type, merged.get("subject"), merged.get("author"))
+    if changes.keys() & {"kind_override", "page_count", "genres_json", "subject", "title", "subtitle", "author"}:
+        # The form follows the kind, length, genre, subject and title.
+        changes.update(_form_fields({**metadata, **changes}))
     if not changes:
         return await asyncio.to_thread(read_metadata, doc_id)
     # Not update_metadata(): a reader's mark isn't a pipeline change, so it
@@ -3968,7 +4115,7 @@ IMPORT_BOOK_FIELDS = (
     "title", "subtitle", "author", "subject", "description", "publisher", "published_year",
     "page_count", "language", "isbn_10", "isbn_13", "acquisition_source", "reading_status",
     "started_at", "finished_at", "current_page", "reading_progress", "last_read_at",
-    "rating", "review", "liked", "review_spoiler", "reread", "shelf", "owned", "kind_override",
+    "rating", "review", "liked", "review_spoiler", "reread", "shelf", "owned", "kind_override", "book_form_override",
     "metadata_source", "metadata_source_id",
 )
 # For these the app guesses a value itself, so an untouched guess is not

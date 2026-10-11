@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import {
   displayTitle,
+  bookForm,
   docKind,
+  libraryKind,
   isRead,
   ownedState,
   readingStatus,
@@ -115,5 +117,27 @@ describe("document marks", () => {
     expect(ownedState({ kind: "book", owned: 0 })).toBe(false);
     expect(ownedState({ kind: "book", owned: null })).toBe(false); // unmarked = not owned
     expect(ownedState({ kind: "paper", owned: 1 })).toBeNull(); // only books
+  });
+});
+
+describe("where a file belongs", () => {
+  it("sorts books, papers, documents and notes by the reader's choice first", () => {
+    expect(libraryKind({ kind: "document", kind_override: "book" })).toBe("book");
+    expect(libraryKind({ kind: "paper" })).toBe("paper");
+    expect(libraryKind({ kind_override: "note" })).toBe("note");
+  });
+
+  it("knows some files before the server has classified them", () => {
+    expect(libraryKind({ file_type: "epub" })).toBe("book");
+    expect(libraryKind({ record_type: "standalone" })).toBe("book");
+    expect(libraryKind({ file_type: "pdf" })).toBe("pending");
+    expect(libraryKind({ file_type: "excel" })).toBe("document");
+    expect(libraryKind({ file_type: "word" })).toBe("document");
+  });
+
+  it("prefers the reader's form over the guess", () => {
+    expect(bookForm({ book_form: "short_story" })).toBe("short_story");
+    expect(bookForm({ book_form: "short_story", book_form_override: "novel" })).toBe("novel");
+    expect(bookForm({})).toBeNull();
   });
 });

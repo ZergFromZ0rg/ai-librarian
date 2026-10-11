@@ -132,6 +132,25 @@ export function docKind(doc) {
   return doc?.kind_override || doc?.kind || "document";
 }
 
+// Where a file belongs: "book" (the Library), "paper" or "document" (the
+// Documents library), "note", or "pending" for a PDF the server has not
+// classified yet -- it waits in the Library, its usual home, instead of
+// showing up in both lists. Files that are never books are known at once.
+export function libraryKind(doc) {
+  const kind = doc?.kind_override || doc?.kind;
+  if (kind) return kind;
+  const type = String(doc?.file_type || "").toLowerCase();
+  if (doc?.record_type === "standalone" || type === "epub") return "book";
+  return type === "pdf" || !type ? "pending" : "document";
+}
+
+// A book's form: novel, short story, collection or non-fiction. The reader's
+// correction first, else the server's guess; null when it has none.
+export const FORM_LABELS = { novel: "Novel", short_story: "Short story", collection: "Collection", nonfiction: "Non-fiction" };
+export function bookForm(doc) {
+  return doc?.book_form_override || doc?.book_form || null;
+}
+
 export function readingStatus(doc) {
   return doc?.reading_status || (doc?.read_at ? "read" : "to_read");
 }

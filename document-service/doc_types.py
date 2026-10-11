@@ -41,6 +41,16 @@ _SIGNALS = {
 _THRESHOLD = {"legal": 2, "manual": 2, "report": 2}
 
 
+def reads_as_working_document(opening_pages: Iterable[str], page_count: int = 0) -> bool:
+    """Whether the opening pages carry enough manual, legal or report
+    vocabulary to mark a short file as a working document, not a book."""
+    opening = "\n".join(text or "" for text in list(opening_pages)[:3])
+    scores = {name: len(pattern.findall(opening)) for name, pattern in _SIGNALS.items()}
+    if page_count > 40:
+        scores["legal"] = max(0, scores["legal"] - 3)
+    return any(score >= _THRESHOLD[name] for name, score in scores.items())
+
+
 def classify_document(
     file_type: Optional[str],
     page_texts: Iterable[str],

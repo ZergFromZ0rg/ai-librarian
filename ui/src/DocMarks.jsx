@@ -1,7 +1,7 @@
 import React from "react";
 
 import { ratingNumber, starText } from "./ratings.js";
-import { docKind, isRead, ownedState, readingStatus } from "./storage.js";
+import { FORM_LABELS, bookForm, docKind, isRead, ownedState, readingStatus } from "./storage.js";
 
 const KIND_LABELS = { book: "Book", paper: "Paper", document: "Document" };
 
@@ -16,7 +16,7 @@ export function CoverFlags({ doc }) {
   const statusLabel = { to_read: "To read", reading: "Reading", read: "✓ Read", abandoned: "Abandoned" }[status] || "To read";
   return (
     <>
-      {kind !== "document" && <span className={`flag flag-kind flag-${kind}`}>{KIND_LABELS[kind]}</span>}
+      {kind !== "document" && <span className={`flag flag-kind flag-${kind}`}>{kind === "book" ? FORM_LABELS[bookForm(doc)] || KIND_LABELS.book : KIND_LABELS[kind]}</span>}
       <span className={`flag flag-read${read ? " is-read" : ""}`} title={`Reading status: ${statusLabel.replace("✓ ", "")}`}>
         {statusLabel}
       </span>

@@ -1,8 +1,8 @@
-import { displayTitle, readingStatus } from "./storage.js";
+import { FORM_LABELS, bookForm, displayTitle, libraryKind, readingStatus } from "./storage.js";
 
 export const EMPTY_FILTERS = Object.freeze({
   query: "", status: "all", ownership: "all", rating: "all", format: "all",
-  collection: "all", genre: "all", author: "all", acquisition: "all", finishedYear: "all", indexing: "all", notes: "all", liked: "all",
+  form: "all", collection: "all", genre: "all", author: "all", acquisition: "all", finishedYear: "all", indexing: "all", notes: "all", liked: "all",
   sort: "title", order: "default",
 });
 
@@ -15,8 +15,10 @@ export function genresFor(doc) {
   }
 }
 
+// The Library holds books. Papers and documents are tracked in the Documents
+// library, notes in Notes; a PDF not classified yet waits here.
 export function libraryBooks(documents) {
-  return (documents || []).filter((doc) => doc.collection_id !== "notes" && (doc.kind_override || doc.kind) !== "note");
+  return (documents || []).filter((doc) => doc.collection_id !== "notes" && ["book", "pending"].includes(libraryKind(doc)));
 }
 
 const STATUS_RANK = { reading: 0, to_read: 1, read: 2, abandoned: 3 };
@@ -56,6 +58,7 @@ export function filterLibrary(documents, filters = EMPTY_FILTERS, noteText = new
     if (!["all", "rated"].includes(f.rating) && Number(doc.rating || 0) !== Number(f.rating)) return false;
     if (f.liked === "liked" && !doc.liked) return false;
     if (f.format !== "all" && formatOf(doc) !== f.format) return false;
+    if (f.form !== "all" && (bookForm(doc) || "unknown") !== f.form) return false;
     if (f.collection !== "all" && (doc.collection_id || "legacy-root") !== f.collection) return false;
     if (f.genre !== "all" && !genresFor(doc).some((genre) => genre.toLocaleLowerCase() === f.genre.toLocaleLowerCase())) return false;
     if (f.author !== "all" && (doc.author || "Unknown author") !== f.author) return false;
@@ -92,6 +95,7 @@ export function filterLabels(filters, collections = []) {
   if (f.rating !== "all") out.push(f.rating === "rated" ? "Rated" : `${f.rating} ${Number(f.rating) === 1 ? "star" : "stars"}`);
   if (f.liked === "liked") out.push("Liked");
   if (f.format !== "all") out.push(label("Format", f.format));
+  if (f.form !== "all") out.push(label("Form", FORM_LABELS[f.form] || "Not classified"));
   if (f.collection !== "all") out.push(label("Collection", collections.find((item) => item.id === f.collection)?.name || f.collection));
   if (f.genre !== "all") out.push(label("Genre", f.genre));
   if (f.author !== "all") out.push(label("Author", f.author));
@@ -106,7 +110,7 @@ export function filterLabels(filters, collections = []) {
 // where they differ from the defaults. The "lib." prefix keeps them apart from
 // anything else on the address.
 const PARAMS = {
-  query: "q", status: "status", ownership: "own", rating: "rating", format: "format", collection: "coll",
+  query: "q", status: "status", ownership: "own", rating: "rating", format: "format", form: "form", collection: "coll",
   genre: "genre", author: "author", acquisition: "acq", finishedYear: "year", indexing: "index", notes: "notes", liked: "liked",
   sort: "sort", order: "order",
 };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { facetValues, filterLibrary, libraryBooks } from "./libraryExplore.js";
+import { EMPTY_FILTERS, facetValues, filterLabels, filterLibrary, libraryBooks, viewFromSearch, viewToParams } from "./libraryExplore.js";
 
 const documents = [
   { document_id: "a", title: "Dune", author: "Frank Herbert", kind: "book", owned: 1, file_type: "epub", reading_status: "read", rating: 5, genres_json: '["Science Fiction"]', finished_at: "2026-01-02", indexing_status: "indexed" },
@@ -93,5 +93,43 @@ describe("shareable views", () => {
   it("describes active constraints in words", () => {
     expect(filterLabels({ ...EMPTY_FILTERS, status: "read", notes: "with", query: "x" })).toEqual(["“x”", "Status: Read", "Has notes"]);
     expect(filterLabels(EMPTY_FILTERS)).toEqual([]);
+  });
+});
+
+describe("the library holds books, and a book has a form", () => {
+  const mixed = [
+    { document_id: "n", title: "The Plague", kind: "book", file_type: "epub", book_form: "novel" },
+    { document_id: "s", title: "A Happy Death", kind: "book", file_type: "pdf", book_form: "short_story" },
+    { document_id: "c", title: "Magical Worlds", kind: "book", file_type: "epub", book_form: "collection" },
+    { document_id: "e", title: "The Rebel", kind: "book", file_type: "pdf", book_form: "nonfiction" },
+    { document_id: "o", title: "Reread as a novel", kind: "book", file_type: "pdf", book_form: "short_story", book_form_override: "novel" },
+    { document_id: "u", title: "Scan with no text", kind: "book", file_type: "pdf" },
+    { document_id: "p", title: "Bitcoin", kind: "paper", file_type: "pdf" },
+    { document_id: "d", title: "555 Timer Datasheet", kind: "document", file_type: "pdf" },
+    { document_id: "x", title: "Budget", kind: "document", file_type: "excel" },
+    { document_id: "w", title: "Not classified yet", file_type: "pdf" },
+    { document_id: "z", title: "Tagged a book by the reader", kind: "document", kind_override: "book", file_type: "pdf" },
+  ];
+  const ids = (filters) => filterLibrary(mixed, filters).map((doc) => doc.document_id).sort();
+
+  it("keeps papers and documents out, but not a PDF still waiting to be classified", () => {
+    expect(libraryBooks(mixed).map((doc) => doc.document_id)).toEqual(["n", "s", "c", "e", "o", "u", "w", "z"]);
+  });
+
+  it("filters by form, with the reader's correction counting, and by not classified", () => {
+    expect(ids({ form: "novel" })).toEqual(["n", "o"]);
+    expect(ids({ form: "short_story" })).toEqual(["s"]);
+    expect(ids({ form: "collection" })).toEqual(["c"]);
+    expect(ids({ form: "nonfiction" })).toEqual(["e"]);
+    expect(ids({ form: "unknown" })).toEqual(["u", "w", "z"]);
+    expect(ids({})).toHaveLength(8);
+  });
+
+  it("says the form in words and keeps it in the shareable address", () => {
+    expect(filterLabels({ form: "short_story" })).toEqual(["Form: Short story"]);
+    expect(filterLabels({ form: "unknown" })).toEqual(["Form: Not classified"]);
+    const params = viewToParams({ ...EMPTY_FILTERS, form: "collection" });
+    expect(params.get("lib.form")).toBe("collection");
+    expect(viewFromSearch(`?${params}`).filters.form).toBe("collection");
   });
 });

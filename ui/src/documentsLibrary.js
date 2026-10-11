@@ -1,7 +1,7 @@
 // The Documents library: working files that are not books (papers, reports,
 // manuals, slides, data, writing, legal and finance). Pure helpers, so the
 // list, its counts and its filters always agree.
-import { docKind, readingStatus } from "./storage.js";
+import { libraryKind, readingStatus } from "./storage.js";
 
 export const DOC_TYPES = [
   ["paper", "Paper"],
@@ -21,7 +21,7 @@ export function isWorkDocument(doc) {
   return Boolean(doc)
     && doc.record_type !== "standalone"
     && doc.collection_id !== "notes"
-    && !["book", "note"].includes(docKind(doc));
+    && ["paper", "document"].includes(libraryKind(doc));
 }
 
 // Not yet classified counts as "other" so every document has a visible type.

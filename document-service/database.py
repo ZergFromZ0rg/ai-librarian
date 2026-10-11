@@ -50,6 +50,16 @@ COLUMNS = (
     # time (see doc_kind.py); `kind_override` is the reader's correction.
     "kind",
     "kind_override",
+    # Which version of doc_kind's rules produced `kind`, so the startup backfill
+    # re-reads records classified under older rules; the narrative-prose score
+    # of the text (None when there was too little to judge) and how many authors
+    # it credits; and a book's form -- novel, short story, collection or
+    # non-fiction -- guessed from those, with `book_form_override` the reader's.
+    "kind_rules",
+    "prose_score",
+    "author_count",
+    "book_form",
+    "book_form_override",
     # Reader-set: 1/0 whether they own a copy (books only), NULL = not said.
     "owned",
     # When the reader marked it read; NULL = unread.
@@ -145,6 +155,11 @@ CREATE TABLE IF NOT EXISTS documents (
     ocr_approved          INTEGER,
     kind                  TEXT,
     kind_override         TEXT,
+    kind_rules            INTEGER,
+    prose_score           REAL,
+    author_count          INTEGER,
+    book_form             TEXT,
+    book_form_override    TEXT,
     owned                 INTEGER,
     read_at               TEXT,
     author                TEXT,
@@ -256,6 +271,11 @@ class MetadataStore:
             ("ocr_approved", "INTEGER"),
             ("kind", "TEXT"),
             ("kind_override", "TEXT"),
+            ("kind_rules", "INTEGER"),
+            ("prose_score", "REAL"),
+            ("author_count", "INTEGER"),
+            ("book_form", "TEXT"),
+            ("book_form_override", "TEXT"),
             ("owned", "INTEGER"),
             ("read_at", "TEXT"),
             ("author", "TEXT"),

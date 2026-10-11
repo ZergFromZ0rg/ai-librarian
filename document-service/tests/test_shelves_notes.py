@@ -41,6 +41,73 @@ def test_indexed_document_is_suggested_a_shelf_the_reader_can_change(service):
     assert too_deep.status_code == 422
 
 
+def test_author_and_title_come_from_the_file_name_the_moment_a_file_is_added(service):
+    _module, client, _indexed = service
+    # Not after indexing: the record is already filled in when the upload returns.
+    first = client.post("/documents", files={"file": ("The Stranger - Albert Camus.pdf", make_pdf("x"), "application/pdf")})
+    assert (first.json()["title"], first.json()["author"]) == ("The Stranger", "Albert Camus")
+    # A lone surname is completed the way the library already spells it.
+    second = client.post("/documents", files={"file": ("A Hapy Death - Camus.pdf", make_pdf("y"), "application/pdf")})
+    assert (second.json()["title"], second.json()["author"]) == ("A Hapy Death", "Albert Camus")
+    # And it survives indexing, which recomputes the author.
+    wait_for_status(client, second.json()["document_id"], "indexed")
+    assert _doc(client, second.json()["document_id"])["author"] == "Albert Camus"
+
+
+def test_indexing_tidies_a_title_once_the_title_page_names_the_author(service):
+    _module, client, _indexed = service
+    # "Title Surname" can not be split from the name alone; the title page's byline settles it.
+    added = client.post("/documents", files={"file": ("0 The Hobbit Tolkien.pdf", make_pdf("THE HOBBIT\n\nby J. R. R. Tolkien"), "application/pdf")}).json()
+    assert added["title"] == "0 The Hobbit Tolkien"
+    doc = wait_for_status(client, added["document_id"], "indexed")
+    assert (_doc(client, doc["document_id"])["title"], _doc(client, doc["document_id"])["author"]) == ("0 The Hobbit", "J. R. R. Tolkien")
+
+    # A title the reader chose is never touched.
+    mine = client.post("/documents", files={"file": ("1 The Fellowship Tolkien.pdf", make_pdf("by J. R. R. Tolkien"), "application/pdf")}).json()
+    client.patch(f"/documents/{mine['document_id']}", json={"title": "Fellowship, my copy"})
+    wait_for_status(client, mine["document_id"], "indexed")
+    assert _doc(client, mine["document_id"])["title"] == "Fellowship, my copy"
+
+
+def test_backfill_reads_old_records_but_never_overwrites_a_readers_choice(service):
+    module, client, _indexed = service
+    legacy = module._legacy_title_from_filename
+    ids = {}
+    for name in ("Hunger - Hamsun.pdf", "Trilby - Maurier.pdf"):
+        doc = client.post("/documents", files={"file": (name, make_pdf(name), "application/pdf")}).json()
+        wait_for_status(client, doc["document_id"], "indexed")
+        # Make each look like a record from before the parser: no author, the old title.
+        module.STORE.update(doc["document_id"], {"author": None, "title": legacy(name), "shelf_suggested": None})
+        ids[name] = doc["document_id"]
+    # The reader fixed one by hand, so it is theirs.
+    client.patch(f"/documents/{ids['Trilby - Maurier.pdf']}", json={"title": "Trilby (my copy)"})
+    module.STORE.update(ids["Trilby - Maurier.pdf"], {"author": None})
+
+    module.backfill_filename_details()
+
+    hunger = _doc(client, ids["Hunger - Hamsun.pdf"])
+    assert (hunger["title"], hunger["author"]) == ("Hunger", "Hamsun")
+    trilby = _doc(client, ids["Trilby - Maurier.pdf"])
+    assert (trilby["title"], trilby["author"]) == ("Trilby (my copy)", None)
+
+
+def test_backfill_replaces_a_translators_name_only_when_the_file_name_disagrees(service):
+    module, client, _indexed = service
+    doc = client.post("/documents", files={"file": ("The Wisdom of Life - Schopenhauer.pdf", make_pdf("w"), "application/pdf")}).json()
+    wait_for_status(client, doc["document_id"], "indexed")
+    other = client.post("/documents", files={"file": ("Parerga - Arthur Schopenhauer.pdf", make_pdf("p"), "application/pdf")}).json()
+    wait_for_status(client, other["document_id"], "indexed")
+
+    module.STORE.update(doc["document_id"], {"author": "Christopher Janaway"})
+    module.backfill_filename_details()
+    assert _doc(client, doc["document_id"])["author"] == "Arthur Schopenhauer"
+
+    # An author that agrees with the file name is left exactly as it is.
+    module.STORE.update(doc["document_id"], {"author": "A. Schopenhauer"})
+    module.backfill_filename_details()
+    assert _doc(client, doc["document_id"])["author"] == "A. Schopenhauer"
+
+
 def test_accepting_and_moving_shelves_and_searching_one(service):
     _module, client, _indexed = service
     first = _upload(client, "one.pdf", "The absurd, the absurd and freedom.")

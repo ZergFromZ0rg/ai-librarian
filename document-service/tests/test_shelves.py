@@ -38,6 +38,73 @@ def test_author_from_filename_and_title_page():
     assert shelves.author_from_text(["BY Albert Camus"]) == "Albert Camus"
 
 
+@pytest.mark.parametrize(
+    "filename, title, author",
+    [
+        # The commonest hand-kept style: "Title - Author", a lone surname included.
+        ("A Hapy Death - Camus.pdf", "A Hapy Death", "Camus"),
+        ("Anarchist Cookbook - William Powell.pdf", "Anarchist Cookbook", "William Powell"),
+        ("All Tomorrows - C.M. Kosemen .pdf", "All Tomorrows", "C.M. Kosemen"),
+        ("A History of Mathematics - 3rd Edition - Merzbach and Boyer.pdf", "A History of Mathematics - 3rd Edition", "Merzbach"),
+        ("The Meme Machine (Susan Blackmore, Richard Dawkins).pdf", "The Meme Machine", "Susan Blackmore"),
+        ("Electrical Engineering 101 [by Darren Ashby].pdf", "Electrical Engineering 101", "Darren Ashby"),
+        ("The Psycho-Cybernetics by Maxwell Maltz (1).pdf", "The Psycho-Cybernetics", "Maxwell Maltz"),
+        ("The Structure of Magic Book 2 (Richard Bandler, John Grinder).pdf.pdf", "The Structure of Magic Book 2", "Richard Bandler"),
+        ("Introductory Econometrics- A Modern Approach (Jeffrey Wooldridge).pdf", "Introductory Econometrics: A Modern Approach", "Jeffrey Wooldridge"),
+        # No credit, or one that cannot be told from a subtitle: nothing is invented.
+        ("Compilers - Principles, Techniques, and Tools (2006).pdf", "Compilers - Principles, Techniques, and Tools (2006)", None),
+        ("Make - Electronics.pdf", "Make - Electronics", None),
+        ("Computer Networks - A Systems Approach.pdf", "Computer Networks - A Systems Approach", None),
+        ("Home Expedient Firearms - 9mm SMG.pdf", "Home Expedient Firearms - 9mm SMG", None),
+        ("Fullstack GPT - V1.0.0 - August 6, 2023.pdf", "Fullstack GPT - V1.0.0 - August 6, 2023", None),
+        ("0 The Hobbit Tolkien.pdf", "0 The Hobbit Tolkien", None),
+        # Titles read cleanly out of the file name.
+        ("Beginner_s Guide to Reading Schematics (3rd Edition) ( PDFDrive.com ).pdf", "Beginner's Guide to Reading Schematics (3rd Edition)", None),
+        ("automation-and-robotics.pdf", "Automation and Robotics", None),
+        ("555-Timer-Datasheet.pdf", "555 Timer Datasheet", None),
+        ("Bayes_Book.pdf", "Bayes Book", None),
+        ("OrganicChemistry-10th-Edition.pdf", "OrganicChemistry 10th Edition", None),
+    ],
+)
+def test_parse_filename(filename, title, author):
+    assert shelves.parse_filename(filename) == (title, author)
+
+
+def test_title_drops_an_author_the_files_metadata_corroborates():
+    # "Title Surname" and "Surname - Title" can not be split from the name alone...
+    assert shelves.title_from_filename("0 The Hobbit Tolkien.pdf") == "0 The Hobbit Tolkien"
+    assert shelves.title_from_filename("Tolkien - The Silmarillion.pdf") == "Tolkien - The Silmarillion"
+    # ...but once the file's own metadata names the author, they can.
+    assert shelves.title_from_filename("0 The Hobbit Tolkien.pdf", "J. R. R. Tolkien") == "0 The Hobbit"
+    assert shelves.title_from_filename("Tolkien - The Silmarillion.pdf", "J. R. R. Tolkien") == "The Silmarillion"
+    assert shelves.title_from_filename("code-charles-petzold.pdf", "Charles Petzold") == "Code"
+    assert shelves.title_from_filename("Tolkien.pdf", "J. R. R. Tolkien") == "Tolkien"  # never an empty title
+    assert shelves.title_from_filename("A Hapy Death - Camus.pdf", "Albert Camus") == "A Hapy Death"
+
+
+def test_a_lone_surname_is_completed_from_the_library():
+    known = ["Albert Camus"] * 3 + ["Camille Camus", "Isaac Asimov"]
+    assert shelves.resolve_surname("Camus", known) == "Albert Camus"
+    assert shelves.resolve_surname("Asimov", known) == "Isaac Asimov"
+    assert shelves.resolve_surname("Hamsun", known) == "Hamsun"  # nobody else known
+    assert shelves.resolve_surname("Gray", ["John Gray", "Alasdair Gray"]) == "Gray"  # a tie stays a surname
+    assert shelves.resolve_surname("Camus", ["Camus"]) == "Camus"  # a surname is not a full name
+
+
+def test_pick_author_prefers_the_file_name_over_a_translator_in_the_metadata():
+    known = ["Arthur Schopenhauer"]
+    # A name typed into the file name beats an editor, translator or institution...
+    assert shelves.pick_author("Christopher Janaway", "The Wisdom of Life - Schopenhauer.pdf", known_authors=known) == "Arthur Schopenhauer"
+    assert shelves.pick_author("Florida Memorial", "The Making of the Slave - Willie Lynch.pdf") == "Willie Lynch"
+    # ...unless the metadata agrees on the surname, in which case its spelling is kept.
+    assert shelves.pick_author("Albert Camus", "The Fall - Camus.epub") == "Albert Camus"
+    assert shelves.pick_author("Mark P.O. Morford", "Classical Mythology (Mark Morford).pdf") == "Mark P.O. Morford"
+    # Without one: the metadata, then the title page, then nothing.
+    assert shelves.pick_author("J. R. R. Tolkien", "0 The Hobbit Tolkien.pdf") == "J. R. R. Tolkien"
+    assert shelves.pick_author("python-docx", "notes.docx", ["by Ann Writer"]) == "Ann Writer"
+    assert shelves.pick_author(None, "notes.docx", lambda: ["no byline here"]) is None
+
+
 def test_classify_subject_needs_a_clear_winner():
     subjects = {"Philosophy": [1.0, 0.0, 0.0], "Physics": [0.0, 1.0, 0.0], "History": [0.0, 0.0, 1.0]}
     assert shelves.classify_subject([0.9, 0.1, 0.0], subjects) == "Philosophy"

@@ -5,7 +5,7 @@ import LibraryDiary from "./LibraryDiary.jsx";
 import LibraryLedger from "./LibraryLedger.jsx";
 import { starText } from "./ratings.js";
 import { EMPTY_FILTERS, facetValues, filterLabels, filterLibrary, searchWithView, viewFromSearch } from "./libraryExplore.js";
-import { displayTitle, loadStored, saveStored } from "./storage.js";
+import { FORM_LABELS, bookForm, displayTitle, loadStored, saveStored } from "./storage.js";
 
 const SAVED_KEY = "ai-librarian.library.saved-views";
 
@@ -77,6 +77,7 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
         <label>Rating<select value={filters.rating} onChange={(e) => update("rating", e.target.value)}><option value="all">All</option><option value="rated">Any rating</option>{[5,4.5,4,3.5,3,2.5,2,1.5,1,0.5].map((n) => <option key={n} value={n}>{starText(n)}</option>)}</select></label>
         <label>Liked<select value={filters.liked} onChange={(e) => update("liked", e.target.value)}><option value="all">All</option><option value="liked">♥ Liked</option></select></label>
         <label>Format<select value={filters.format} onChange={(e) => update("format", e.target.value)}><option value="all">All</option>{facets.formats.map((item) => <option key={item}>{item}</option>)}</select></label>
+        <label>Form<select value={filters.form} onChange={(e) => update("form", e.target.value)}><option value="all">All</option>{Object.entries(FORM_LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}<option value="unknown">Not classified</option></select></label>
         <label>Collection<select value={filters.collection} onChange={(e) => update("collection", e.target.value)}><option value="all">All</option>{collections.filter((item) => !item.builtin).map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
         <label>Genre<select value={filters.genre} onChange={(e) => update("genre", e.target.value)}><option value="all">All</option>{facets.genres.map((item) => <option key={item}>{item}</option>)}</select></label>
         <label>Author<select value={filters.author} onChange={(e) => update("author", e.target.value)}><option value="all">All</option>{facets.authors.map((item) => <option key={item}>{item}</option>)}</select></label>
@@ -99,7 +100,7 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
     {layout === "list" && <div className="explore-results">
       {results.map((doc) => <button type="button" className="explore-book" key={doc.document_id} onClick={() => onOpenDocument(doc)}>
         <Cover apiBase={apiBase} documentId={doc.document_id} filename={doc.title || doc.filename} author={doc.author} fileType={doc.file_type} width={90}><CoverFlags doc={doc} /></Cover>
-        <span className="explore-book-copy"><strong>{doc.title || displayTitle(doc.filename)}</strong><span>{doc.author || "Unknown author"}</span><small>{doc.file_type?.toUpperCase() || "BOOK"} · {doc.reading_status?.replace("_", " ") || "to read"}{doc.rating ? ` · ${starText(doc.rating)}` : ""}{doc.liked ? " · ♥" : ""}</small></span>
+        <span className="explore-book-copy"><strong>{doc.title || displayTitle(doc.filename)}</strong><span>{doc.author || "Unknown author"}</span><small>{doc.file_type?.toUpperCase() || "BOOK"}{bookForm(doc) ? ` · ${FORM_LABELS[bookForm(doc)]}` : ""} · {doc.reading_status?.replace("_", " ") || "to read"}{doc.rating ? ` · ${starText(doc.rating)}` : ""}{doc.liked ? " · ♥" : ""}</small></span>
         <span className="explore-progress"><span style={{ width: `${doc.reading_progress || 0}%` }} />{doc.reading_progress || 0}%</span>
       </button>)}
     </div>}
