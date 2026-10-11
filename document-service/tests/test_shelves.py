@@ -141,3 +141,11 @@ def test_on_shelf_and_moving_a_shelf():
     )
     assert shelves.moved_shelf("Books/Philosophy", "Books/Philosophy", "Favourites") == "Favourites"
     assert shelves.moved_shelf("Books/Physics", "Books/Philosophy", "X") is None
+
+
+def test_author_count_does_not_count_roles_as_people():
+    assert shelves.author_count("Jim Manis, ed.; Arthur Schopenhauer") == 2
+    assert shelves.author_count("Jim Manis (ed.)") == 1
+    assert shelves.author_count("Arthur Schopenhauer; T. Bailey Saunders, trans.") == 2
+    assert shelves.author_count("Ann Smith; Bob Jones; Cy Lee, eds.") == 3
+    assert shelves.author_count("Stolz, J., Fugelsang, J. & Fernandes, M.") == 3

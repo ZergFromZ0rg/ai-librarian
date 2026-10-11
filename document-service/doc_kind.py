@@ -8,8 +8,8 @@ Documents library. Page count is the prior, not the verdict:
   ------------------------------------------------------------------------
   an ISBN or a copyright page; several "Chapter N" headings   -> book
   a DOI / arXiv id, or an abstract with references, keywords
-    or a contact address; three or more authors on a short
-    text that is not fiction                                  -> paper
+    or a contact address; three or more authors on a text
+    of under 50 pages that is not fiction                     -> paper
   manual / legal / report vocabulary on a short text          -> document
   more than 150 pages                                         -> book
   50 to 150 pages: fiction, or a credited author              -> book
@@ -44,7 +44,7 @@ FORM_LABELS = {"novel": "Novel", "short_story": "Short story", "collection": "Co
 
 # Bump when the rules above change: the startup backfill re-reads every
 # record that was classified under an older version.
-RULES_VERSION = 2
+RULES_VERSION = 3
 
 SHORT_STORY_MAX_PAGES = 150  # "150 pages or less is a short story"
 SHORT_WORK_PAGES = 50  # under this a file is a document unless it reads as fiction
@@ -230,7 +230,9 @@ def classify(
             bool(_ABSTRACT.search(first))
             and (bool(_REFERENCES.search(full)) or bool(_KEYWORDS.search(first)) or bool(_EMAIL.search(first)))
         )
-        if paper or (authors >= THREE_AUTHORS and page_count <= 80):
+        # Several authors alone only make a paper of a short text: a 50-150 page
+        # book with an editor and a translator on its cover is still a book.
+        if paper or (authors >= THREE_AUTHORS and page_count < SHORT_WORK_PAGES):
             return Verdict("paper", score, authors)
 
     if page_count <= SHORT_STORY_MAX_PAGES and not fiction and doc_types.reads_as_working_document(pages[:3], page_count):

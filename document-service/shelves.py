@@ -222,18 +222,30 @@ def parse_filename(filename: str) -> tuple:
     return title, author
 
 
+# "Jim Manis, ed." or "(trans.)": a role next to a name, not another person.
+_ROLE_WORD = re.compile(
+    r"^(?:eds?|editors?|trans|translators?|translated|illus|illustrators?|intro|foreword|afterword|preface|comp|compilers?|et al)$",
+    re.IGNORECASE,
+)
+
+
 def author_count(raw: Optional[str]) -> int:
     """How many people an author string names: "Susan Blackmore, Richard
     Dawkins" is 2, "Camus, Albert" is 1, "Stolz, J., Fugelsang, J. & Fernandes,
-    M." is 3. 0 for nothing or a tool name."""
+    M." is 3, "Jim Manis, ed.; Arthur Schopenhauer" is 2. 0 for nothing or a
+    tool name."""
     text = " ".join(str(raw or "").replace("\x00", "").split()).strip(" .;,")
     if not text or text.lower() in _JUNK_AUTHORS:
         return 0
     if _SURNAME_FIRST.match(text) and text.count(",") == 1:
         return 1
-    # Bare initials ("J.") belong to the name before them, not a person of their own.
-    names = [part for part in re.split(r"\s*(?:;|&|,|\band\b)\s*", text) if re.search(r"[^\W\d_]{2,}", part.replace(".", ""))]
-    return len(names)
+    # Bare initials ("J.") belong to the name before them, and roles ("ed.")
+    # to the person they follow: neither is a person of their own.
+    parts = [part.strip(" .()") for part in re.split(r"\s*(?:;|&|,|\band\b)\s*", text)]
+    return len([
+        part for part in parts
+        if re.search(r"[^\W\d_]{2,}", part.replace(".", "")) and not _ROLE_WORD.match(part)
+    ])
 
 
 def credit_count(filename: str) -> int:

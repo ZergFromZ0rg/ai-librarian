@@ -106,6 +106,8 @@ def test_three_authors_on_a_short_text_that_is_not_fiction_make_a_paper():
     assert doc_kind.detect_kind(_pages(ESSAY), 40, authors=3) == "paper"
     assert doc_kind.detect_kind(_pages(ESSAY), 40, authors=2) == "document"
     assert doc_kind.detect_kind(_pages(ESSAY), 120, authors=3, author="A. Name") == "book"  # a long one is a book
+    # Studies in Pessimism: 79 pages, credited to an editor, a translator and the author.
+    assert doc_kind.detect_kind(_pages(ESSAY), 79, authors=3, author="Arthur Schopenhauer") == "book"
     assert doc_kind.detect_kind(_pages(FICTION), 40, authors=3) == "book"  # an anthology stays a book
 
 
