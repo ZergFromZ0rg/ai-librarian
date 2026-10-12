@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 
+import { StagedAiCheck } from "./AiCheck.jsx";
 import Cover from "./Cover.jsx";
 import {
   SUPPORTED_UPLOADS,
@@ -54,6 +55,7 @@ export default function IntakeReview({ apiBase, intake, startId, uploading, onFi
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [checks, setChecks] = useState({}); // each upload's last "Check with AI" result, kept while this screen is open
   const saved = useRef(0);
   const frame = useRef(null);
   const picker = useRef(null);
@@ -94,14 +96,19 @@ export default function IntakeReview({ apiBase, intake, startId, uploading, onFi
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  function change(key, value) {
-    const next = { ...form, [key]: value };
-    if (key === "type") next.shelf = shelfAfterTypeChange(form.shelf, types, form.type, value);
+  // Store a changed form (and keep it as a draft while it differs from what was found).
+  function commit(next) {
     setForms((current) => ({ ...current, [item.id]: next }));
     if (editedFields(next, item).length) saveDraft(item.id, next);
     else clearDraft(item.id);
     setError("");
     setMessage("");
+  }
+
+  function change(key, value) {
+    const next = { ...form, [key]: value };
+    if (key === "type") next.shelf = shelfAfterTypeChange(form.shelf, types, form.type, value);
+    commit(next);
   }
 
   async function handleSave(event) {
@@ -346,6 +353,17 @@ export default function IntakeReview({ apiBase, intake, startId, uploading, onFi
                       <textarea className="input book-description" rows={2} maxLength={20000} value={form.description} onChange={(event) => change("description", event.target.value)} />
                     </Field>
                   </section>
+
+                  <StagedAiCheck
+                    key={item.id}
+                    apiBase={apiBase}
+                    item={item}
+                    form={form}
+                    types={types}
+                    result={checks[item.id] || null}
+                    onResult={(result) => setChecks((current) => ({ ...current, [item.id]: result }))}
+                    onForm={commit}
+                  />
                 </fieldset>
 
                 <div className="book-editor-footer intake-footer">

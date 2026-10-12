@@ -131,6 +131,33 @@ export function shelfAfterTypeChange(shelf, types, from, to) {
   return before.group === after.group ? [after.shelf, ...parts.slice(1)].join("/") : after.shelf;
 }
 
+const BOOK_TYPES = new Set(["novel", "novella", "short_story", "collection", "nonfiction", "book"]);
+// The form fields an AI check may fill in; everything else stays the reader's.
+const CHECKED_FIELDS = ["title", "author", "subtitle", "publisher", "published_year", "page_count", "language", "isbn_10", "isbn_13", "description"];
+
+export function isBookType(type) {
+  return BOOK_TYPES.has(type);
+}
+
+function withType(form, type, types) {
+  return { ...form, type, shelf: shelfAfterTypeChange(form.shelf, types, form.type, type) };
+}
+
+// A check's suggestion, as the patch the server proposed, applied to the review form:
+// the field changes and so counts as edited. A suggested kind or form moves the type.
+export function applyAiPatch(form, patch, types = []) {
+  let next = { ...form };
+  for (const [key, value] of Object.entries(patch || {})) {
+    if (key === "form") next = withType(next, value, types);
+    else if (key === "kind") {
+      const type = value === "book" ? (isBookType(next.type) ? next.type : "book") : value === "paper" ? "paper" : (isBookType(next.type) || next.type === "paper" ? "other" : next.type);
+      next = withType(next, type, types);
+    } else if (key === "genres") next.genres = (value || []).join(", ");
+    else if (CHECKED_FIELDS.includes(key)) next[key] = value == null ? "" : String(value);
+  }
+  return next;
+}
+
 // FastAPI sends a string for its own errors and a list for a rejected field.
 export function apiError(data, status) {
   const detail = data?.detail;

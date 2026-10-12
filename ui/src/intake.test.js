@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   SUPPORTED_UPLOADS,
+  applyAiPatch,
+  isBookType,
   apiError,
   shelfAfterTypeChange,
   editedFields,
@@ -130,5 +132,37 @@ describe("intake folder and errors", () => {
     expect(apiError({ detail: "this file is already in the library" }, 409)).toBe("this file is already in the library");
     expect(apiError({ detail: [{ loc: ["body", "isbn_13"], msg: "Value error, ISBN-13 checksum is invalid" }] }, 422)).toBe("isbn_13: ISBN-13 checksum is invalid");
     expect(apiError({}, 500)).toBe("Request failed (500)");
+  });
+});
+
+describe("applying an AI suggestion to the review form", () => {
+  const types = [
+    { value: "novel", group: "Books", shelf: "Books" }, { value: "novella", group: "Books", shelf: "Books" },
+    { value: "book", group: "Books", shelf: "Books" }, { value: "paper", group: "Documents", shelf: "Papers" },
+    { value: "other", group: "Documents", shelf: "Documents" },
+  ];
+  const form = formFromItem(item);
+
+  it("fills fields in as the reader's own edits", () => {
+    const next = applyAiPatch(form, { author: "Albert Camus", title: "A Happy Death", published_year: 1972, genres: ["Essays", "Philosophy"] }, types);
+    expect(next).toMatchObject({ author: "Albert Camus", title: "A Happy Death", published_year: "1972", genres: "Essays, Philosophy" });
+    expect(editedFields(next, item)).toEqual(["genres"]);  // the others already matched what was proposed
+    expect(editedFields(applyAiPatch(form, { author: "A. Camus" }, types), item)).toEqual(["author"]);
+  });
+
+  it("moves the type, and the folder with it, when a form is suggested", () => {
+    const next = applyAiPatch({ ...form, type: "book" }, { form: "novella" }, types);
+    expect(next.type).toBe("novella");
+    expect(next.shelf).toBe("Books/Albert Camus");
+  });
+
+  it("keeps a book's form when only its kind is confirmed, and leaves the reader's folder alone", () => {
+    expect(applyAiPatch({ ...form, type: "novella" }, { kind: "book" }, types).type).toBe("novella");
+    expect(applyAiPatch({ ...form, type: "other", shelf: "Mine/Camus" }, { kind: "book" }, types)).toMatchObject({ type: "book", shelf: "Mine/Camus" });
+  });
+
+  it("ignores anything that is not a field a check may fill", () => {
+    expect(applyAiPatch(form, { shelf: "Nowhere", type: "paper", surprise: "x" }, types)).toEqual(form);
+    expect(isBookType("novel") && isBookType("book") && !isBookType("paper")).toBe(true);
   });
 });
