@@ -4274,6 +4274,17 @@ def _ai_sort_match_fields(doc: dict, match: dict) -> dict:
     }
 
 
+def _ai_sort_spelling(ctx: dict, name: str, *, remember: bool) -> str:
+    """The way the library already spells this person, else the name as given
+    ("John Ronald Reuel Tolkien" when the shelf says "J. R. R. Tolkien"). A name
+    that is applied is remembered, so the books after it spell it the same way."""
+    name = shelves.normalize_author(name) or name
+    chosen = shelves.spelling_in_use(name, ctx["known"]) or name
+    if remember:
+        ctx["known"].append(chosen)
+    return chosen
+
+
 def _ai_sort_one(doc: dict, ctx: dict, report: dict) -> None:
     doc_id = doc["document_id"]
     texts = _ai_sort_texts(doc_id)
@@ -4341,9 +4352,10 @@ def _ai_sort_one(doc: dict, ctx: dict, report: dict) -> None:
     patch: dict = {}
     for change in plan.auto:
         if change.field in {"author", "title"}:
-            patch[change.field] = change.after
+            after = _ai_sort_spelling(ctx, change.after, remember=True) if change.field == "author" else change.after
+            patch[change.field] = after
             applied = [item for item in applied if item["field"] != change.field]
-            applied.append(_ai_sort_change(change.field, doc.get(change.field), change.after, change.source, change.reason))
+            applied.append(_ai_sort_change(change.field, doc.get(change.field), after, change.source, change.reason))
         elif change.field == "fiction":
             applied.append(_ai_sort_change("fiction", None, change.after, change.source, change.reason))
     cover = None
@@ -4380,11 +4392,12 @@ def _ai_sort_one(doc: dict, ctx: dict, report: dict) -> None:
         with _AI_SORT_LOCK:
             report["unchanged"] += 1
     for change in plan.suggestions:
-        patch_field = {"kind": change.after} if change.field == "kind" else {change.field: change.after}
+        after = _ai_sort_spelling(ctx, change.after, remember=False) if change.field == "author" else change.after
+        patch_field = {"kind": after} if change.field == "kind" else {change.field: after}
         with _AI_SORT_LOCK:
             report["suggestions"].append({
                 "id": uuid.uuid4().hex[:10], "document_id": doc_id, "title": title,
-                **_ai_sort_change(change.field, change.before, change.after, change.source, change.reason), "patch": patch_field,
+                **_ai_sort_change(change.field, change.before, after, change.source, change.reason), "patch": patch_field,
             })
     with _AI_SORT_LOCK:
         report["notes"].extend(plan.notes)

@@ -397,6 +397,51 @@ def _author_key(name: str) -> tuple:
     return (words[-1].casefold(), words[0][0].casefold()) if len(words) >= 2 else ("", "")
 
 
+def _within_one_edit(a: str, b: str) -> bool:
+    """True when two words differ by at most one inserted, dropped or changed letter."""
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) > len(b):
+        a, b = b, a
+    i = 0
+    while i < len(a) and a[i] == b[i]:
+        i += 1
+    if len(a) == len(b):
+        return a[i + 1:] == b[i + 1:]
+    return a[i:] == b[i + 1:]
+
+
+def _same_given_name(a: str, b: str) -> bool:
+    a, b = a.casefold(), b.casefold()
+    if len(a) == 1 or len(b) == 1:
+        return a[0] == b[0]  # an initial stands for any name that starts with it
+    return a == b or (min(len(a), len(b)) >= 4 and _within_one_edit(a, b))
+
+
+def same_person(a: str, b: str) -> bool:
+    """Could two spellings be one person? The same surname, and given names that
+    agree as far as both give them: "J. R. R." and "John Ronald Reuel", "E. M." and
+    "Emil", "Valery" and "Velery" -- but not "John Smith" and "James Smith"."""
+    first = re.sub(r"[.,]", " ", a or "").split()
+    second = re.sub(r"[.,]", " ", b or "").split()
+    if len(first) < 2 or len(second) < 2 or first[-1].casefold() != second[-1].casefold():
+        return False
+    return all(_same_given_name(x, y) for x, y in zip(first[:-1], second[:-1]))
+
+
+def spelling_in_use(name: str, known: Iterable[str]) -> Optional[str]:
+    """How the library already spells this person, or None when it does not know
+    them: the spelling used most among `known`, else the fuller one."""
+    counter: dict = {}
+    for other in known or ():
+        other = (other or "").strip()
+        if other and same_person(name, other):
+            counter[other] = counter.get(other, 0) + 1
+    if not counter:
+        return None
+    return sorted(counter.items(), key=lambda item: (-item[1], -len(item[0]), item[0]))[0][0]
+
+
 def canonical_authors(names: Iterable[str]) -> dict:
     """{variant: canonical spelling} for authors the library spells more than one
     way ("E. M. Cioran" / "Emil Cioran"): the spelling used most, else the fuller

@@ -102,7 +102,9 @@ def list_local_models(timeout: float = 3.0) -> List[str]:
 
 def pick_model(preferred: Optional[str], available: List[str]) -> Optional[str]:
     """The model to use: the one asked for if it is installed, else the
-    configured default, else the first one that is not tiny."""
+    configured default (GENERATION_MODEL), else the first one Ollama lists.
+    The first listed can be a small model, so set GENERATION_MODEL where the
+    quality of the answers matters."""
     wanted = (preferred or "").removeprefix("ollama:")
     if wanted in available:
         return wanted

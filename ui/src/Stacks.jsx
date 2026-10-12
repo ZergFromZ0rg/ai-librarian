@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import ActionProgress from "./ActionProgress.jsx";
+import AiSortPanel from "./AiSortPanel.jsx";
 import Cover from "./Cover.jsx";
 import { starText } from "./ratings.js";
 import { CoverFlags, MarkControls } from "./DocMarks.jsx";
@@ -12,7 +13,9 @@ import OwnedBooks from "./OwnedBooks.jsx";
 import ShelfView from "./ShelfView.jsx";
 import VocabularyPanel from "./VocabularyPanel.jsx";
 import { ingestActionProgress, isActiveIngestJob, reindexActionProgress } from "./actionProgress.js";
+import { sortActionProgress } from "./aiSort.js";
 import { displayTitle, loadStored, saveStored } from "./storage.js";
+import useAiSort from "./useAiSort.js";
 
 const VIEW_KEY = "ai-librarian.stacks.view";
 
@@ -586,6 +589,8 @@ export default function Stacks(props) {
   const [browsePreset, setBrowsePreset] = useState(null);
   const [view, setView] = useState(() => (loadStored(VIEW_KEY, "grid") === "list" ? "list" : "grid"));
   const [activeCollectionId, setActiveCollectionId] = useState("");
+  const [sortOpen, setSortOpen] = useState(false);
+  const sort = useAiSort(apiBase, onImported);
   const fileInput = useRef(null);
   const sourceDocuments = useMemo(
     () => documents.filter((document) => document.record_type !== "standalone"),
@@ -651,11 +656,24 @@ export default function Stacks(props) {
               {scanStarting ? "Starting scan…" : "Scan now"}
             </button>
           )}
+          {sort.running && !sortOpen && <ActionProgress progress={sortActionProgress(sort.report)} compact />}
+          <button
+            type="button"
+            className="text-button"
+            aria-expanded={sortOpen}
+            aria-controls="ai-sort-panel"
+            onClick={() => setSortOpen((open) => !open)}
+            title="Fix titles and authors across the library with the rules, the online catalogue and your own model."
+          >
+            AI sort files
+          </button>
           <button type="button" className="button primary" disabled={uploading} onClick={() => fileInput.current?.click()}>
             {uploading ? "Uploading…" : "Upload files"}
           </button>
         </div>
       </header>
+
+      {sortOpen && <AiSortPanel apiBase={apiBase} sort={sort} onOpenDocument={onOpenDocument} onClose={() => setSortOpen(false)} />}
 
       <CollectionBar
         collections={collections}

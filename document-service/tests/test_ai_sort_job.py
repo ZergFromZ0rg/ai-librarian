@@ -254,3 +254,18 @@ def test_a_models_fiction_verdict_settles_a_book_the_text_could_not(service, mon
     after = _doc(client, doc["document_id"])
     assert after["book_form"] == "novella"  # fiction, ~124 pages of words
     assert any(c["field"] == "fiction" for item in report["applied"] for c in item["changes"])
+
+
+def test_an_author_the_model_names_takes_the_spelling_the_library_already_uses(service, monkeypatch):
+    module, client, _ = service
+    quote = "JOHN RONALD REUEL TOLKIEN"
+    _wire(module, monkeypatch, candidates=(), reply=lambda _p: {"title": None, "author": "John Ronald Reuel Tolkien", "same_work_as": None,
+                                                                "is_fiction": None, "kind": None, "confidence": 0.9, "quote": quote})
+    known = _upload(client, "The Hobbit - J. R. R. Tolkien.pdf", "THE HOBBIT\nJ. R. R. TOLKIEN")
+    assert known["author"] == "J. R. R. Tolkien"
+    other = _upload(client, "Tom Bombadil.pdf", f"THE ADVENTURES OF TOM BOMBADIL\n{quote}")
+
+    report = _sort(client, online=False)
+    assert _doc(client, other["document_id"])["author"] == "J. R. R. Tolkien"  # one spelling per person
+    entry = next(item for item in report["applied"] if item["document_id"] == other["document_id"])
+    assert any(c["field"] == "author" and c["after"] == "J. R. R. Tolkien" for c in entry["changes"])

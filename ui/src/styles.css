@@ -5814,3 +5814,53 @@ main {
 .pdf-reader-body { position: relative; flex: 1 1 auto; min-height: 0; }
 .pdf-reader-scroll { position: absolute; inset: 0; overflow: auto; }  /* PDF.js needs its container absolutely positioned */
 .pdf-reader-scroll .pdfViewer { padding-bottom: 24px; }
+
+/* ---- AI sort files: the Library's tidy-up panel (AiSortPanel.jsx) -------- */
+.aisort { display: grid; gap: 14px; margin: 0 0 24px; border: 1px solid var(--rule); border-radius: var(--r); background: var(--surface); padding: 16px; }
+.aisort, .aisort-options, .aisort-section, .aisort-list, .aisort-row:not(.aisort-suggestion), .aisort-changes { grid-template-columns: minmax(0, 1fr); }
+.aisort > *, .aisort-row > *, .aisort-row-head, .aisort-change { min-width: 0; }
+.aisort-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.aisort-head h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+.aisort-head p { max-width: 70ch; margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.55; }
+.aisort-options { display: grid; gap: 2px; border-top: 1px solid var(--rule); padding-top: 12px; }
+.aisort-options .settings-note { margin: 0 0 8px 24px; }
+.aisort-model { display: flex; align-items: center; gap: 10px; margin: 6px 0 2px; font-size: 13px; }
+.aisort-model select { min-width: 200px; max-width: 100%; }
+.aisort-start { margin-top: 8px; }
+.aisort-run { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; border-top: 1px solid var(--rule); padding-top: 12px; }
+.aisort-run .action-progress { flex: 1 1 280px; grid-template-columns: minmax(0, 1fr); min-width: 0; }
+.aisort-run .action-progress-copy, .aisort-run .action-progress-copy span { min-width: 0; }
+.aisort-result { border-top: 1px solid var(--rule); padding-top: 12px; }
+.aisort-result-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.aisort-result-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.aisort-result-head p { margin: 2px 0 0; color: var(--ink-2); font-size: 13px; }
+.aisort-result-head .aisort-skipped { color: var(--muted); font-size: 12.5px; }
+.aisort-section { display: grid; gap: 8px; border-top: 1px solid var(--rule); padding-top: 12px; }
+.aisort-section h4 { margin: 0; color: var(--muted); font-family: var(--mono); font-size: 10.5px; font-weight: 500; text-transform: uppercase; }
+.aisort-section .settings-note { margin: 0; }
+.aisort-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+.aisort-bulk .settings-check { margin: 0; }
+.aisort-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.aisort-row { display: grid; gap: 4px; border-top: 1px solid var(--rule); padding: 9px 0; }
+.aisort-row:first-child { border-top: 0; }
+.aisort-row.undone { opacity: 0.55; }
+.aisort-row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.aisort-suggestion { grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 4px 12px; }
+.aisort-suggestion > input { margin-top: 3px; }
+.aisort-suggestion-body { display: grid; gap: 3px; min-width: 0; }
+.aisort-row-actions { display: flex; gap: 12px; }
+.aisort-book { justify-self: start; max-width: 100%; overflow: hidden; border: 0; background: none; padding: 0; color: var(--ink); font-size: 13px; font-weight: 600; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.aisort-book:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.aisort-tag { border: 1px solid var(--rule-strong); border-radius: 999px; padding: 0 7px; color: var(--muted); font-family: var(--mono); font-size: 10.5px; }
+.aisort-changes { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.aisort-change { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; font-size: 12.5px; }
+.aisort-field { min-width: 48px; color: var(--muted); font-family: var(--mono); font-size: 11px; }
+.aisort-text { color: var(--ink-2); overflow-wrap: anywhere; }
+.aisort-source, .aisort-reason { color: var(--faint); font-size: 11.5px; }
+.aisort-notes { border-top: 1px solid var(--rule); padding-top: 10px; color: var(--muted); font-size: 12.5px; }
+.aisort-notes summary { cursor: pointer; }
+.aisort-notes ul { display: grid; gap: 4px; max-height: 220px; margin: 8px 0 0; overflow: auto; padding-left: 18px; }
+@media (max-width: 600px) {
+  .aisort-suggestion { grid-template-columns: auto minmax(0, 1fr); }
+  .aisort-row-actions { grid-column: 2; }
+}

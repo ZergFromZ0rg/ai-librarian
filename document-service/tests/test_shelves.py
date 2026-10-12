@@ -230,3 +230,20 @@ def test_a_completed_surname_needs_a_given_name_not_only_initials():
     assert shelves.complete_surname("Meerloo", ["Joost A. M. Meerloo"]) == "Joost A. M. Meerloo"
     assert shelves.complete_surname("Tolkien", ["The Hobbit J. R. R. Tolkien"]) is None  # initials alone: left as the surname
     assert shelves.complete_surname("Westlake", ["THE AX Donald E. Westlake"]) == "Donald E. Westlake"
+
+
+def test_two_spellings_are_one_person_only_when_the_given_names_agree():
+    assert shelves.same_person("J. R. R. Tolkien", "John Ronald Reuel Tolkien")
+    assert shelves.same_person("E. M. Cioran", "Emil Cioran")
+    assert shelves.same_person("Valery Vodovozov", "Velery Vodovozov")  # a typo on a cover
+    assert not shelves.same_person("John Smith", "James Smith")
+    assert not shelves.same_person("Mark Morford", "Michael Morford")
+    assert not shelves.same_person("Camus", "Albert Camus")  # a lone surname says nothing about the given name
+
+
+def test_a_name_takes_the_spelling_the_library_already_uses_for_that_person():
+    known = ["J. R. R. Tolkien", "J. R. R. Tolkien", "John Ronald Reuel Tolkien", "Albert Camus"]
+    assert shelves.spelling_in_use("John R. R. Tolkien", known) == "J. R. R. Tolkien"  # the one used most
+    assert shelves.spelling_in_use("James Camus", known) is None  # not the same given name
+    assert shelves.spelling_in_use("Jorge Luis Borges", known) is None
+    assert shelves.spelling_in_use("John Ronald Reuel Tolkien", ["J. R. R. Tolkien"]) == "J. R. R. Tolkien"  # a tie is the library's own
