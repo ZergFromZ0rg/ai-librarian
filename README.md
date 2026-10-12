@@ -115,6 +115,12 @@ ticked ones. Filing only sets the virtual shelf; files on disk never move, and
 a shelf you chose yourself is never overwritten. `POST /documents/classify`
 (with `apply` false to preview) does the same over the API.
 
+### Checking one book with AI
+
+On the page of a PDF or EPUB book, **Check with AI** reads the book's opening pages and checks its title, author and details against what the book itself says: first the rules (file name, the library's own spelling of an author, the title page), then your own Ollama model, and, only if you tick **Also look it up online**, an online catalogue (that sends the book's title and author out, so it is off unless you choose it). The model is never trusted alone: an author it names must be written in the book's own text, and a translator or editor is not taken for the author.
+
+It only proposes. Each change is listed with where it came from (for example *Author: "Camus" → "Albert Camus", from the catalogue and the title page*), and nothing is written until you press **Apply** (or **Apply all**). Applied changes can be undone, and **Dismiss** drops one you do not want. The result is kept with the book, so it is still there when you open the page again. The button is not shown for papers, documents, notes or catalogue records without a file, and it waits until the book has been indexed. A check can take about a minute with a larger local model. The API is `GET/POST /documents/{id}/ai-check` and `POST /documents/{id}/ai-check/apply|dismiss|undo`.
+
 ### Finding book information, covers, and backups
 
 **Find book information** on a book page searches Open Library by ISBN, or by

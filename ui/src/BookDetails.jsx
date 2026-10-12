@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import AiCheck from "./AiCheck.jsx";
 import { applyBody, matchRows } from "./catalogueMatch.js";
 import { clothColor } from "./clothCovers.js";
 import { DOC_TYPES, TYPE_LABEL, isWorkDocument } from "./documentsLibrary.js";
@@ -173,6 +174,7 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
             <div className="cover-preview-actions"><button type="button" className="button primary small" disabled={applying || changed} onClick={applyMatch}>{applying ? "Applying…" : "Apply selected"}</button><button type="button" className="text-button" onClick={() => setMatch(null)}>Cancel</button></div>
           </div>}
         </section>}
+        {!work && hasSource && ["pdf", "epub"].includes(doc.file_type) && <AiCheck apiBase={apiBase} doc={doc} locked={changed} onDocument={onDocument} />}
         <section className="book-editor-card" aria-labelledby="metadata-heading">
           <div className="book-card-heading"><h2 id="metadata-heading">{work ? "Document details" : "Book details"}</h2><span className="muted">{work ? "Keep it findable" : "Make it yours"}</span></div>
           <div className="book-field-pair book-title-pair"><label className="book-field book-title-field">Title<input className="input" required maxLength={300} value={fields.title} onChange={(event) => set("title", event.target.value)} /></label>

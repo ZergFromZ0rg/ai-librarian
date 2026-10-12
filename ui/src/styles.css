@@ -5867,3 +5867,29 @@ main {
   .intake-file { position: static; grid-template-columns: 90px minmax(0, 1fr); align-items: start; }
 }
 
+/* ---- Check with AI: one book's page (AiCheck.jsx) ---------------------------- */
+.aicheck { grid-column: 1 / -1; display: grid; gap: 10px; }
+.aicheck > * { min-width: 0; }
+.aicheck .settings-note { margin: 0; }
+.aicheck-options { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 22px; }
+.aicheck-model { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.aicheck-model select { min-width: 190px; max-width: 100%; }
+.aicheck-run { display: flex; gap: 10px; }
+.aicheck-result { display: grid; gap: 10px; border-top: 1px solid var(--rule); padding-top: 12px; }
+.aicheck-summary { margin: 0; color: var(--ink-2); font-size: 13px; }
+.aicheck-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+.aicheck-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.aicheck-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 14px; border-top: 1px solid var(--rule); padding: 9px 0; }
+.aicheck-row:first-child { border-top: 0; }
+.aicheck-change { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; font-size: 13px; min-width: 0; }
+.aicheck-field { min-width: 52px; color: var(--muted); font-family: var(--mono); font-size: 11px; }
+.aicheck-text { color: var(--ink); overflow-wrap: anywhere; }
+.aicheck-why { grid-column: 1; color: var(--faint); font-size: 11.5px; }
+.aicheck-actions { grid-column: 2; grid-row: 1 / span 2; display: flex; align-items: center; gap: 12px; }
+.aicheck-applied { margin: 0; color: var(--muted); font-size: 12.5px; }
+.aicheck-notes { display: grid; gap: 4px; margin: 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
+@media (max-width: 600px) {
+  .aicheck-row { grid-template-columns: minmax(0, 1fr); }
+  .aicheck-actions { grid-column: 1; grid-row: auto; }
+}
+

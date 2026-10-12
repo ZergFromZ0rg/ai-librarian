@@ -4517,7 +4517,7 @@ AI_SORT_SOURCE = "AI sort"
 _AI_SORT_TOUCHED = (
     "title", "subtitle", "author", "subject", "description", "publisher", "language", "isbn_10", "isbn_13",
     "published_year", "page_count", "genres_json", "metadata_edited", "metadata_source", "metadata_source_id",
-    "shelf_suggested", "book_form", "kind_override", "doc_type", "ai_json",
+    "shelf_suggested", "book_form", "kind_override", "doc_type", "ai_json", "book_form_override", "doc_type_override",
 )
 _AI_SORT_LOCK = threading.RLock()
 _AI_SORT_CANCEL = threading.Event()
@@ -4560,8 +4560,10 @@ def _ai_sort_save() -> None:
             logger.warning("Could not save the AI sort report", exc_info=True)
 
 
-def _ai_sort_skip_reason(doc: dict, include_checked: bool) -> Optional[str]:
-    """Why this record is not sorted, or None when it should be."""
+def _ai_sort_skip_reason(doc: dict, include_checked: bool, allow_edited: bool = False) -> Optional[str]:
+    """Why this record is not sorted, or None when it should be. `allow_edited` is for a
+    check the reader asked for on one book: a library-wide sort never touches what the
+    reader edited, but a reader who clicks "check this book" has asked about it."""
     if doc.get("record_type") == "standalone":
         return "has no file"
     if doc.get("collection_id") == NOTES_COLLECTION_ID or (doc.get("kind_override") or doc.get("kind")) == "note":
@@ -4569,10 +4571,12 @@ def _ai_sort_skip_reason(doc: dict, include_checked: bool) -> Optional[str]:
     if doc.get("file_type") not in {"pdf", "epub"}:
         return "not a PDF or EPUB"
     kind = _library_kind(doc)
-    weak = bool(_json_of(doc.get("text_stats")).get("weak"))
+    # A weak verdict (only the page count decided it) is worth a second opinion, but not
+    # a kind the reader chose themselves.
+    weak = bool(_json_of(doc.get("text_stats")).get("weak")) and not doc.get("kind_override")
     if kind not in {"book", "pending"} and not weak:
         return "a paper or document"
-    if doc.get("metadata_edited") and not doc.get("metadata_source"):
+    if not allow_edited and doc.get("metadata_edited") and not doc.get("metadata_source"):
         return "edited by you"
     if not include_checked and (doc.get("metadata_source") or _json_of(doc.get("ai_json")).get("checked_at")):
         return "already checked"
@@ -4655,7 +4659,9 @@ def _ai_sort_spelling(ctx: dict, name: str, *, remember: bool) -> str:
     return chosen
 
 
-def _ai_sort_one(doc: dict, ctx: dict, report: dict) -> None:
+def _ai_sort_gather(doc: dict, ctx: dict, report: dict) -> dict:
+    """What the rules, the optional online catalogue and the local model say about one
+    book, without writing anything: {"quiet", "work", "plan", "checked", "title"}."""
     doc_id = doc["document_id"]
     texts = _ai_sort_texts(doc_id)
     try:
@@ -4714,7 +4720,13 @@ def _ai_sort_one(doc: dict, ctx: dict, report: dict) -> None:
                     report["notes"].append(f"The local model stopped answering ({exc}); the rest was checked without it.")
         plan = ai_sort.plan_book(ev, answer, use_catalogue=bool(candidates))
         plan.notes = [f"{title}: {note}" for note in plan.notes]
+    return {"quiet": quiet, "work": work, "plan": plan, "checked": checked, "title": title}
 
+
+def _ai_sort_one(doc: dict, ctx: dict, report: dict) -> None:
+    doc_id = doc["document_id"]
+    found = _ai_sort_gather(doc, ctx, report)
+    quiet, work, plan, checked, title = found["quiet"], found["work"], found["plan"], found["checked"], found["title"]
     applied: List[dict] = []
     for field in ("author", "title"):
         if field in quiet:
@@ -4890,8 +4902,11 @@ class AiSortIds(BaseModel):
     ids: List[str] = Field(max_length=500)
 
 
-def _ai_sort_apply_suggestions(ids: List[str]) -> dict:
-    report = _ai_sort_report()
+def _ai_sort_apply_suggestions(ids: List[str], report: Optional[dict] = None, save=None) -> dict:
+    """Apply the suggestions with these ids. By default those of the library-wide
+    report; one book's own check passes its report and how to keep it."""
+    report = _ai_sort_report() if report is None else report
+    save = save or _ai_sort_save
     done, failed = 0, []
     for suggestion in list(report["suggestions"]):
         if suggestion["id"] not in ids:
@@ -4908,7 +4923,7 @@ def _ai_sort_apply_suggestions(ids: List[str]) -> dict:
                 "changes": [{k: suggestion[k] for k in ("field", "before", "after", "source", "reason")}], "undo": undo,
             })
         done += 1
-    _ai_sort_save()
+    save()
     return {"applied": done, "failed": failed}
 
 
@@ -4928,8 +4943,9 @@ async def ai_sort_dismiss(body: AiSortIds):
     return {"dismissed": dismissed}
 
 
-def _ai_sort_undo() -> dict:
-    report = _ai_sort_report()
+def _ai_sort_undo(report: Optional[dict] = None, save=None) -> dict:
+    report = _ai_sort_report() if report is None else report
+    save = save or _ai_sort_save
     restored, skipped = 0, []
     for item in reversed(list(report["applied"])):
         if item.get("undone"):
@@ -4940,11 +4956,17 @@ def _ai_sort_undo() -> dict:
         except KeyError:
             skipped.append(f"{item['title']}: no longer in the library")
             continue
-        if any(current.get(key) != value for key, value in (undo.get("after") or {}).items()):
+        after = undo.get("after") or {}
+        # ai_json is bookkeeping (when a book was last checked), not something the reader
+        # changed: a later check rewrites it, and that must not block taking an earlier change back.
+        if any(current.get(key) != value for key, value in after.items() if key != "ai_json"):
             skipped.append(f"{item['title']}: changed since, so left as it is")
             continue
-        if undo.get("before"):
-            STORE.update(item["document_id"], undo["before"])
+        before = dict(undo.get("before") or {})
+        if current.get("ai_json") != after.get("ai_json"):
+            before.pop("ai_json", None)  # keep the newer record of the last check
+        if before:
+            STORE.update(item["document_id"], before)
         if undo.get("cover_added"):
             (THUMBNAILS_DIR / f"{item['document_id']}-custom.jpg").unlink(missing_ok=True)
         with _AI_SORT_LOCK:
@@ -4953,7 +4975,7 @@ def _ai_sort_undo() -> dict:
     with _AI_SORT_LOCK:
         if not report["applied"] or all(item.get("undone") for item in report["applied"]):
             report["state"] = "undone" if report["state"] in {"done", "cancelled", "interrupted"} else report["state"]
-    _ai_sort_save()
+    save()
     return {"restored": restored, "skipped": skipped}
 
 
@@ -4962,6 +4984,185 @@ async def ai_sort_undo():
     if _ai_sort_running():
         raise HTTPException(status_code=409, detail="wait for the sort to finish, or cancel it, before undoing")
     return await asyncio.to_thread(_ai_sort_undo)
+
+
+# --------------------------------------------------- AI check of one book --
+# The "Check with AI" button on a book's page. It is the AI sort's engine run on
+# that one book, but it only PROPOSES: the rules, the optional online catalogue and
+# the local model say what they would change, the reader sees each change with where
+# it came from, and nothing is written until they apply it (and they can undo it).
+# The result is kept per book, so it is still there when the page is opened again.
+
+AI_CHECK_DIR = DATA_DIR / "ai_check"
+_AI_CHECK_WHY = {
+    "has no file": "This record has no file to read.",
+    "a note": "Notes are not checked.",
+    "not a PDF or EPUB": "Only PDF and EPUB files can be checked.",
+    "a paper or document": "This is a paper or document; the check is for books.",
+}
+
+
+class AiCheckOptions(BaseModel):
+    online: bool = False
+    model: Optional[str] = Field(default=None, max_length=120)
+
+
+def _ai_check_reason(doc: dict) -> Optional[str]:
+    """Why this record cannot be checked, in words, or None when it can."""
+    reason = _ai_sort_skip_reason(doc, True, allow_edited=True)
+    if reason:
+        return _AI_CHECK_WHY.get(reason, f"Cannot be checked: {reason}.")
+    if doc.get("indexing_status") != "indexed":
+        return "Its text has not been read yet. Try again once indexing has finished."
+    return None
+
+
+def _ai_check_path(doc_id: str) -> Path:
+    return AI_CHECK_DIR / f"{validate_doc_id(doc_id)}.json"
+
+
+def _ai_check_load(doc_id: str) -> Optional[dict]:
+    try:
+        return {**_ai_sort_blank(), **read_json(_ai_check_path(doc_id))}
+    except (OSError, ValueError):
+        return None
+
+
+def _ai_check_saver(doc_id: str, report: dict):
+    def save() -> None:
+        with _AI_SORT_LOCK:
+            AI_CHECK_DIR.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(_ai_check_path(doc_id), report)
+
+    return save
+
+
+def _ai_check_public(report: Optional[dict]) -> Optional[dict]:
+    """The result as the page needs it; the undo data stays on the server."""
+    if report is None:
+        return None
+    shown = json.loads(json.dumps(report))
+    shown["applied"] = [{key: value for key, value in item.items() if key != "undo"} for item in shown["applied"]]
+    return shown
+
+
+def _ai_check_one(doc: dict, ctx: dict, report: dict) -> None:
+    """Gather what the rules, the catalogue and the model say about one book and record
+    each change as a suggestion. The only thing written is that the book was checked."""
+    doc_id = doc["document_id"]
+    found = _ai_sort_gather(doc, ctx, report)
+    quiet, work, plan, checked, title = found["quiet"], found["work"], found["plan"], found["checked"], found["title"]
+    wanted: dict = {}  # field -> suggestion, so a later source replaces an earlier one for the same field
+
+    def propose(field: str, before, after, source: str, reason: str, patch: dict) -> None:
+        wanted[field] = {
+            "id": uuid.uuid4().hex[:10], "document_id": doc_id, "title": title,
+            **_ai_sort_change(field, before, after, source, reason), "patch": patch,
+        }
+
+    for field in ("author", "title"):
+        if field in quiet and quiet[field] != doc.get(field):
+            propose(field, doc.get(field), quiet[field], "rules", "from the file name, the library or the title page", {field: quiet[field]})
+    for change in plan.changes:
+        if change.field in {"author", "title"}:
+            after = _ai_sort_spelling(ctx, change.after, remember=False) if change.field == "author" else change.after
+            if after != doc.get(change.field):
+                propose(change.field, doc.get(change.field), after, change.source, change.reason, {change.field: after})
+        elif change.field == "kind":
+            propose("kind", change.before, change.after, change.source, change.reason, {"kind": change.after})
+    if plan.ai.get("fiction") is not None:
+        # The model's verdict on fiction is only a way to a book's form: propose that, not the verdict.
+        current = doc.get("book_form_override") or doc.get("book_form")
+        form = _form_fields({**work, "ai_json": json.dumps({**_json_of(doc.get("ai_json")), "fiction": plan.ai["fiction"]})}).get("book_form")
+        if form and form != current:
+            propose("form", current, form, "model", "the text alone could not tell", {"form": form})
+    if plan.match:
+        details = _ai_sort_match_fields(work, plan.match)
+        if details:
+            propose("details", None, ", ".join(sorted(details)), _provider_label(plan.match["id"]), "filled in from the catalogue match", details)
+    report["suggestions"] = list(wanted.values())
+    report["notes"].extend(plan.notes)
+    if not wanted:
+        report["unchanged"] += 1
+    if checked:
+        STORE.update(doc_id, {"ai_json": json.dumps({**_json_of(doc.get("ai_json")), "checked_at": utc_now(), "model": ctx["model"]})})
+
+
+def _run_ai_check(doc: dict, model: Optional[str], online: bool) -> dict:
+    """Check one book (blocking: the model can take a minute) and keep the result."""
+    doc_id = doc["document_id"]
+    known = [shelves.normalize_author(item["author"]) or item["author"] for item in list_metadata() if item.get("author")]
+    ctx = {"online": online, "model": model, "known": known, "spellings": shelves.canonical_authors(known), "model_errors": 0, "lookup_errors": 0}
+    previous = _ai_check_load(doc_id)
+    report = {
+        **_ai_sort_blank(), "state": "done", "run_id": uuid.uuid4().hex[:10], "started_at": utc_now(), "model": model,
+        "options": {"online": online, "model": model}, "total": 1, "done": 1,
+        # Earlier applied changes stay undoable after a new check.
+        "applied": list(previous["applied"]) if previous else [],
+    }
+    _ai_check_one(doc, ctx, report)
+    if report["stats"]["model_failures"]:
+        report["notes"].append("The local model did not answer; nothing could be confirmed by it. Try again, or pick another model.")
+    if report["stats"]["lookup_failures"]:
+        report["notes"].append("The online catalogue could not be reached, so no match was compared.")
+    report["finished_at"] = utc_now()
+    _ai_check_saver(doc_id, report)()
+    return report
+
+
+@app.get("/documents/{doc_id}/ai-check")
+async def ai_check_status(doc_id: str):
+    doc = await asyncio.to_thread(read_metadata, doc_id)
+    return {
+        "reason": await asyncio.to_thread(_ai_check_reason, doc),
+        "result": _ai_check_public(await asyncio.to_thread(_ai_check_load, doc_id)),
+    }
+
+
+@app.post("/documents/{doc_id}/ai-check")
+async def ai_check_run(doc_id: str, body: AiCheckOptions):
+    doc = await asyncio.to_thread(read_metadata, doc_id)
+    reason = await asyncio.to_thread(_ai_check_reason, doc)
+    if reason:
+        raise HTTPException(status_code=422, detail=reason)
+    models = await asyncio.to_thread(ai_sort.list_local_models)
+    model = ai_sort.pick_model(body.model, models)
+    online = body.online and not catalogue._offline()
+    if not model and not online:
+        raise HTTPException(status_code=422, detail="No local model is available and the online catalogue is off, so there is nothing to ask.")
+    report = await asyncio.to_thread(_run_ai_check, doc, model, online)
+    return {"reason": None, "result": _ai_check_public(report)}
+
+
+def _ai_check_act(doc_id: str, action) -> dict:
+    """Run apply, dismiss or undo on this book's kept result and return it with the book."""
+    with _AI_SORT_LOCK:
+        report = _ai_check_load(doc_id)
+        if report is None:
+            raise HTTPException(status_code=404, detail="this book has not been checked")
+        outcome = action(report, _ai_check_saver(doc_id, report))
+    return {**outcome, "result": _ai_check_public(report), "document": read_metadata(doc_id)}
+
+
+@app.post("/documents/{doc_id}/ai-check/apply")
+async def ai_check_apply(doc_id: str, body: AiSortIds):
+    return await asyncio.to_thread(_ai_check_act, doc_id, lambda report, save: _ai_sort_apply_suggestions(body.ids, report, save))
+
+
+@app.post("/documents/{doc_id}/ai-check/dismiss")
+async def ai_check_dismiss(doc_id: str, body: AiSortIds):
+    def dismiss(report: dict, save) -> dict:
+        before = len(report["suggestions"])
+        report["suggestions"] = [item for item in report["suggestions"] if item["id"] not in body.ids]
+        save()
+        return {"dismissed": before - len(report["suggestions"])}
+
+    return await asyncio.to_thread(_ai_check_act, doc_id, dismiss)
+
+
+@app.post("/documents/{doc_id}/ai-check/undo")
+async def ai_check_undo(doc_id: str):
+    return await asyncio.to_thread(_ai_check_act, doc_id, lambda report, save: _ai_sort_undo(report, save))
 
 
 # ------------------------------------------------------ export and import --
@@ -5335,6 +5536,7 @@ def _delete_document_blocking(metadata: dict) -> None:
         artifacts = [EXTRACTED_DIR / f"{doc_id}.json", CHUNKS_DIR / f"{doc_id}.json"]
         artifacts.extend(THUMBNAILS_DIR.glob(f"{doc_id}-*.jpg"))
         artifacts.append(annotated_copy_path(doc_id))
+        artifacts.append(_ai_check_path(doc_id))  # the kept result of a "Check with AI"
         # Only remove the PDF itself when we own it (an upload). A
         # referenced library file is left exactly where the reader put it.
         if metadata.get("record_type") != "standalone" and not (metadata.get("source_path") or "").strip():
