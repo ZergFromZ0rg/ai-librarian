@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import ActionProgress from "./ActionProgress.jsx";
-import AiSortPanel from "./AiSortPanel.jsx";
 import Cover from "./Cover.jsx";
 import { starText } from "./ratings.js";
 import { CoverFlags, MarkControls } from "./DocMarks.jsx";
@@ -13,9 +12,7 @@ import OwnedBooks from "./OwnedBooks.jsx";
 import ShelfView from "./ShelfView.jsx";
 import VocabularyPanel from "./VocabularyPanel.jsx";
 import { ingestActionProgress, isActiveIngestJob, reindexActionProgress } from "./actionProgress.js";
-import { sortActionProgress } from "./aiSort.js";
 import { displayTitle, loadStored, saveStored } from "./storage.js";
-import useAiSort from "./useAiSort.js";
 
 const VIEW_KEY = "ai-librarian.stacks.view";
 
@@ -581,7 +578,7 @@ function Catalogue({ apiBase, documents, reindexing, reindexProgress, onReindex,
 // everything already processed — plus the ways in (upload,
 // rescan, import) and the progress of whatever is being processed.
 export default function Stacks(props) {
-  const { apiBase, documents, collections: allCollections = [], onUpload, uploading, onRescan, onCreateCollection, onUpdateCollection, onDeleteCollection, onImported, onOpenDocument, onScopeShelf, scanStarting, collectionBusy, notice, job, sectionRef } = props;
+  const { apiBase, documents, collections: allCollections = [], onUpload, uploading, intakeCount = 0, onReviewUploads, onRescan, onCreateCollection, onUpdateCollection, onDeleteCollection, onImported, onOpenDocument, onScopeShelf, scanStarting, collectionBusy, notice, job, sectionRef } = props;
   // Built-in libraries (Notes) have no folder to scan, rename or remove.
   const collections = useMemo(() => allCollections.filter((collection) => !collection.builtin), [allCollections]);
   const noteCount = allCollections.find((collection) => collection.builtin)?.document_count || 0;
@@ -589,8 +586,6 @@ export default function Stacks(props) {
   const [browsePreset, setBrowsePreset] = useState(null);
   const [view, setView] = useState(() => (loadStored(VIEW_KEY, "grid") === "list" ? "list" : "grid"));
   const [activeCollectionId, setActiveCollectionId] = useState("");
-  const [sortOpen, setSortOpen] = useState(false);
-  const sort = useAiSort(apiBase, onImported);
   const fileInput = useRef(null);
   const sourceDocuments = useMemo(
     () => documents.filter((document) => document.record_type !== "standalone"),
@@ -656,24 +651,16 @@ export default function Stacks(props) {
               {scanStarting ? "Starting scan…" : "Scan now"}
             </button>
           )}
-          {sort.running && !sortOpen && <ActionProgress progress={sortActionProgress(sort.report)} compact />}
-          <button
-            type="button"
-            className="text-button"
-            aria-expanded={sortOpen}
-            aria-controls="ai-sort-panel"
-            onClick={() => setSortOpen((open) => !open)}
-            title="Fix titles and authors across the library with the rules, the online catalogue and your own model."
-          >
-            AI sort files
-          </button>
+          {intakeCount > 0 && (
+            <button type="button" className="button" onClick={onReviewUploads} title="Uploads that have been read and are waiting for you to check and save them">
+              Review uploads <span className="tab-count">{intakeCount}</span>
+            </button>
+          )}
           <button type="button" className="button primary" disabled={uploading} onClick={() => fileInput.current?.click()}>
             {uploading ? "Uploading…" : "Upload files"}
           </button>
         </div>
       </header>
-
-      {sortOpen && <AiSortPanel apiBase={apiBase} sort={sort} onOpenDocument={onOpenDocument} onClose={() => setSortOpen(false)} />}
 
       <CollectionBar
         collections={collections}

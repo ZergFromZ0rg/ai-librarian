@@ -12,6 +12,7 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import tempfile
 import threading
 import time
@@ -37,6 +38,7 @@ import annotations as reader_annotations
 import catalogue
 import doc_kind
 import generation
+import intake
 import portability
 import shelves
 from chunking import (
@@ -138,6 +140,9 @@ JOBS_DIR = DATA_DIR / "jobs"
 # Cached first-page covers for the UI's shelves (see /documents/{id}/thumbnail).
 # Pure derived data: safe to delete, rebuilt on the next request.
 THUMBNAILS_DIR = DATA_DIR / "thumbnails"
+# Uploads waiting for the reader to check them (see "Intake" below). Not part of
+# the library: nothing here is indexed, searched, shelved or exported until saved.
+INTAKE_DIR = DATA_DIR / "intake"
 LOGS_DIR = DATA_DIR / "logs"
 INGEST_ROOT = Path(os.environ.get("INGEST_ROOT", str(DATA_DIR / "inbox"))).resolve()
 # The mount's path on the HOST, for display only -- never used for filesystem
@@ -267,7 +272,7 @@ DOC_ID_PATTERN = re.compile(r"^[a-f0-9]{12}$")
 PIPELINE_VERSION = 13  # spreadsheet/CSV rows as labelled records, PowerPoint speaker notes
 
 for directory in (
-    DOCUMENTS_DIR, METADATA_DIR, EXTRACTED_DIR, CHUNKS_DIR, JOBS_DIR, LOGS_DIR, INGEST_ROOT
+    DOCUMENTS_DIR, METADATA_DIR, EXTRACTED_DIR, CHUNKS_DIR, JOBS_DIR, LOGS_DIR, INGEST_ROOT, INTAKE_DIR
 ):
     directory.mkdir(parents=True, exist_ok=True)
 
@@ -2925,6 +2930,371 @@ async def upload_document(file: UploadFile = File(...)):
         ) from exc
     enqueue_index(IndexTask(doc_id))
     return JSONResponse(metadata, status_code=201)
+
+
+# ------------------------------------------------------------------ intake --
+# An upload does not go straight into the library. It is staged, read, and
+# classified (format, type, shelf, title, author, year ...); the reader checks
+# the result on a review screen and only then saves it, which creates the real
+# record and queues indexing. Staged files live in INTAKE_DIR as <id>.<ext> beside
+# <id>.json (the proposal); nothing else in the app ever lists them.
+
+INTAKE_MAX_PAGES = 2500  # pages read for the first look; the indexer reads them all later
+INTAKE_ORPHAN_SECONDS = 3600  # a staged file with no proposal beside it is leftover after this long
+_INTAKE_ID = re.compile(r"^[a-f0-9]{12}$")
+
+
+def sweep_intake() -> int:
+    """Remove what an interrupted upload left in INTAKE_DIR: partial downloads, and
+    staged files whose proposal was never written. A waiting upload (a file with its
+    proposal) is never touched; the reader decides what happens to those."""
+    removed = 0
+    now = time.time()
+    for path in INTAKE_DIR.iterdir():
+        try:
+            if path.name.startswith(".") and path.name.endswith(".uploading"):
+                stale = now - path.stat().st_mtime > INTAKE_ORPHAN_SECONDS
+            elif path.suffix != ".json" and not (INTAKE_DIR / f"{path.stem}.json").exists():
+                stale = now - path.stat().st_mtime > INTAKE_ORPHAN_SECONDS
+            else:
+                stale = False
+            if stale:
+                path.unlink(missing_ok=True)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+sweep_intake()
+
+
+def _intake_item_path(item_id: str) -> Path:
+    if not _INTAKE_ID.fullmatch(item_id):
+        raise HTTPException(status_code=404, detail="upload not found")
+    return INTAKE_DIR / f"{item_id}.json"
+
+
+def _intake_read(item_id: str) -> dict:
+    path = _intake_item_path(item_id)
+    try:
+        return read_json(path)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="upload not found") from exc
+
+
+def _intake_items() -> List[dict]:
+    items = []
+    for path in sorted(INTAKE_DIR.glob("*.json")):
+        try:
+            item = read_json(path)
+        except (OSError, ValueError):
+            continue
+        if item.get("id") and (INTAKE_DIR / item.get("stored_filename", "")).exists():
+            items.append(item)
+    return sorted(items, key=lambda item: item.get("created_at") or "")
+
+
+def _intake_discard_files(item: dict) -> None:
+    (INTAKE_DIR / item["stored_filename"]).unlink(missing_ok=True)
+    (INTAKE_DIR / f"{item['id']}.json").unlink(missing_ok=True)
+
+
+def _light_pages(path: Path, file_type: str) -> tuple[List[str], int]:
+    """The text of each page, read quickly for a first look: no layout model and no
+    OCR (the indexer does the careful reading once the reader saves). Also the
+    file's real page count, which can exceed the pages read."""
+    if file_type == "pdf":
+        with pymupdf.open(str(path)) as document:
+            if document.needs_pass:
+                raise ValueError("password-protected PDFs are not supported")
+            total = document.page_count
+            return [document[index].get_text("text") for index in range(min(total, INTAKE_MAX_PAGES))], total
+    pages, _ = extract_source_pages(path, ocr_mode="off")
+    texts = [page.get("text") or "" for page in pages]
+    return texts[:INTAKE_MAX_PAGES], len(pages)
+
+
+def _intake_subject(texts: List[str]) -> Optional[str]:
+    """The shelf subject (Philosophy, Physics ...) the opening text is closest to."""
+    passages = []
+    for text in texts[:60]:
+        for paragraph in re.split(r"\n{2,}", text):
+            if len(_WORDISH.findall(paragraph)) >= 25:
+                passages.append(paragraph.strip()[:1200])
+    passages = sorted(passages, key=lambda item: -len(_WORDISH.findall(item)))[:8]
+    if not passages:
+        return None
+    return shelves.classify_subject(shelves.mean_vector(embed_texts(passages)), _subject_vectors())
+
+
+def _author_source(author: Optional[str], filename: str, embedded: Optional[str], texts: List[str]) -> Optional[str]:
+    """Where an author came from, for the reader to judge it by."""
+    if not author:
+        return None
+    surname = author.split()[-1].casefold()
+    named = shelves.author_from_filename(filename)
+    if named and named.split()[-1].casefold() == surname:
+        return "file name"
+    metadata = shelves.normalize_author(embedded)
+    if metadata and metadata.split()[-1].casefold() == surname:
+        return "file properties"
+    if shelves.author_from_text(texts[:6]):
+        return "title page"
+    return "guessed"
+
+
+def _analyze_intake(path: Path, filename: str, file_type: str) -> dict:
+    """Everything the rules can say about a staged file: {"proposal", "sources",
+    "notes", "pages"}. Raises when the file cannot be read at all."""
+    notes: List[str] = []
+    texts, total = _light_pages(path, file_type)
+    readable = [text for text in texts if len(text.strip()) >= 25]
+    if file_type == "pdf" and total and len(readable) < max(1, total // 5):
+        notes.append("This looks like a scan with little or no text layer. After you save it, its text is read with OCR; a large scan waits for your approval first.")
+    elif not readable:
+        notes.append("No readable text was found in this file.")
+    if total > len(texts):
+        notes.append(f"Only the first {len(texts):,} of {total:,} pages were read for this first look.")
+
+    embedded = intake.embedded_details(path, file_type)
+    author = shelves.pick_author(embedded.get("author"), filename, lambda: texts[:6], _known_authors())
+    stem = Path(filename).stem
+    if file_type == "epub" and embedded.get("title"):
+        title, title_source = embedded["title"], "file properties"
+    elif not intake.junk_stem(stem):
+        title, title_source = title_from_filename(filename, author), "file name"
+    elif embedded.get("title"):
+        title, title_source = embedded["title"], "file properties"
+    else:
+        title, title_source = title_from_filename(filename, author) or stem, "file name"
+
+    genres = embedded.get("genres") or []
+    authors = max(shelves.author_count(embedded.get("author")), shelves.credit_count(filename))
+    verdict = doc_kind.classify(
+        texts, total, file_type=file_type, author=author or "", authors=authors, title=title, subject=None, genres=genres,
+    )
+    try:
+        subject = _intake_subject(texts) if readable else None
+    except Exception:
+        logger.warning("Could not match %s to a subject", filename, exc_info=True)
+        subject = None
+    pseudo = {
+        "kind": verdict.kind, "title": title, "subtitle": None, "subject": subject, "genres_json": json.dumps(genres),
+        "prose_score": verdict.prose_score, "text_stats": json.dumps({"words": verdict.words, "past": verdict.past}),
+        "page_count": None, "pages": total, "author_count": verdict.authors, "author": author,
+    }
+    form = _form_fields(pseudo).get("book_form")
+    doc_type = None if verdict.kind == "book" else classify_document(file_type, texts[:3], total, verdict.kind)
+    type_value = intake.type_of(verdict.kind, form, doc_type)
+
+    details: dict = {}
+    sources: dict = {"title": title_source, "type": "the text of the file" if readable else "the file format"}
+    if author:
+        sources["author"] = _author_source(author, filename, embedded.get("author"), texts)
+    if subject:
+        sources["subject"] = "the opening text"
+    for key in ("publisher", "published_year", "language", "isbn_10", "isbn_13", "description"):
+        if embedded.get(key):
+            details[key] = embedded[key]
+            sources[key] = "file properties"
+    if verdict.kind in {"book", "paper"}:
+        for key, value in intake.front_matter_details(texts).items():
+            if key not in details:
+                details[key] = value
+                sources[key] = "copyright page"
+    if "language" not in details and verdict.english:
+        details["language"], sources["language"] = "en", "the text of the file"
+    proposal = {
+        "title": title, "subtitle": "", "author": author or "", "subject": subject or "", "genres": genres,
+        "description": details.get("description", ""), "publisher": details.get("publisher", ""),
+        "published_year": details.get("published_year"), "language": details.get("language", ""),
+        "isbn_10": details.get("isbn_10", ""), "isbn_13": details.get("isbn_13", ""), "page_count": None,
+        "type": type_value, "shelf": _shelf_suggestion(verdict.kind, doc_type, subject, author),
+    }
+    return {"proposal": proposal, "sources": sources, "notes": notes, "pages": total}
+
+
+def _stage_upload(item_id: str, staged: Path, filename: str, file_type: str, sha256: str, size: int, format_note: Optional[str]) -> dict:
+    """Read a staged file and keep what was found beside it (blocking)."""
+    item = {
+        "id": item_id, "filename": filename, "stored_filename": staged.name, "format": file_type,
+        "format_label": intake.FORMAT_LABELS.get(file_type, file_type), "format_note": format_note,
+        "size": size, "sha256": sha256, "created_at": utc_now(), "state": "ready", "error": None,
+        "has_cover": file_type in {"pdf", "epub"}, "pages": 0, "notes": [], "sources": {}, "proposal": None,
+    }
+    try:
+        item.update(_analyze_intake(staged, filename, file_type))
+    except Exception as exc:
+        logger.warning("Could not read the upload %s", filename, exc_info=True)
+        author = shelves.pick_author(None, filename, known_authors=_known_authors())
+        item.update(
+            state="unreadable", error=str(exc)[:300] or exc.__class__.__name__,
+            proposal={
+                "title": title_from_filename(filename, author), "subtitle": "", "author": author or "", "subject": "", "genres": [],
+                "description": "", "publisher": "", "published_year": None, "language": "", "isbn_10": "", "isbn_13": "",
+                "page_count": None, "type": "book" if file_type in {"pdf", "epub"} else "other",
+                "shelf": _shelf_suggestion("book" if file_type in {"pdf", "epub"} else "document", None, None, author),
+            },
+            sources={"title": "file name"},
+            notes=["This file could not be read, so these details come from its name alone. It will probably fail to index; you can still save it or discard it."],
+        )
+    atomic_write_json(INTAKE_DIR / f"{item_id}.json", item)
+    return item
+
+
+@app.post("/intake")
+async def intake_upload(file: UploadFile = File(...)):
+    """Stage one uploaded file: store it, work out what it is, and return the
+    proposal for the reader to check. Nothing joins the library yet."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="missing filename")
+    filename = Path(file.filename).name
+    suffix = Path(filename).suffix.lower()
+    if suffix not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="supported files are PDF, EPUB, Word, Excel, PowerPoint, text, Markdown, and CSV")
+
+    item_id = generate_id()
+    temporary = INTAKE_DIR / f".{item_id}.uploading"
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with temporary.open("wb") as destination:
+            while chunk := await file.read(1024 * 1024):
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail=f"file exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit")
+                digest.update(chunk)
+                destination.write(chunk)
+        if total == 0:
+            raise HTTPException(status_code=400, detail="uploaded file is empty")
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
+
+    sha256 = digest.hexdigest()
+    duplicate = await asyncio.to_thread(find_duplicate, sha256)
+    if duplicate:
+        temporary.unlink(missing_ok=True)
+        return JSONResponse({"duplicate": {"document_id": duplicate["document_id"], "title": duplicate.get("title") or duplicate.get("filename")}}, status_code=200)
+    waiting = next((item for item in await asyncio.to_thread(_intake_items) if item.get("sha256") == sha256), None)
+    if waiting:
+        temporary.unlink(missing_ok=True)
+        return JSONResponse({"duplicate": {"intake_id": waiting["id"], "title": waiting["proposal"]["title"]}}, status_code=200)
+
+    # The content decides how the file is read, whatever its extension says.
+    named_type = file_type_for_path(filename) or "text"
+    file_type, format_note = await asyncio.to_thread(intake.resolve_format, named_type, temporary)
+    if file_type != named_type:
+        filename = Path(filename).with_suffix(intake.SUFFIXES[file_type]).name
+    staged = INTAKE_DIR / f"{item_id}{intake.SUFFIXES.get(file_type, suffix)}"
+    temporary.replace(staged)
+    try:
+        item = await asyncio.to_thread(_stage_upload, item_id, staged, filename, file_type, sha256, total, format_note)
+    except Exception as exc:
+        staged.unlink(missing_ok=True)
+        raise _sanitized_http_error(422, "could not read the upload", exc, log_context=filename) from exc
+    return JSONResponse(item, status_code=201)
+
+
+@app.get("/intake/options")
+async def intake_options():
+    """The choices the review screen offers: the types, and the shelves in use."""
+
+    def build() -> dict:
+        shelf_paths = set(shelves.TOP_LEVEL.values()) | set(shelves.DOCUMENT_TOP_LEVEL.values())
+        for doc in list_metadata():
+            shelf = shelves.effective_shelf(doc)
+            if shelf and doc.get("collection_id") != NOTES_COLLECTION_ID:
+                parts = shelf.split(shelves.SEPARATOR)
+                shelf_paths.update(shelves.SEPARATOR.join(parts[: index + 1]) for index in range(len(parts)))
+        shelf_paths.discard("Notes")
+        return {"types": intake.type_options(), "shelves": sorted(shelf_paths, key=str.casefold)}
+
+    return await asyncio.to_thread(build)
+
+
+@app.get("/intake")
+async def intake_list():
+    return {"items": await asyncio.to_thread(_intake_items)}
+
+
+@app.get("/intake/{item_id}")
+async def intake_get(item_id: str):
+    return await asyncio.to_thread(_intake_read, item_id)
+
+
+@app.get("/intake/{item_id}/cover")
+async def intake_cover(item_id: str, w: int = Query(default=320, ge=80, le=640)):
+    """The first page of a staged PDF or EPUB, for the review screen."""
+    item = await asyncio.to_thread(_intake_read, item_id)
+    staged = INTAKE_DIR / item["stored_filename"]
+    if item["format"] not in {"pdf", "epub"} or not staged.exists():
+        raise HTTPException(status_code=404, detail="no cover for this file")
+
+    def render() -> bytes:
+        with pymupdf.open(staged) as source:
+            if source.page_count < 1:
+                raise HTTPException(status_code=404, detail="document has no pages")
+            page = source[0]
+            scale = w / max(page.rect.width, 1)
+            return page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False).tobytes("jpeg", jpg_quality=82)
+
+    try:
+        image = await asyncio.to_thread(render)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _sanitized_http_error(500, "could not render the cover", exc, log_context=item_id) from exc
+    return Response(content=image, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+
+
+class IntakeSave(DocumentPatch):
+    """The reviewed details of a staged upload: a patch, plus the chosen type."""
+
+    title: str = Field(min_length=1, max_length=300)
+    type: str = Field(pattern=r"^(?:novel|novella|short_story|collection|nonfiction|book|paper|report|manual|slides|data|writing|legal|other)$")
+
+
+@app.post("/intake/{item_id}/save", status_code=201)
+async def intake_save(item_id: str, body: IntakeSave):
+    """Add a reviewed upload to the library and queue it for indexing. What the
+    reader confirmed counts as theirs: later rules do not overwrite it."""
+    item = await asyncio.to_thread(_intake_read, item_id)
+    staged = INTAKE_DIR / item["stored_filename"]
+    if not staged.exists():
+        raise HTTPException(status_code=410, detail="the uploaded file is gone; upload it again")
+    if await asyncio.to_thread(find_duplicate, item["sha256"]):
+        raise HTTPException(status_code=409, detail="this file is already in the library")
+    fields = body.model_dump(exclude={"type"}, exclude_unset=True)
+    fields.update(intake.type_patch(body.type))
+    patch = DocumentPatch(**fields)
+
+    doc_id = generate_id()
+    destination = DOCUMENTS_DIR / f"{doc_id}{staged.suffix}"
+    # Copy, then remove the staged file only once the record exists, so a failure
+    # anywhere leaves the upload waiting for review rather than lost.
+    await asyncio.to_thread(shutil.copy2, staged, destination)
+    try:
+        await asyncio.to_thread(create_document, destination, item["filename"], item["sha256"], doc_id=doc_id)
+        await patch_document(doc_id, patch)
+    except Exception:
+        STORE.delete(doc_id)
+        destination.unlink(missing_ok=True)
+        raise
+    enqueue_index(IndexTask(doc_id))
+    await asyncio.to_thread(_intake_discard_files, item)
+    return await asyncio.to_thread(read_metadata, doc_id)
+
+
+@app.delete("/intake/{item_id}")
+async def intake_discard(item_id: str):
+    item = await asyncio.to_thread(_intake_read, item_id)
+    await asyncio.to_thread(_intake_discard_files, item)
+    return {"ok": True}
+
 
 
 @app.get("/documents/{doc_id}")

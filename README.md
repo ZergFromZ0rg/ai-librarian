@@ -11,7 +11,7 @@ No hosted AI API is required for extraction or search: once the container images
 
 ## What it does
 
-- Upload one or more PDFs from the browser.
+- Upload files from the browser (PDF, EPUB, Word, Excel, PowerPoint, text, Markdown, CSV) and check what was found in each before it joins the library — see [Adding files you upload](#adding-files-you-upload).
 - Point at a folder of PDFs already on disk (any nesting, any size) and have it auto-indexed in place — no copying, no manual step. Type or paste the exact folder path into the website itself (Browse → **Library path**) to pick it, even when the underlying mount is broader.
 - Track each document through `queued`, `indexing`, `indexed`, or `error` states.
 - Retry failed indexing jobs and recover queued work after a restart.
@@ -216,7 +216,20 @@ The Library panel has two tabs:
 - **Browse** walks the mount like Finder or Explorer — sub-folders (with a PDF count) and PDF files, with a breadcrumb to navigate back up, even past the designated library folder if `LIBRARY_PATH` was mounted broad. **Attach main library folder** at the top imports everything under the currently designated folder in one click — useful to skip ahead of the next scheduled scan. Per-folder, **Set as library folder** narrows the designation to right there (and imports it immediately); **Import all** imports a folder without changing the designation; a single file gets its own **Import**. Removing a document from **Indexed** un-indexes it but leaves the original file untouched.
 - **Indexed** is the list of documents currently in the index, with their status, page/chunk counts, retry, and remove.
 
-The small **or upload a PDF file** link (in the Browse tab) still copies a file onto the server, into `data/app/documents/` — use it for the odd PDF that isn't under the mount at all.
+**Upload files** (or dropping files on the page) copies a file onto the server, into `data/app/documents/` — use it for anything that isn't under the mount. It goes through the review step below first.
+
+### Adding files you upload
+
+An upload is not added to the library straight away. It is staged in `data/app/intake/` (not indexed, searched or shelved) and read quickly, then a review screen shows what was found:
+
+- **Format** — from the file's content, not just its extension (a PDF saved as `.docx` is read as a PDF).
+- **Type** — novel, novella, short story, collection, non-fiction, paper, report, manual, slides, data, writing, legal or other, from the rules in `doc_kind.py` and `doc_types.py`.
+- **Folder** — the virtual shelf it will sit on (for example `Books/Philosophy/Albert Camus`). Nothing on disk is reorganised; the library mount is read-only.
+- **Title, author, year, publisher, ISBN, language, subject** — from the file name, the file's own properties (an EPUB's package, a PDF's or Office file's properties) and the copyright page. Each field says where its value was found; an empty one was not found.
+
+Correct anything that is wrong, then **Save to library** (or **Save all**). Saving creates the record, marks the details as yours so later rules never overwrite them, and queues indexing: extraction, chunking, embedding, and reading any highlights or markup already in a PDF. **Discard** deletes the staged file. Uploads waiting for review survive a reload; the Library header shows **Review uploads** while any are waiting. Files that could not be read are offered from their name alone and are skipped by **Save all**.
+
+The API is `POST /intake` (stage a file), `GET /intake`, `GET /intake/{id}`, `GET /intake/{id}/cover`, `POST /intake/{id}/save` and `DELETE /intake/{id}`. `POST /documents` still adds a file directly, with no review.
 
 Absolute paths and paths outside `/library` are rejected. The folder structure you already have is preserved as-is — nested sub-folders are walked recursively, but the app does not reorganize or rename anything on disk.
 

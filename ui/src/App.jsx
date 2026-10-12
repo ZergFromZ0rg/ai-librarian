@@ -7,8 +7,10 @@ import DocumentsLibrary from "./DocumentsLibrary.jsx";
 import Settings from "./Settings.jsx";
 import SourceViewer from "./SourceViewer.jsx";
 import BookPage from "./BookPage.jsx";
+import IntakeReview from "./IntakeReview.jsx";
 import Stacks from "./Stacks.jsx";
 import { TERMINAL_JOB_STATES } from "./actionProgress.js";
+import { SUPPORTED_UPLOADS, stageSummary } from "./intake.js";
 import {
   loadInquiries,
   loadStored,
@@ -16,6 +18,7 @@ import {
   saveStored,
 } from "./storage.js";
 import useAsk from "./useAsk.js";
+import useIntake from "./useIntake.js";
 
 // `??`, not `||`: the production Docker build sets VITE_API_BASE="" on purpose
 // (document-service serves the UI and the API from the same origin, so no
@@ -122,6 +125,8 @@ export default function App() {
   const [job, setJob] = useState(null);
   const [notice, setNotice] = useState({ text: "", tone: "neutral" });
   const [uploading, setUploading] = useState(false);
+  const [intakeOpen, setIntakeOpen] = useState(false);
+  const [intakeStartId, setIntakeStartId] = useState(null);
   const [scanStarting, setScanStarting] = useState(false);
   const [collectionBusy, setCollectionBusy] = useState(false);
   const [reindexProgress, setReindexProgress] = useState(null);
@@ -285,6 +290,9 @@ export default function App() {
       return null;
     }
   }, [api, say]);
+
+  // Uploads wait for review (type, folder, title, author ...) before they join the library.
+  const intake = useIntake(API_BASE, refreshDocuments);
 
   useEffect(() => saveStored(LIBRARY_KEY, libraryId), [libraryId]);
   // A removed library (or one from another server) falls back to "all".
@@ -582,21 +590,20 @@ export default function App() {
     else openBook(doc.document_id, { page: page || 1 });
   }, []);
 
+  // An upload is read and classified first, then shown for review; nothing joins
+  // the library until the reader saves it (see IntakeReview).
   async function uploadFiles(fileList) {
     const files = Array.from(fileList || []);
     if (!files.length) return;
     setUploading(true);
-    let completed = 0;
     try {
-      for (const file of files) {
-        say(`Uploading ${file.name}… (${completed + 1}/${files.length})`);
-        const form = new FormData();
-        form.append("file", file, file.name);
-        const result = await api("/documents", { method: "POST", body: form });
-        completed += 1;
-        say(result.deduplicated ? `${file.name} was already in the library.` : `${file.name} is queued for indexing.`);
+      const outcome = await intake.stage(files, (name, index) => say(`Reading ${name}… (${index}/${files.length})`));
+      const failed = outcome.failures.length > 0 && !outcome.staged && !outcome.duplicates.length;
+      say(stageSummary(outcome), failed ? "error" : "neutral");
+      if (outcome.staged) {
+        setIntakeStartId(outcome.firstId);
+        setIntakeOpen(true);
       }
-      await refreshDocuments();
     } catch (error) {
       say(error.message, "error");
     } finally {
@@ -631,7 +638,7 @@ export default function App() {
     // browser — anything from the desktop can land here.
     const dropped = Array.from(event.dataTransfer.files || []);
     if (!dropped.length) return;
-    const supported = dropped.filter((file) => /\.(pdf|epub|docx|xlsx|pptx|txt|md|csv)$/i.test(file.name));
+    const supported = dropped.filter((file) => SUPPORTED_UPLOADS.test(file.name));
     if (supported.length < dropped.length) {
       say(
         dropped.length === 1 ? "That file type is not supported." : `Skipped ${dropped.length - supported.length} unsupported file(s).`,
@@ -914,7 +921,7 @@ export default function App() {
   const reindexing = Boolean(reindexProgress && reindexProgress.phase !== "done");
 
   return (
-    <div inert={Boolean(bookId)} className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}`} onDragEnter={handleDragEnter} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+    <div inert={Boolean(bookId) || intakeOpen} className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}`} onDragEnter={handleDragEnter} onDragLeave={handleDragLeave} onDrop={handleDrop}>
       <aside className="app-sidebar" aria-label="Workspace navigation">
         <div className="sidebar-head">
           <button type="button" className="sidebar-brand" onClick={() => { setSurface("workspace"); window.scrollTo({ top: 0 }); }} title="Search and Ask">
@@ -1122,6 +1129,8 @@ export default function App() {
               onScopeShelf={scopeToShelf}
               onUpload={uploadFiles}
               uploading={uploading}
+              intakeCount={intake.items.length}
+              onReviewUploads={() => { setIntakeStartId(null); setIntakeOpen(true); }}
               onRescan={rescanLibraryFolder}
               onCreateCollection={createCollection}
               onUpdateCollection={updateCollection}
@@ -1142,6 +1151,17 @@ export default function App() {
       </main>
 
 
+      {intakeOpen && (
+        <IntakeReview
+          apiBase={API_BASE}
+          intake={intake}
+          startId={intakeStartId}
+          uploading={uploading}
+          onFiles={uploadFiles}
+          onLibraryChanged={refreshDocuments}
+          onClose={(summary) => { setIntakeOpen(false); if (summary) say(summary); }}
+        />
+      )}
       {bookId && (
         <BookPage key={bookId + (bookPassage?.snippet || "")} apiBase={API_BASE} documentId={bookId} passage={bookPassage} readerOpen={Boolean(source)} askEnabled={askEnabled}
           onClose={closeBook} onRead={openSource} onChanged={refreshDocuments}
