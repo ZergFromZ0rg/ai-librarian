@@ -110,3 +110,51 @@ def test_check_flags_sources_from_outside_a_scoped_library():
     assert good["hard_failures"] == []
     leaked = ah.check(case, _result("It is 500 euros [1].", [inside, outside]), members={"handbook.docx"})
     assert leaked["hard_failures"] == ["sources outside the library: Other.pdf"]
+
+
+def test_failures_are_classified_by_cause():
+    src = [{"document": "depot.docx", "page": 1}]
+    # A neighbour's number in the answer is a different bug from a missing one.
+    case = {"question": "How many people work at X?", "must_mention": ["288"], "must_not_mention": ["412"],
+            "must_cite": [{"document": "depot.docx"}]}
+    confused = ah.check(case, _result("X employs 412 people [1].", src))
+    assert confused["failure_kinds"] == ["wrong-answer", "wrong-entity"]
+    missed = ah.check(case, _result("X employs people [1].", [{"document": "other.docx", "page": 1}]))
+    assert set(missed["failure_kinds"]) == {"retrieval-miss", "wrong-answer"}
+    assert ah.check(case, _result("X employs 288 people [1].", src))["failure_kinds"] == []
+
+    refusal = {"question": "Who is the deputy manager of X?", "expect_refusal": True}
+    assert ah.check(refusal, _result("The deputy manager is Ana Lopez [1].", src))["failure_kinds"] == ["invented-answer"]
+    over = ah.check({"question": "q"}, _result("I couldn't find anything in your library.", src))
+    assert over["failure_kinds"] == ["over-refusal"]
+
+
+def test_select_cases_by_split_and_tag():
+    import evalstats
+
+    cases = [{"id": f"c{i}", "question": "q", "tags": ["a"] if i % 3 == 0 else ["b"]} for i in range(90)]
+    test = ah.select_cases(cases, "test")
+    assert test and all(evalstats.split_of(c["id"]) == "test" for c in test)
+    assert len(ah.select_cases(cases, "dev")) + len(test) == 90
+    assert all(c["tags"] == ["a"] for c in ah.select_cases(cases, "all", "a"))
+
+
+def test_score_reports_pass_rate_split_and_why_cases_failed(monkeypatch, capsys):
+    import evalstats
+
+    ids = [f"c{i}" for i in range(40)]
+    assert {evalstats.split_of(i) for i in ids} == {"dev", "test"}
+    cases = [{"id": i, "question": i, "must_mention": ["288"], "tags": ["depot"]} for i in ids]
+
+    def fake_ask(question, mode, model, keys, collection_id):
+        answer = "It has 288 people [1]." if int(question[1:]) % 4 else "It has some people [1]."
+        return _result(answer, [{"document": "d.docx", "page": 1}])
+
+    monkeypatch.setattr(ah, "ask", fake_ask)
+    code = ah.score(cases, None, None, None, None)
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "pass rate:  0.75 [" in out
+    assert "by split (tune on dev; quote test)" in out
+    assert "why cases failed:  wrong-answer 10" in out
+    assert "depot  30/40" in out

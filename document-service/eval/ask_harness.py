@@ -56,6 +56,8 @@ import urllib.request
 from pathlib import Path
 from typing import Iterable, Optional
 
+from evalstats import pct_ci, split_of
+
 DEFAULT_URL = "http://127.0.0.1:8000"
 BASE_URL = os.environ.get("AI_LIBRARIAN_URL", DEFAULT_URL).rstrip("/")
 APP_TOKEN = os.environ.get("APP_TOKEN", "").strip()
@@ -195,34 +197,42 @@ def check(case: dict, result: dict, members: Optional[set] = None) -> dict:
     n_sources = len(sources)
     cites = cited_numbers(answer)
     fails: list[str] = []
+    kinds: list[str] = []
+
+    def fail(kind: str, message: str) -> None:
+        # `kind` is why the case failed, for the report's failure breakdown: a
+        # wrong number, a neighbour's number, an invented answer and a missed
+        # retrieval are different bugs even though all of them are "FAIL".
+        fails.append(message)
+        kinds.append(kind)
 
     if result["error"]:
-        fails.append(f"stream error: {result['error']}")
+        fail("error", f"stream error: {result['error']}")
     if not answer:
-        fails.append("empty answer")
+        fail("error", "empty answer")
 
     refusal = looks_like_refusal(answer) or not sources
     if case.get("expect_refusal"):
         if not refusal:
-            fails.append("expected a refusal, got a substantive answer")
+            fail("invented-answer", "expected a refusal, got a substantive answer")
         if cites:
-            fails.append(f"refusal should cite nothing, cites {sorted(cites)}")
+            fail("invented-answer", f"refusal should cite nothing, cites {sorted(cites)}")
     else:
         if refusal:
-            fails.append("unexpected refusal (library should be able to answer)")
-        if not cites and answer:
-            fails.append("answer has no [n] citations")
+            fail("over-refusal", "unexpected refusal (library should be able to answer)")
+        elif not cites and answer:
+            fail("uncited", "answer has no [n] citations")
 
     out_of_range = sorted(n for n in cites if n < 1 or n > n_sources)
     if out_of_range:
-        fails.append(f"citations out of range (have {n_sources} sources): {out_of_range}")
+        fail("bad-citation", f"citations out of range (have {n_sources} sources): {out_of_range}")
 
     for phrase in case.get("must_mention", []):
         if not re.search(phrase, answer, re.IGNORECASE):
-            fails.append(f"must_mention not found: {phrase!r}")
+            fail("wrong-answer", f"must_mention not found: {phrase!r}")
     for phrase in case.get("must_not_mention", []):
         if re.search(phrase, answer, re.IGNORECASE):
-            fails.append(f"must_not_mention present: {phrase!r}")
+            fail("wrong-entity", f"must_not_mention present: {phrase!r}")
 
     # `must_cite` lists acceptable passages ("any of these"): at least one must be
     # retrieved (hard), and it is a soft signal whether one was actually cited.
@@ -235,13 +245,13 @@ def check(case: dict, result: dict, members: Optional[set] = None) -> dict:
         cited_ok = any(i in cites for i in matched)
         if not retrieved_ok:
             wanted = ", ".join(f"{w.get('document')} p.{w.get('page')}" for w in must_cite)
-            fails.append(f"none of the must_cite passages were retrieved ({wanted})")
+            fail("retrieval-miss", f"none of the must_cite passages were retrieved ({wanted})")
 
     if members is not None:
         outside = sorted({str(s.get("document") or "") for s in sources
                           if str(s.get("document") or "").lower() not in members})
         if outside:
-            fails.append(f"sources outside the library: {', '.join(outside)}")
+            fail("scope-leak", f"sources outside the library: {', '.join(outside)}")
 
     in_range_cites = {n for n in cites if 1 <= n <= n_sources}
     return {
@@ -254,6 +264,7 @@ def check(case: dict, result: dict, members: Optional[set] = None) -> dict:
         "must_cite_cited": cited_ok,
         "answer_chars": len(answer),
         "hard_failures": fails,
+        "failure_kinds": sorted(set(kinds)),
     }
 
 
@@ -341,6 +352,19 @@ def load_cases(path: Path) -> list[dict]:
     return cases
 
 
+def select_cases(cases: list[dict], split: str = "all", tag: Optional[str] = None) -> list[dict]:
+    """Filter by held-out split and/or tag before any (slow) question is asked."""
+    chosen = []
+    for case in cases:
+        cid = case.get("id") or case.get("question", "?")
+        if split != "all" and split_of(cid, case.get("split")) != split:
+            continue
+        if tag and tag not in (case.get("tags") or []):
+            continue
+        chosen.append(case)
+    return chosen
+
+
 def score(cases: list[dict], model: Optional[str], judge_spec: Optional[str],
           judge_url: Optional[str], provider_keys: Optional[dict], repeat: int = 1,
           json_out: Optional[Path] = None) -> int:
@@ -352,6 +376,8 @@ def score(cases: list[dict], model: Optional[str], judge_spec: Optional[str],
     cited_frac_sum = 0.0
     substantive = 0
     tag_stats: dict[str, list[int]] = {}  # tag -> [passed, total]
+    split_stats: dict[str, list[int]] = {"dev": [0, 0], "test": [0, 0]}
+    kind_counts: dict[str, int] = {}
     libraries: dict[str, dict] = {}
     snapshot_cases: list[dict] = []
 
@@ -382,6 +408,9 @@ def score(cases: list[dict], model: Optional[str], judge_spec: Optional[str],
             stats = tag_stats.setdefault(tag, [0, 0])
             stats[0] += 0 if case_failed else 1
             stats[1] += 1
+        split = split_of(cid, case.get("split"))
+        split_stats[split][0] += 0 if case_failed else 1
+        split_stats[split][1] += 1
 
         note = []
         if repeat > 1:
@@ -390,6 +419,8 @@ def score(cases: list[dict], model: Optional[str], judge_spec: Optional[str],
             hard_fail_cases += 1
             worst = min((mm for _, mm in runs), key=lambda mm: -len(mm["hard_failures"]))
             note.append("FAIL: " + "; ".join(worst["hard_failures"]))
+            for kind in worst["failure_kinds"]:
+                kind_counts[kind] = kind_counts.get(kind, 0) + 1
         elif case.get("expect_refusal"):
             note.append("refusal OK")
         else:
@@ -428,7 +459,10 @@ def score(cases: list[dict], model: Optional[str], judge_spec: Optional[str],
             "id": cid,
             "mode": case.get("mode", "quick"),
             "passed": not case_failed,
+            "split": split,
+            "tags": list(case.get("tags") or []),
             "hard_failures": m["hard_failures"],
+            "failure_kinds": m["failure_kinds"],
             "answer_chars": m["answer_chars"],
             "sources": m["sources"],
             "cited_fraction": round(m["cited_fraction"], 3),
@@ -440,8 +474,17 @@ def score(cases: list[dict], model: Optional[str], judge_spec: Optional[str],
 
     print("\n" + "-" * (width + 40))
     print(f"  {len(cases)} cases, {hard_fail_cases} with hard failures")
+    print(f"  pass rate:  {pct_ci(len(cases) - hard_fail_cases, len(cases))}   (95% interval)")
+    if all(total for _, total in split_stats.values()):
+        print("  by split (tune on dev; quote test):  "
+              + "   ".join(f"{name} {pct_ci(ok, total)} n={total}" for name, (ok, total) in split_stats.items()))
     if tag_stats:
-        print("  by tag:  " + "   ".join(f"{tag} {ok}/{n}" for tag, (ok, n) in sorted(tag_stats.items())))
+        print("  by tag:")
+        tag_width = max(len(tag) for tag in tag_stats)
+        for tag, (ok, n) in sorted(tag_stats.items()):
+            print(f"    {tag.ljust(tag_width)}  {ok}/{n:<3} {pct_ci(ok, n)}")
+    if kind_counts:
+        print("  why cases failed:  " + "   ".join(f"{kind} {n}" for kind, n in sorted(kind_counts.items(), key=lambda x: -x[1])))
     if substantive:
         print(f"  mean context cited:  {cited_frac_sum / substantive:.0%}  "
               f"({substantive} substantive answers)")
@@ -461,6 +504,8 @@ def score(cases: list[dict], model: Optional[str], judge_spec: Optional[str],
             "mean_context_cited": round(cited_frac_sum / substantive, 3) if substantive else 0.0,
             "by_tag": {tag: {"passed": ok, "total": total}
                        for tag, (ok, total) in sorted(tag_stats.items())},
+            "by_split": {name: {"passed": ok, "total": total} for name, (ok, total) in split_stats.items()},
+            "failure_kinds": kind_counts,
             "results": snapshot_cases,
         }
         json_out.parent.mkdir(parents=True, exist_ok=True)
@@ -564,6 +609,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                               "sends nothing while it reasons, so allow for that on slow hardware")
     p_score.add_argument("--repeat", type=int, default=1,
                          help="run each case N times; fail only if it fails a majority (default 1)")
+    p_score.add_argument("--split", choices=["all", "dev", "test"], default="all",
+                         help="run only the dev or the held-out test cases (default all)")
+    p_score.add_argument("--tag", help="run only cases carrying this tag")
     p_score.add_argument("--json-out", type=Path,
                          help="write a machine-readable regression snapshot to this path")
     p_cap = sub.add_parser("capture", help="run questions now -> stubs")
@@ -584,7 +632,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
     if args.command == "score":
         ASK_TIMEOUT = max(1, args.timeout)
-        return score(load_cases(args.answers), args.model, args.judge, args.judge_url,
+        cases = select_cases(load_cases(args.answers), args.split, args.tag)
+        if not cases:
+            raise SystemExit("no cases match --split/--tag")
+        return score(cases, args.model, args.judge, args.judge_url,
                      keys, max(1, args.repeat), args.json_out)
     if args.command == "capture":
         return capture(args.question, args.mode, args.model, keys)

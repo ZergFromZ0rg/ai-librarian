@@ -1,16 +1,51 @@
 # Evaluation harnesses
 
-Two hand-curated eval sets, each with a stdlib-only runner. Neither is a `pytest`
-test — they need the real models and a real indexed library, so run them by hand
-against a live service.
+Hand-built eval sets, each with a stdlib-only runner. None is a `pytest` test --
+they need the real models and a real indexed library, so run them by hand
+against a live service. (`tests/test_retrieval_eval.py`, `test_ask_eval.py` and
+`test_synth_corpus.py` do cover the harness *logic* and the generated ground
+truth in CI.)
 
-- **`harness.py` + `queries.jsonl`** — *retrieval*: replays queries against
-  `/search`, reports hit@k / recall@k / MRR / gate accuracy. Catches regressions
-  from chunking, embedding, or reranker changes. (This document.)
-- **`ask_harness.py` + `answers.jsonl`** — *answer quality*: replays questions
-  against `/ask`, checks the generated answers are grounded, cited, on-topic, and
-  refuse when the library has nothing. See [Answer-quality harness](#answer-quality-harness)
-  at the bottom.
+- **`harness.py`** -- *retrieval*: replays queries against `/search`, reports
+  hit@k / recall@k / MRR / gate accuracy **with 95% intervals**, a dev/test
+  split, and per-tag breakdowns. `compare` diffs two saved runs query by query.
+- **`ask_harness.py`** -- *answer quality*: replays questions against `/ask`,
+  checks the answers are grounded, cited, correct and refuse when they should,
+  and says **why** each failing case failed. See [Answer-quality harness](#answer-quality-harness).
+
+## Which set to trust
+
+| Set | Cases | Ground truth | Use it for |
+|---|---|---|---|
+| `queries_synth.jsonl` / `answers_synth.jsonl` | 326 / 117 | **planted before any model saw it** | the number you quote; A/B tests |
+| `queries_office.jsonl` / `answers_office.jsonl` | 41 / 19 | seeded generator, judged by hand | format handling, scoping, multilingual |
+| `queries.jsonl` / `answers.jsonl` | 47 / 20 | pooled from the system's own results, then tuned against | regression canary on the real books |
+
+The book set is useful but flatters the system: its judgments were made by
+keeping the hits that looked right, and the relevance gate and reranker were
+tuned on those same queries. With 39 positives one query is 2.6 points. Use it to
+notice that something broke, not to claim a score.
+
+The synthetic set exists to fix that. [Its documents](#the-synthetic-benchmark)
+are generated from planted facts (a manager's name, a pallet count, a charter
+year), and the questions are written from the facts, so the right answer is
+known before any retrieval runs.
+
+## Reading a number
+
+Every rate is printed with a 95% interval, e.g. `hit@1 0.83 [0.77-0.88]`.
+Read the range, not the point: a difference smaller than the interval is not a
+finding. Two habits make the numbers honest:
+
+1. **Tune on `dev`, quote `test`.** Each case is assigned to `dev` or `test` by a
+   hash of its `id` (about 30% land in `test`; a `split` field overrides). It
+   cannot be nudged by hand. Run `score --split dev` while changing things and
+   `score --split test` once at the end. A test number you have looked at and
+   then tuned against is a dev number.
+2. **Compare runs, don't eyeball them.** `score --save a.json`, change one thing,
+   `score --save b.json`, then `compare a.json b.json`. It lines the runs up
+   query by query, lists what flipped each way, and gives an exact McNemar
+   p-value. "0.03 better" on 40 queries is usually noise; `compare` says so.
 
 ---
 
@@ -46,7 +81,9 @@ One JSON object per line. Two kinds of case:
 | `expect_empty` | `true` for a query nothing in the library should answer — asserts the rerank gate returns zero results |
 | `collection` | optional library name: the search is scoped to that library, and any result from outside it is a **SCOPE LEAK** (hard failure). With neither `relevant` nor `expect_empty` the case is a pure scope probe |
 | `search` | optional extra `/search` fields for this case only, e.g. `{"rerank_min_score": -100}` so a scope probe returns results instead of being gated to nothing |
-| `tags` | optional labels (`"excel"`, `"multilingual"`, …); the report adds hit@1 / hit@5 / MRR per tag |
+| `tags` | optional labels (`"excel"`, `"multilingual"`, …); the report adds hit@1 / hit@5 / MRR, with intervals, per tag |
+| `match` | `"any"` (default: one listed passage in the top k is a hit) or `"all"` (every listed passage must be in the top k -- for "which is higher, A or B?" questions). All-of cases are reported on their own line, because k required passages cannot rank better than k and would otherwise drag down hit@1 and MRR |
+| `split` | optional `"dev"` / `"test"`; by default derived from a hash of `id` (see above) |
 
 A `relevant` entry is counted as retrieved when the result's filename matches,
 `page` falls inside the result's `[page, page_end]` span, and `contains` (if set)
@@ -96,28 +133,64 @@ python eval/harness.py --url http://192.168.0.122:3100/api review -n 20
 ```bash
 cd document-service
 python eval/harness.py --url http://192.168.0.122:3100/api score
+python eval/harness.py --url … score --queries eval/queries_synth.jsonl --split test --save runs/baseline.json
 ```
 
 ```
-  camus-absurd      hit@5   first@1
-  history-conics    hit@5   first@2   recall@5 1/2
-  gate-gorilla      gate PASS
+  depot-opened-tavgate-para   hit@5  first@1
+  town-charter-iverwick-vs-eskholm   hit@5  first@2  all-of recall@5 2/2
+  near-miss-depot-marmere     unanswerable -- LEAKED 10 (top 2.79)
 
-  ----------------------------------------
-  2 judged queries
-    hit rate:  hit@1 0.50   hit@3 1.00   hit@5 1.00   hit@10 1.00
-    recall:    recall@1 0.25   recall@3 0.75   recall@5 0.75   recall@10 0.75
-    MRR:       0.75
-  relevance gate:  1/1 expected-empty queries returned nothing
+  270 judged queries   (95% intervals; the line below the table is for all-of cases)
+              rate   interval
+    hit@1     0.83   0.78-0.87
+    hit@5     0.94   0.91-0.96
+    MRR       0.88   0.85-0.91
+  by split  (tune on dev; quote test):
+    dev   n=186  hit@1 0.83 [0.77-0.88]   hit@5 0.94 [0.90-0.97]
+    test  n=84   hit@1 0.83 [0.74-0.90]   hit@5 0.94 [0.87-0.97]
+  all-of queries (every source must rank): n=24   top 5: 1.00 [0.86-1.00]
+  by tag:
+    pdf    n=44   hit@1 0.68 [0.53-0.80]   hit@5 1.00 [0.92-1.00]   MRR 0.81 [0.72-0.89]
+    table  n=10   hit@1 0.20 [0.06-0.51]   hit@5 0.50 [0.24-0.76]   MRR 0.33 [0.13-0.56]
+  unanswerable probes:  0.41 [0.26-0.58] gated out, 19 LEAKED
 ```
 
 Per-row: `hit@5` / `MISS@5` is whether any acceptable passage made the top 5;
 `first@N` is the rank of the first one; `recall@5 x/y` is shown only when a query
 lists more than one acceptable passage.
 
-Exits non-zero if an `expect_empty` query leaks results, or if not one judged
-query found an answer in the top 10 — so it can gate a release. `--no-rerank`
-scores raw vector order for comparison.
+| flag | does |
+|---|---|
+| `--split dev\|test` | score only that half (default both) |
+| `--tag NAME` | score only cases carrying a tag, e.g. `--tag table` while working on table extraction |
+| `--save FILE` | write every query's outcome as JSON, for `report` and `compare` |
+| `--no-rerank` | score raw vector order |
+
+```bash
+python eval/harness.py report runs/baseline.json          # re-print a saved run, no server needed
+python eval/harness.py compare runs/baseline.json runs/rsf.json
+```
+
+```
+  270 queries in both runs
+  hit@1:  A 0.83   B 0.78   only A right 31, only B right 17   p=0.059  -> no clear difference
+      A only: policy-approver-ormdale-direct, policy-notice-kesham-reverse, ...
+      B only: depot-cost-pelley-reverse, depot-staff-galholm-para, ...
+  hit@5:  A 0.94   B 0.95   only A right 7, only B right 10   p=0.629  -> no clear difference
+  MRR change B-A:  -0.024   95% interval -0.056 to +0.008
+  all-of queries (24): every source in the top 5   A 24   B 22
+```
+
+(That is the real output of reranking on vs off, run A = reranked, B = `--no-rerank`:
+the reranker's gain at hit@1 looks like 5 points but 48 flipped queries split 31/17
+is not yet distinguishable from luck at p=0.059. Without `compare` that would have
+been reported as "the reranker adds 5 points".)
+
+Exits non-zero if not one judged query found an answer in the top 10, or if a
+library-scoped search returned anything from outside its library -- so it can
+gate a release. Unanswerable-query leaks are reported, not failed: the gate is a
+product choice.
 
 ### Comparing dense/sparse fusion
 
@@ -160,6 +233,51 @@ environment. `APP_TOKEN` is only needed when going direct to :8000 on a
 token-protected API.
 
 The script is standard-library only — run it with any `python3`, no venv needed.
+
+## The synthetic benchmark
+
+```bash
+cd document-service
+../.venv/bin/python eval/synth_corpus.py /tmp/synth          # 60 files + queries_synth.jsonl + answers_synth.jsonl
+../.venv/bin/python eval/serve_local.py /tmp/synth --port 8765   # the real service, no Docker (second terminal)
+python eval/harness.py --url http://127.0.0.1:8765 score --queries eval/queries_synth.jsonl --save runs/synth.json
+```
+
+`synth_corpus.py` writes sixty documents in all seven ingestible formats (docx,
+pdf, pptx, xlsx, csv, md, txt) from 366 planted facts, then writes the questions
+from the facts. Same seed, same text. After writing it reads every judged phrase
+back out of the rendered files with plain python-docx / openpyxl / python-pptx /
+PyMuPDF (not the service's parsers) and refuses to finish if one is missing, so a
+broken generator fails there, not as a mysterious retrieval miss. The committed
+`queries_synth.jsonl` / `answers_synth.jsonl` are checked against a fresh
+generation in CI; regenerate them, never hand-edit.
+
+What it is built to make hard:
+
+| tag | what it tests |
+|---|---|
+| `direct` / `para` | a question reusing the document's words vs one that avoids them (a test asserts paraphrases really share fewer words) |
+| `reverse` | the value is given and the entity is asked for: "which depot employs 212 people?" |
+| siblings | fourteen depot reports share a template, so only the name separates "the Calanford depot" from thirteen near-copies |
+| `shared-name` | a place can be a depot, a survey, an office handbook and a town chronicle at once; the question has to be read |
+| `pdf` | the judged page number must also match |
+| `table` / `notes` / `row` | the fact is in a Word table, a slide's speaker notes, or a spreadsheet row, not in prose |
+| `comparison` | "which is higher, A or B?" needs both sources (`match: "all"`) |
+| `near-miss` | a real attribute of an entity that does not exist. The reranker cannot tell, so most leak: this is a measurement, not a failure |
+| `off-topic` | nothing in the library is related; the gate should return nothing |
+
+Answer cases add two refusal kinds the retrieval set cannot: `absent-attribute`
+(a real depot, a fact nobody wrote down -- the model must say so, not invent
+one) and `must_not_mention` set to a *neighbour's* number, which catches
+entity confusion that `must_mention` alone would pass.
+
+`serve_local.py` runs the real service in-process with an in-memory Qdrant and a
+throw-away data directory, so none of this needs Docker or touches your library.
+`--env KEY=VALUE ...` sets service settings first (`RERANK_MIN_SCORE=-1.0`,
+`FUSION_METHOD=rsf`, `EMBEDDING_MODEL=...`), which is how you A/B a pipeline
+setting: serve, `score --save`, restart with the other setting, `score --save`,
+`compare`. The models must already be in the Hugging Face cache
+(`OFFLINE=1` is the default here).
 
 ## The Office corpus suites
 
@@ -257,6 +375,36 @@ One JSON object per line. `#`-prefixed and blank lines are ignored.
 - `cited_fraction` — how much of the supplied context the answer actually cited
 
 `score` exits non-zero if any case has a hard failure, so it can gate a release.
+
+### Reading the report
+
+```
+  117 cases, 21 with hard failures
+  pass rate:  0.82 [0.74-0.88]   (95% interval)
+  by split (tune on dev; quote test):  dev 0.83 [0.74-0.89] n=82   test 0.80 [0.64-0.90] n=35
+  by tag:
+    absent-attribute  12/16  0.75 [0.51-0.90]
+    near-miss         10/10  1.00 [0.72-1.00]
+  why cases failed:  wrong-answer 9   invented-answer 4   wrong-entity 3   retrieval-miss 2
+```
+
+The last line is the useful one: a failing case is labelled by cause, because
+the causes have different fixes.
+
+| why | meaning | look at |
+|---|---|---|
+| `retrieval-miss` | none of the `must_cite` passages were even retrieved | the retrieval harness first |
+| `wrong-answer` | `must_mention` is missing from the answer | the prompt, or the model's reading |
+| `wrong-entity` | the answer contains the value from a *sibling* document (`must_not_mention`) | context mixing, citation discipline |
+| `invented-answer` | a refusal was expected and the model answered anyway | the "say so when the sources don't" prompt |
+| `over-refusal` | the model refused something the library answers | threshold / prompt too cautious |
+| `uncited`, `bad-citation` | no `[n]`, or `[n]` beyond the supplied sources | formatting |
+
+`--split dev|test` and `--tag NAME` run a subset (an Ask run is slow: a 117-case
+pass at ~70 s per case on `qwen3:4b` is over two hours, so iterate on one tag
+and run the full set once). `answers_synth.jsonl` checks the planted value
+exactly (`must_mention` is the number or surname, not a paraphrase), so its
+pass rate needs no LLM judge.
 
 **LLM answers vary run to run.** A single hard failure is a signal to look, not
 proof of a regression — re-run, or use `--repeat N` (each case runs N times and
