@@ -4,7 +4,6 @@ import { applyBody, matchRows } from "./catalogueMatch.js";
 import { clothColor } from "./clothCovers.js";
 import { DOC_TYPES, TYPE_LABEL, isWorkDocument } from "./documentsLibrary.js";
 import LookupPanel from "./LookupPanel.jsx";
-import StarRating, { LikeButton } from "./StarRating.jsx";
 import { FORM_LABELS, displayTitle } from "./storage.js";
 
 const today = () => {
@@ -57,7 +56,11 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
   const input = useRef(null);
   const changed = JSON.stringify(fields) !== JSON.stringify(values(doc));
   useEffect(() => { onDirty(changed || Boolean(file)); }, [changed, file, onDirty]);
-  useEffect(() => { setFields(values(doc)); }, [doc]);
+  // A new version of the book (after a save, or a rating from the page above)
+  // resets the form in the same render. Doing it in an effect left one render
+  // where the form looked edited, which flashed "unsaved changes".
+  const [seenDoc, setSeenDoc] = useState(doc);
+  if (seenDoc !== doc) { setSeenDoc(doc); setFields(values(doc)); }
   useEffect(() => {
     if (!file) { setPreview(""); return; }
     const url = URL.createObjectURL(file); setPreview(url);
@@ -199,8 +202,7 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
           </details>
         </section>
         <section className="book-editor-card book-review-card" aria-labelledby="review-heading">
-          <div className="book-card-heading"><h2 id="review-heading">{work ? "Summary & takeaways" : "Your review"}</h2><span className="muted">{work ? "For your own reference" : "Just for you"}</span></div>
-          {!work && <div className="book-rating-row"><StarRating value={fields.rating} onChange={(value) => set("rating", value)} disabled={saving} /><LikeButton liked={fields.liked} onChange={(value) => set("liked", value)} disabled={saving} /></div>}
+          <div className="book-card-heading"><h2 id="review-heading">{work ? "Summary & takeaways" : "Your review"}</h2><span className="muted">{work ? "For your own reference" : "Just for you · rate it at the top of the page"}</span></div>
           <label className="book-field">{work ? "Key points" : "What did you think?"}<textarea className="input" rows={work ? 6 : 4} maxLength={20000} value={fields.review} onChange={(event) => set("review", event.target.value)} placeholder={work ? "What is this about, and what matters in it? What did you conclude or need to act on?" : "What stayed with you? Who would you recommend it to?"} /></label>
           {!work && <label className="book-check"><input type="checkbox" checked={fields.review_spoiler} onChange={(event) => set("review_spoiler", event.target.checked)} />This review contains spoilers <small>(hidden until you choose to show it)</small></label>}
           <p className="book-review-hint">{work ? "A short summary you can find again. Keep quoted passages and detailed thoughts in the notes below." : "Your overall impression lives here. Keep passages and detailed thoughts in the notes below."}</p>

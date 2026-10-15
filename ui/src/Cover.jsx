@@ -8,19 +8,20 @@ import { displayTitle } from "./storage.js";
 // `children` are laid over the cover (e.g. read/owned flags).
 export default function Cover({ apiBase, documentId, filename, fileType = "pdf", width = 320, className = "", author = "", children }) {
   const [failed, setFailed] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const [revision, setRevision] = useState(0);
   useEffect(() => {
-    const refresh = () => { setRevision(Date.now()); setFailed(false); };
+    const refresh = () => { setRevision(Date.now()); setFailed(false); setLoaded(false); };
     window.addEventListener("book-cover-changed", refresh);
     return () => window.removeEventListener("book-cover-changed", refresh);
   }, []);
-  useEffect(() => setFailed(false), [documentId]);
+  useEffect(() => { setFailed(false); setLoaded(false); }, [documentId]);
   const showImage = documentId && !failed;
   // Without artwork the book gets a cloth binding whose colour is fixed by its
   // identity, so a mixed shelf of covers and blanks still looks like one library.
   const cloth = clothColor(documentId || filename);
   return (
-    <div className={`cover${showImage ? "" : " cover-blank cover-cloth"} ${className}`}
+    <div className={`cover${showImage ? (loaded ? " cover-loaded" : "") : " cover-blank cover-cloth"} ${className}`}
       style={showImage ? undefined : { "--cloth": cloth.bg, "--cloth-edge": cloth.edge }}>
       {showImage ? (
         <img
@@ -28,6 +29,7 @@ export default function Cover({ apiBase, documentId, filename, fileType = "pdf",
           alt=""
           loading="lazy"
           draggable="false"
+          onLoad={() => setLoaded(true)}
           onError={() => setFailed(true)}
         />
       ) : (

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 
-export default function ReadingProgress({ apiBase, doc, onDocument, onRead, onDirty }) {
+export default function ReadingProgress({ apiBase, doc, onDocument, onRead, onDirty, showResume = true }) {
   const total = Number(doc.pages || doc.page_count || 0);
   const [progress, setProgress] = useState(Number(doc.reading_progress || 0));
   const [page, setPage] = useState(doc.current_page || "");
@@ -27,7 +27,7 @@ export default function ReadingProgress({ apiBase, doc, onDocument, onRead, onDi
     <div className="reading-progress-actions">
       {total > 0 && <label>Page <input className="input" type="number" min="1" max={total} value={page} onChange={(e) => changePage(e.target.value)} /> <span>of {total.toLocaleString()}</span></label>}
       <button className="button small" type="button" disabled={busy} onClick={save}>{busy ? "Saving…" : "Save progress"}</button>
-      {doc.record_type !== "standalone" && <button className="button primary small" type="button" onClick={() => onRead({ documentId: doc.document_id, documentName: doc.title || doc.filename, page: Number(page) || 1 })}>Resume reading ↗</button>}
+      {showResume && doc.record_type !== "standalone" && <button className="button primary small" type="button" onClick={() => onRead({ documentId: doc.document_id, documentName: doc.title || doc.filename, page: Number(page) || 1 })}>Resume reading ↗</button>}
       {message && <span className="muted" role="status">{message}</span>}
     </div>
   </section>;

@@ -2,12 +2,17 @@ import React, { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { createPortal } from "react-dom";
 import BookDetails from "./BookDetails.jsx";
+import Cover from "./Cover.jsx";
 import PdfMarks from "./PdfMarks.jsx";
 import ReadingProgress from "./ReadingProgress.jsx";
+import StarRating, { LikeButton } from "./StarRating.jsx";
 import VocabularyPanel from "./VocabularyPanel.jsx";
 import { isWorkDocument } from "./documentsLibrary.js";
-import { displayTitle } from "./storage.js";
+import { displayTitle, readingStatus } from "./storage.js";
 import { katexPlugin, prepareMath, remarkPlugins } from "./markdown.js";
+
+const STATUS_LABELS = { to_read: "To read", reading: "Reading", read: "Read", abandoned: "Abandoned" };
+const FORMATS = { word: "DOCX", excel: "XLSX", powerpoint: "PPTX", markdown: "Markdown", text: "TXT" };
 
 export default function BookPage({ apiBase, documentId, passage, onClose, onRead, onAsk, onChanged, onCoverChanged, readerOpen, askEnabled }) {
   const [doc, setDoc] = useState(null);
@@ -23,6 +28,12 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState(false);
+  const [composing, setComposing] = useState(Boolean(passage?.snippet || passage?.matched));
+  const [editOpen, setEditOpen] = useState(false);
+  const [progressOpen, setProgressOpen] = useState(false);
+  const [descOpen, setDescOpen] = useState(false);
+  const [spoilerShown, setSpoilerShown] = useState(false);
+  const editRef = useRef(null);
   const closeRef = useRef(null);
   const readerVisible = useRef(readerOpen);
   readerVisible.current = readerOpen;
@@ -36,6 +47,8 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
   }, [documentId, readerOpen]);
   const dirty = useRef(false);
   dirty.current = Boolean(draft || quote || detailsDirty || progressDirty || vocabularyDirty);
+  // Unsaved edits are never hidden: the editor opens by itself and stays open.
+  useEffect(() => { if (detailsDirty) setEditOpen(true); }, [detailsDirty]);
 
   async function request(path, options) {
     const response = await fetch(`${apiBase}${path}`, options);
@@ -81,7 +94,7 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
     try { await action(); setNotice(message); onChanged(); } catch (failure) { setError(failure.message); }
     finally { setBusy(false); }
   }
-  function resetDraft() { setDraft(""); setQuote(""); setPage(null); setEditing(null); setPreview(false); }
+  function resetDraft() { setDraft(""); setQuote(""); setPage(null); setEditing(null); setPreview(false); setComposing(false); }
   function saveNote(event) {
     event.preventDefault();
     run(async () => {
@@ -105,6 +118,71 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
   const markdown = (text) => <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={[katexPlugin]} skipHtml>{prepareMath(text)}</ReactMarkdown>;
   const hasSource = doc?.record_type !== "standalone";
   const work = isWorkDocument(doc);
+  const showEditor = composing || Boolean(draft || quote || editing);
+
+  // Stars and the heart save as soon as they are touched. While the editor has
+  // unsaved changes they wait, so a save here can never overwrite them.
+  async function saveMarks(changes) {
+    setBusy(true); setError(""); setNotice("");
+    try { const updated = await request(`/documents/${documentId}`, json("PATCH", changes)); setDocument(updated); onChanged(); }
+    catch (failure) { setError(failure.message); }
+    finally { setBusy(false); }
+  }
+  function openEdit(selector) {
+    setEditOpen(true);
+    window.setTimeout(() => {
+      const target = (selector && editRef.current?.querySelector(selector)) || editRef.current;
+      target?.scrollIntoView({ behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: selector ? "center" : "start" });
+      if (selector && target?.focus) target.focus({ preventScroll: true });
+    }, 30);
+  }
+
+  let hero = null;
+  if (doc) {
+    const status = readingStatus(doc);
+    const progress = Math.min(100, Math.max(0, Math.round(Number(doc.reading_progress) || 0)));
+    const total = Number(doc.page_count || doc.pages || 0);
+    const unit = hasSource && doc.file_type === "epub" ? "section" : "page";
+    const here = Number(doc.current_page) || Math.round((total * progress) / 100);
+    const meta = [doc.published_year, total ? `${total.toLocaleString()} ${unit}${total === 1 ? "" : "s"}` : null, hasSource ? null : "Catalogue record · no file"].filter(Boolean);
+    const format = hasSource ? FORMATS[doc.file_type] || doc.file_type?.toUpperCase() || "File" : null;
+    const marksLocked = busy || detailsDirty;
+    const showProgress = status === "reading" || (progress > 0 && status !== "read");
+    hero = <header className={`book-hero${work ? " no-cover" : ""}`}>
+      {!work && <div className="book-hero-art"><Cover apiBase={apiBase} documentId={doc.document_id} filename={doc.title || doc.filename} author={doc.author} fileType={doc.file_type} width={640} className="book-hero-cover" /></div>}
+      <div className="book-hero-main">
+        <div className="book-hero-kicker"><span className="eyebrow">{work ? "Document" : "Book"}</span>{format && <span className="book-format">{format}</span>}</div>
+        <h1 id="book-page-title">{doc.title || displayTitle(doc.filename)}</h1>
+        {doc.author && <p className="book-hero-author">{doc.author}</p>}
+        {meta.length > 0 && <p className="book-hero-meta">{meta.join(" · ")}</p>}
+        <div className="book-hero-marks">
+          {!work && <>
+            <span title={detailsDirty ? "Save or discard your edits first" : undefined}><StarRating size="medium" value={doc.rating || null} disabled={marksLocked} onChange={(value) => saveMarks({ rating: value })} /></span>
+            <span title={detailsDirty ? "Save or discard your edits first" : undefined}><LikeButton liked={Boolean(doc.liked)} disabled={marksLocked} onChange={(value) => saveMarks({ liked: value })} /></span>
+          </>}
+          <button type="button" className={`book-hero-status status-${status}`} title="Change the reading status" onClick={() => openEdit(".book-reading-status")}>{STATUS_LABELS[status] || STATUS_LABELS.to_read}</button>
+        </div>
+        {showProgress && <div className="book-hero-progress">
+          <span className="book-hero-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-label="Reading progress"><i style={{ width: `${progress}%` }} /></span>
+          <span>{progress}%{total ? ` · ${unit} ${here.toLocaleString()} of ${total.toLocaleString()}` : ""}</span>
+          <button type="button" className="text-button" aria-expanded={progressOpen} onClick={() => setProgressOpen((open) => !open)}>{progressOpen ? "Done" : "Update"}</button>
+        </div>}
+        {doc.description && <div className="book-hero-about">
+          <p className={`book-hero-desc${descOpen ? " open" : ""}`}>{doc.description}</p>
+          {doc.description.length > 320 && <button type="button" className="text-button" aria-expanded={descOpen} onClick={() => setDescOpen((open) => !open)}>{descOpen ? "Less" : "More"}</button>}
+        </div>}
+        <div className="book-hero-actions">
+          {hasSource && <>
+            <button className="button primary" onClick={() => onRead(source(passage?.page || doc.current_page || 1))}>{doc.current_page ? "Resume" : "Read"} {doc.file_type === "epub" ? "EPUB" : doc.file_type === "pdf" ? "PDF" : "source"} ↗</button>
+            <button className="button" disabled={!askEnabled} title={!askEnabled ? "Enable an answering model in Settings" : undefined} onClick={() => { if (!dirty.current || window.confirm("Discard your unsaved changes?")) onAsk(source()); }}>{work ? "Ask this document" : "Ask this book"}</button>
+          </>}
+          <button type="button" className="text-button book-hero-edit" aria-expanded={editOpen} aria-controls="book-edit-panel" onClick={() => (editOpen ? setEditOpen(false) : openEdit())}>{editOpen ? "Close editor" : "Edit details"}</button>
+          {detailsDirty && <span className="book-hero-unsaved" role="status">Unsaved changes</span>}
+        </div>
+      </div>
+    </header>;
+  }
+
   return createPortal(
     <section className="book-page-overlay" role="dialog" aria-modal={!readerOpen} aria-hidden={readerOpen || undefined} inert={readerOpen || undefined} aria-labelledby="book-page-title">
       <div className="book-page">
@@ -115,26 +193,37 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
         {error && <p className="notice error" role="alert">{error}</p>}
         {notice && <p className="notice" role="status">{notice}</p>}
         {!doc ? <h1 id="book-page-title">{error ? "Book unavailable" : "Opening book…"}</h1> : <>
-          <header className="book-overview">
-            <div><div className="book-overview-kicker"><span className="eyebrow">{work ? "Your documents" : "Your personal library"}</span><span className="book-format">{hasSource ? doc.file_type?.toUpperCase() : "NO FILE"}</span></div><h1 id="book-page-title">{doc.title || displayTitle(doc.filename)}</h1>{doc.author && <p>{doc.author}</p>}</div>
-            {hasSource ? <div className="book-page-actions"><button className="button primary" onClick={() => onRead(source(passage?.page || doc.current_page || 1))}>{doc.current_page ? "Resume" : "Read"} {doc.file_type === "epub" ? "EPUB" : doc.file_type === "pdf" ? "PDF" : "source"} ↗</button><button className="button" disabled={!askEnabled} title={!askEnabled ? "Enable an answering model in Settings" : undefined} onClick={() => { if (!dirty.current || window.confirm("Discard your unsaved changes?")) onAsk(source()); }}>{work ? "Ask this document" : "Ask this book"}</button></div> : <p className="book-record-label">Catalogue record · no digital file attached</p>}
-          </header>
-          <BookDetails doc={doc} apiBase={apiBase} onDocument={(updated) => { setDocument(updated); onChanged(); }} onDirty={setDetailsDirty} onCoverChanged={onCoverChanged} />
-          <ReadingProgress apiBase={apiBase} doc={doc} onRead={onRead} onDirty={setProgressDirty} onDocument={(updated) => { setDocument(updated); onChanged(); }} />
-          {hasSource && doc.file_type === "pdf" && <PdfMarks apiBase={apiBase} doc={doc} onChanged={onChanged} />}
-          <div className="book-page-notes">
-            <div className="book-page-section-head"><h2>{work ? "Notes" : "Reading notebook"}</h2><span className="muted">{notes.length} saved · searchable in Notes</span></div>
-            <form className="book-note-editor" onSubmit={saveNote}>
+          {hero}
+          <div className="book-progress-panel" hidden={!progressOpen}>
+            <ReadingProgress apiBase={apiBase} doc={doc} onRead={onRead} showResume={false} onDirty={setProgressDirty} onDocument={(updated) => { setDocument(updated); onChanged(); }} />
+          </div>
+          <section id="book-edit-panel" ref={editRef} className="book-edit-panel" hidden={!editOpen} aria-label="Edit details">
+            <div className="book-page-section-head"><h2>Edit details</h2><button type="button" className="text-button" onClick={() => setEditOpen(false)}>Close</button></div>
+            <BookDetails doc={doc} apiBase={apiBase} onDocument={(updated) => { setDocument(updated); onChanged(); }} onDirty={setDetailsDirty} onCoverChanged={onCoverChanged} />
+          </section>
+
+          <section className="book-section" aria-labelledby="review-view-heading">
+            <div className="book-page-section-head"><h2 id="review-view-heading">{work ? "Summary" : "Your review"}</h2>{doc.review && <button type="button" className="text-button" onClick={() => openEdit(".book-review-card textarea")}>Edit</button>}</div>
+            {!doc.review
+              ? <p className="muted">Nothing written yet. <button type="button" className="text-button" onClick={() => openEdit(".book-review-card textarea")}>{work ? "Write a summary" : "Write a review"}</button></p>
+              : doc.review_spoiler && !spoilerShown
+                ? <p className="muted"><em>Spoilers ahead.</em> <button type="button" className="text-button" onClick={() => setSpoilerShown(true)}>Show review</button></p>
+                : <p className="book-review-text">{doc.review}</p>}
+          </section>
+
+          <section className="book-section book-page-notes" aria-labelledby="notes-heading">
+            <div className="book-page-section-head"><h2 id="notes-heading">Notes</h2><span className="muted">{notes.length} saved</span>{!showEditor && <button type="button" className="button small" onClick={() => setComposing(true)}>Add a note</button>}</div>
+            {showEditor && <form className="book-note-editor" onSubmit={saveNote}>
               <h3>{editing ? "Edit note" : quote ? "Save this passage" : "Add a thought"}</h3>
               {quote && <><blockquote>{quote}</blockquote><p className="muted">Source location {page || "—"} · saved separately from your commentary</p></>}
-              {preview ? <div className="prose book-note-preview">{markdown(draft || "Nothing to preview yet.")}</div> : <textarea className="input" rows={5} maxLength={20000} aria-label="Note in Markdown" placeholder="What stood out? Write in Markdown, including headings, lists, and equations…" value={draft} onChange={(event) => setDraft(event.target.value)} />}
+              {preview ? <div className="prose book-note-preview">{markdown(draft || "Nothing to preview yet.")}</div> : <textarea className="input" rows={5} maxLength={20000} autoFocus={composing && !editing && !quote} aria-label="Note in Markdown" placeholder="What stood out? Write in Markdown, including headings, lists, and equations…" value={draft} onChange={(event) => setDraft(event.target.value)} />}
               <div className="book-page-actions">
                 <button className="button primary small" disabled={busy || (!draft.trim() && !quote)}>Save note</button>
                 <button type="button" className="text-button" onClick={() => setPreview(!preview)}>{preview ? "Write" : "Preview"}</button>
-                {(editing || quote || draft) && <button type="button" className="text-button" onClick={() => { if (window.confirm("Discard this draft?")) resetDraft(); }}>Cancel draft</button>}
+                <button type="button" className="text-button" onClick={() => { if (!(draft || quote || editing) || window.confirm("Discard this draft?")) resetDraft(); }}>Cancel</button>
               </div>
-            </form>
-            {!notes.length && <p className="muted">Keep your interpretation alongside the source. Saved passages and your own notes will appear here.</p>}
+            </form>}
+            {!notes.length && !showEditor && <p className="muted">Keep your thoughts beside the book. Saved passages and your own notes will show up here, and stay searchable in Notes.</p>}
             {notes.map((note) => <article className="book-note" key={note.document_id}>
               <div className="prose">{markdown(note.text)}</div>
               {note.source_quote && <blockquote>{note.source_quote}</blockquote>}
@@ -144,8 +233,10 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
                 <button className="text-button danger" disabled={busy} onClick={() => { if (window.confirm("Delete this note?")) run(async () => { await request(`/documents/${note.document_id}`, { method: "DELETE" }); if (editing === note.document_id) resetDraft(); await loadNotes(); }, "Note deleted."); }}>Delete</button>
               </footer>
             </article>)}
-          </div>
-          <VocabularyPanel apiBase={apiBase} documents={[doc]} documentId={doc.document_id} onOpenDocument={(_, at) => onRead(source(at || 1))} onDirty={setVocabularyDirty} />
+          </section>
+
+          {hasSource && doc.file_type === "pdf" && <details className="book-fold"><summary>Marks in your PDF</summary><PdfMarks apiBase={apiBase} doc={doc} onChanged={onChanged} /></details>}
+          <details className="book-fold"><summary>Vocabulary</summary><VocabularyPanel apiBase={apiBase} documents={[doc]} documentId={doc.document_id} onOpenDocument={(_, at) => onRead(source(at || 1))} onDirty={setVocabularyDirty} /></details>
         </>}
       </div>
     </section>, document.body,
