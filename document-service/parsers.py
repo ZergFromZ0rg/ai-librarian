@@ -159,16 +159,56 @@ def _pages_from_text(text: str, *, format_name: str = "markdown") -> List[Dict]:
     ]
 
 
+_DOCX_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_DOCX_PARAGRAPH_TAG = _DOCX_NS + "p"
+_DOCX_TABLE_TAG = _DOCX_NS + "tbl"
+
+
+def _table_markdown(table) -> str:
+    """A Word table as one GFM block: header, separator, then a row per line.
+
+    The rows must stay on consecutive lines. Joined with the blank lines that
+    separate paragraphs, each row parses as a paragraph of its own and is
+    indexed as ``| Cost per pallet | €51.07 |`` with nothing to say whose cost.
+    """
+    rows = []
+    for row in table.rows:
+        cells = [_clean(cell.text).replace("|", "\\|") for cell in row.cells]
+        if any(cells):
+            rows.append(cells)
+    if not rows:
+        return ""
+    header = rows[0]
+    lines = ["| " + " | ".join(header) + " |", "| " + " | ".join("---" for _ in header) + " |"]
+    lines.extend("| " + " | ".join(row[: len(header)]) + " |" for row in rows[1:])
+    return "\n".join(lines)
+
+
 def _extract_word(path: Path) -> List[Dict]:
     try:
         from docx import Document
     except ImportError as exc:  # makes a bare local checkout still importable
         raise RuntimeError("Word support is unavailable; install python-docx") from exc
 
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
     document = Document(str(path))
     sections = []
     current = []
-    for paragraph in document.paragraphs:
+    # Paragraphs and tables in the order they sit on the page: reading them from
+    # ``document.paragraphs`` and ``document.tables`` separately moved every
+    # table to the end, away from the heading and the "the table below lists…"
+    # sentence that say what it is about.
+    for child in document.element.body.iterchildren():
+        if child.tag == _DOCX_TABLE_TAG:
+            table = _table_markdown(Table(child, document))
+            if table:
+                current.append(table)
+            continue
+        if child.tag != _DOCX_PARAGRAPH_TAG:
+            continue
+        paragraph = Paragraph(child, document)
         text = paragraph.text.strip()
         if not text:
             continue
@@ -181,17 +221,6 @@ def _extract_word(path: Path) -> List[Dict]:
             current.append(f"{'#' * min(int(level), 6)} {text}")
         else:
             current.append(text)
-    for table in document.tables:
-        rows = []
-        for row in table.rows:
-            cells = [_clean(cell.text).replace("|", "\\|") for cell in row.cells]
-            if any(cells):
-                rows.append(cells)
-        if rows:
-            header = rows[0]
-            current.append("| " + " | ".join(header) + " |")
-            current.append("| " + " | ".join("---" for _ in header) + " |")
-            current.extend("| " + " | ".join(row[: len(header)]) + " |" for row in rows[1:])
     if current:
         sections.append("\n\n".join(current))
     return _pages_from_text("\n\n".join(sections))

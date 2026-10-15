@@ -51,6 +51,41 @@ def test_word_headings_paragraphs_and_tables(tmp_path):
     assert "| Camus | The Stranger |" in page["text"]
 
 
+def test_word_tables_keep_their_place_and_stay_one_block(tmp_path):
+    docx = pytest.importorskip("docx")
+    from chunking import chunk_document
+
+    document = docx.Document()
+    document.add_heading("Costs", level=1)
+    document.add_paragraph("The table below lists cost figures for the Galholm depot.")
+    table = document.add_table(rows=0, cols=2)
+    for cells in (("Measure", "Value"), ("Cost per pallet", "\u20ac51.07"), ("Cost per order", "\u20ac4.10")):
+        row = table.add_row().cells
+        row[0].text, row[1].text = cells
+    document.add_paragraph("Figures exclude VAT.")
+    document.add_heading("Staffing", level=1)
+    document.add_paragraph("The depot employs 288 people.")
+    path = tmp_path / "depot.docx"
+    document.save(path)
+
+    (page,), _ = parsers.extract_source_pages(path)
+    text = page["text"]
+    # Read in document order: the table is between its introduction and what follows.
+    assert text.index("cost figures") < text.index("| Measure") < text.index("Figures exclude VAT")
+    assert text.index("Figures exclude VAT") < text.index("# Staffing") < text.index("288 people")
+    # One contiguous block, not a row per paragraph.
+    assert (
+        "| Measure | Value |\n| --- | --- |\n| Cost per pallet | \u20ac51.07 |\n| Cost per order | \u20ac4.10 |"
+        in text
+    )
+
+    # So no passage is a bare row: the one holding a row also names the depot.
+    for group in chunk_document([page]):
+        for unit in group["retrieval_units"]:
+            if "Cost per pallet" in unit["text"]:
+                assert "Galholm depot" in unit["text"]
+
+
 def test_excel_sheet_per_page(tmp_path):
     openpyxl = pytest.importorskip("openpyxl")
     workbook = openpyxl.Workbook()

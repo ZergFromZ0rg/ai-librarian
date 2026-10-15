@@ -60,6 +60,9 @@ class Block:
 class Unit:
     blocks: Sequence[Block]
     protected_type: str | None = None
+    # The nearest heading above a table when none of the unit's own blocks is
+    # one (the table sits a few paragraphs below its section title).
+    heading: str = ""
 
     @property
     def text(self) -> str:
@@ -432,6 +435,15 @@ def _is_structural_anchor(block: Block) -> bool:
     return block.type in {"equation", "table"}
 
 
+def _enclosing_heading(blocks: Sequence[Block], first_member: int) -> str:
+    """The nearest heading above a unit, unless the unit already opens with it."""
+    if blocks[first_member].type == "heading":
+        return ""
+    return next(
+        (block.text for block in reversed(blocks[:first_member]) if block.type == "heading"), ""
+    )
+
+
 def bind_structural_context(blocks: Sequence[Block]) -> List[Unit]:
     """Bind equations/tables to their adjacent prose and captions.
 
@@ -472,7 +484,11 @@ def bind_structural_context(blocks: Sequence[Block]) -> List[Unit]:
             member_indices.append(cursor)
 
         member_indices = sorted(set(member_indices))
-        unit = Unit(tuple(blocks[index] for index in member_indices), protected_type)
+        unit = Unit(
+            tuple(blocks[index] for index in member_indices),
+            protected_type,
+            _enclosing_heading(blocks, member_indices[0]) if protected_type == "table" else "",
+        )
         protected[min(member_indices)] = unit
         consumed.update(member_indices)
 
@@ -548,6 +564,61 @@ def _split_table_windows(text: str, max_tokens: int, overlap_tokens: int) -> Lis
     return _deduplicate_texts(windows)
 
 
+# A table's context may take at most 1/this of a passage, leaving the rest to rows.
+_TABLE_CONTEXT_SHARE = 3
+
+
+def _clip_tokens(text: str, max_tokens: int, *, tail: bool = False) -> str:
+    """The first (or, with ``tail``, last) ``max_tokens`` tokens of ``text``."""
+    spans = _token_spans(text)
+    if max_tokens < 1 or not spans:
+        return ""
+    if len(spans) <= max_tokens:
+        return text.strip()
+    if tail:
+        return text[spans[-max_tokens][0] :].strip()
+    return text[: spans[max_tokens - 1][1]].strip()
+
+
+def _table_context(blocks: Sequence[Block], heading: str, max_tokens: int) -> str:
+    """What says whose table this is: the heading it sits under plus the
+    caption or sentence introducing it, clipped to ``max_tokens``.
+
+    A table row is ``| Cost per pallet | €51.07 |``; the depot it describes is
+    named only in the lines around it, so a passage made of the table alone
+    cannot be found by asking about that depot.
+    """
+    tables = [index for index, block in enumerate(blocks) if block.type == "table"]
+    if not tables or max_tokens < 1:
+        return ""
+    before, after = blocks[: tables[0]], blocks[tables[-1] + 1 :]
+    heading = next((block.text for block in reversed(before) if block.type == "heading"), heading)
+    intro = [block.text for block in before if block.type in {"paragraph", "caption"}]
+    if not any(block.type == "caption" for block in before):  # a caption under the table
+        intro += [block.text for block in after if block.type == "caption"]
+
+    parts = []
+    if heading:
+        parts.append(_clip_tokens(heading, max(1, max_tokens // 2)))
+    if intro:
+        left = max_tokens - sum(count_tokens(part) for part in parts)
+        parts.append(_clip_tokens("\n\n".join(intro), left, tail=True))
+    return "\n\n".join(part for part in parts if part)
+
+
+def _table_windows(text: str, context: str, max_tokens: int, overlap_tokens: int) -> List[str]:
+    """Windows of a table, each opening with ``context`` (and, once the table is
+    split, with its header row — see :func:`_split_table_windows`)."""
+    if context:
+        budget = max_tokens - count_tokens(context) - 2  # 2: the blank line between
+        if budget >= max_tokens // 2:
+            return [
+                f"{context}\n\n{window}"
+                for window in _split_table_windows(text, budget, overlap_tokens)
+            ]
+    return _split_table_windows(text, max_tokens, overlap_tokens)
+
+
 def _split_block_windows(block: Block, max_tokens: int, overlap_tokens: int) -> List[str]:
     if block.type == "table":
         return _split_table_windows(block.text, max_tokens, overlap_tokens)
@@ -570,6 +641,7 @@ def _protected_bridge_units(
     anchor_type: str,
     target_tokens: int,
     overlap_tokens: int,
+    table_context: str = "",
 ) -> List[str]:
     anchors = [block for block in blocks if block.type == anchor_type]
     if not anchors:
@@ -578,21 +650,33 @@ def _protected_bridge_units(
     anchor_tokens = count_tokens(anchor_text)
     if anchor_tokens >= target_tokens:
         if anchor_type == "table" and len(anchors) == 1:
-            return _split_table_windows(anchor_text, target_tokens, overlap_tokens)
+            return _table_windows(anchor_text, table_context, target_tokens, overlap_tokens)
         return _split_token_windows(anchor_text, target_tokens, overlap_tokens)
 
-    context_budget = max(1, target_tokens - anchor_tokens - 2)
+    # A table is never offered without its context (_table_context already holds
+    # the heading and introduction, so the neighbouring prose is not repeated
+    # in front of it). One that cannot fit with it is covered by the windows
+    # _build_retrieval_units makes of each table block.
+    anchor_unit = anchor_text
+    if table_context:
+        anchor_unit = f"{table_context}\n\n{anchor_text}"
+        if count_tokens(anchor_unit) > target_tokens:
+            return []
+    unit_tokens = count_tokens(anchor_unit)
+
+    context_budget = max(1, target_tokens - unit_tokens - 2)
     context_overlap = min(overlap_tokens, max(0, context_budget - 1))
-    bridges: List[str] = [anchor_text]
+    bridges: List[str] = [anchor_unit]
     first_anchor = next(index for index, block in enumerate(blocks) if block.type == anchor_type)
     last_anchor = max(index for index, block in enumerate(blocks) if block.type == anchor_type)
-    prefix = join_blocks(blocks[:first_anchor])
+    prefix = "" if table_context else join_blocks(blocks[:first_anchor])
     suffix = join_blocks(blocks[last_anchor + 1 :])
 
     for context in _split_token_windows(prefix, context_budget, context_overlap):
-        bridges.append(f"{context}\n\n{anchor_text}")
-    for context in _split_token_windows(suffix, context_budget, context_overlap):
-        bridges.append(f"{anchor_text}\n\n{context}")
+        bridges.append(f"{context}\n\n{anchor_unit}")
+    if target_tokens - unit_tokens - 2 >= 1:
+        for context in _split_token_windows(suffix, context_budget, context_overlap):
+            bridges.append(f"{anchor_unit}\n\n{context}")
     return _deduplicate_texts(bridges)
 
 
@@ -602,21 +686,32 @@ def _build_retrieval_units(
     target_tokens: int,
     soft_max_tokens: int,
     overlap_tokens: int,
+    heading: str = "",
 ) -> List[Dict]:
     parent_text = join_blocks(blocks)
+    if protected_type == "table" and heading:  # the section title is further up
+        parent_text = f"{heading}\n\n{parent_text}"
     candidate_texts: List[tuple[str, str]] = []
     if count_tokens(parent_text) <= soft_max_tokens:
         candidate_texts.append(("group", parent_text))
 
+    context = (
+        _table_context(blocks, heading, target_tokens // _TABLE_CONTEXT_SHARE)
+        if protected_type == "table"
+        else ""
+    )
     for block in blocks:
-        pieces = _split_block_windows(block, target_tokens, overlap_tokens)
+        if block.type == "table":
+            pieces = _table_windows(block.text, context, target_tokens, overlap_tokens)
+        else:
+            pieces = _split_block_windows(block, target_tokens, overlap_tokens)
         candidate_texts.extend(("block", piece) for piece in pieces)
 
     if protected_type:
         candidate_texts.extend(
             ("bridge", text)
             for text in _protected_bridge_units(
-                blocks, protected_type, target_tokens, overlap_tokens
+                blocks, protected_type, target_tokens, overlap_tokens, context
             )
         )
 
@@ -643,6 +738,7 @@ def _make_group(
     target_tokens: int,
     soft_max_tokens: int,
     overlap_tokens: int,
+    heading: str = "",
 ) -> Dict:
     text = join_blocks(blocks)
     return {
@@ -659,6 +755,7 @@ def _make_group(
             target_tokens,
             soft_max_tokens,
             overlap_tokens,
+            heading,
         ),
     }
 
@@ -708,6 +805,7 @@ def build_semantic_groups(
                     target_tokens,
                     soft_max_tokens,
                     overlap_tokens,
+                    unit.heading,
                 )
             )
             continue

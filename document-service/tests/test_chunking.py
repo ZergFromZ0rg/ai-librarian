@@ -206,6 +206,148 @@ def test_large_table_repeats_header_in_each_table_child():
     assert all("| Model | Accuracy |" in text for text in table_children)
 
 
+def _units_with(group, needle):
+    return [unit for unit in group["retrieval_units"] if needle in unit["text"]]
+
+
+def _table_group(pages, **kwargs):
+    return next(g for g in chunk_document(pages, **kwargs) if g["protected_type"] == "table")
+
+
+def test_every_table_passage_opens_with_its_heading_and_introduction():
+    # The heading is not adjacent to the table, so the bound group itself lacks it.
+    pages = [
+        {
+            "page": 1,
+            "text": (
+                "## Costs of the Galholm depot\n\n"
+                "Prices are in euros.\n\n"
+                "The table below lists the figures.\n\n"
+                "| Measure | Value |\n| --- | --- |\n| Cost per pallet | 51.07 |\n\n"
+                "Figures exclude VAT."
+            ),
+        }
+    ]
+
+    group = _table_group(pages)
+
+    units = _units_with(group, "Cost per pallet")
+    assert {unit["kind"] for unit in units} >= {"group"}
+    for unit in units:
+        assert unit["text"].startswith("## Costs of the Galholm depot"), unit
+        assert "The table below lists the figures." in unit["text"]
+        assert "| Measure | Value |" in unit["text"]
+    # What readers are shown is unchanged: only the bound blocks.
+    assert not group["text"].startswith("## Costs")
+
+
+def test_table_passages_find_the_heading_above_unrelated_paragraphs():
+    pages = [
+        {
+            "page": 1,
+            "text": (
+                "# Galholm depot\n\n"
+                "It opened in 2009 and is run by a site manager.\n\n"
+                "Dock doors are labelled by lane.\n\n"
+                "| Measure | Value |\n| --- | --- |\n| Cost per pallet | 51.07 |"
+            ),
+        }
+    ]
+
+    group = _table_group(pages)
+
+    assert "Galholm" not in group["text"]
+    units = _units_with(group, "Cost per pallet")
+    assert units
+    for unit in units:
+        assert unit["text"].startswith("# Galholm depot"), unit
+        assert "Dock doors are labelled by lane." in unit["text"]
+
+
+def test_table_passages_use_a_caption_below_the_table():
+    pages = [
+        {
+            "page": 1,
+            "text": (
+                "# Results\n\n"
+                "| Model | Accuracy |\n| --- | --- |\n| Base | 91% |\n\n"
+                "Table 4: Accuracy of the baseline"
+            ),
+        }
+    ]
+
+    group = _table_group(pages)
+
+    block = next(unit for unit in _units_with(group, "| Base |") if unit["kind"] == "block")
+    assert block["text"].startswith("# Results")
+    assert "Table 4: Accuracy of the baseline" in block["text"]
+
+
+def test_every_window_of_a_large_table_carries_context_and_header():
+    rows = "\n".join(f"| Model {index} | {index}% |" for index in range(60))
+    pages = [
+        {
+            "page": 1,
+            "text": (
+                "## Accuracy by model\n\n"
+                "Table 1: Results on the held-out set\n\n"
+                f"| Model | Accuracy |\n| --- | --- |\n{rows}"
+            ),
+        }
+    ]
+
+    group = _table_group(pages)
+
+    windows = _units_with(group, "| --- |")
+    assert len(windows) >= 3
+    for unit in group["retrieval_units"]:
+        if "| Model " in unit["text"]:
+            assert unit["text"].startswith("## Accuracy by model"), unit
+            assert "Table 1: Results on the held-out set" in unit["text"]
+            assert "| Model | Accuracy |" in unit["text"]
+        assert unit["token_count"] <= 240
+    # Every row is still reachable.
+    joined = "\n".join(unit["text"] for unit in group["retrieval_units"])
+    assert all(f"| Model {index} |" in joined for index in range(60))
+
+
+def test_table_context_is_clipped_to_a_share_of_the_passage():
+    long_intro = " ".join(f"word{index}" for index in range(400)) + " the figures follow."
+    pages = [
+        {
+            "page": 1,
+            "text": f"# Costs\n\n{long_intro}\n\n| Measure | Value |\n| --- | --- |\n| Cost | 51.07 |",
+        }
+    ]
+
+    group = _table_group(pages)
+
+    block = next(unit for unit in _units_with(group, "| Cost |") if unit["kind"] == "block")
+    # The end of the introduction (the part next to the table) survives; the start does not.
+    assert block["text"].startswith("# Costs")
+    assert "the figures follow." in block["text"]
+    assert "word0 " not in block["text"]
+    assert block["token_count"] <= 180
+
+
+def test_a_table_with_no_surrounding_text_is_indexed_as_it_always_was():
+    table = "| Model | Accuracy |\n| --- | --- |\n| Base | 91% |"
+    [group] = chunk_document([{"page": 1, "text": table}])
+    assert [unit["text"] for unit in group["retrieval_units"]] == [table]
+
+
+def test_equation_passages_get_no_table_context():
+    pages = [
+        {
+            "page": 1,
+            "text": "# Method\n\nSome unrelated opening.\n\nMore opening text.\n\n$$\nAx = b\n$$",
+        }
+    ]
+    group = next(g for g in chunk_document(pages) if g["protected_type"] == "equation")
+    block = next(u["text"] for u in group["retrieval_units"] if u["kind"] == "block" and "Ax = b" in u["text"])
+    assert block == "$$\nAx = b\n$$"
+
+
 def test_each_constituent_block_is_searchable_but_parent_text_is_preserved():
     pages = [
         {

@@ -269,7 +269,7 @@ CHUNK_SOFT_MAX_TOKENS = int(os.environ.get("CHUNK_SOFT_MAX_TOKENS", "220"))
 CHUNK_HARD_MAX_TOKENS = int(os.environ.get("CHUNK_HARD_MAX_TOKENS", "240"))
 CHUNK_OVERLAP_TOKENS = int(os.environ.get("CHUNK_OVERLAP_TOKENS", "32"))
 DOC_ID_PATTERN = re.compile(r"^[a-f0-9]{12}$")
-PIPELINE_VERSION = 13  # spreadsheet/CSV rows as labelled records, PowerPoint speaker notes
+PIPELINE_VERSION = 14  # Word tables in reading order, whole; table passages carry their heading and caption
 
 for directory in (
     DOCUMENTS_DIR, METADATA_DIR, EXTRACTED_DIR, CHUNKS_DIR, JOBS_DIR, LOGS_DIR, INGEST_ROOT, INTAKE_DIR
