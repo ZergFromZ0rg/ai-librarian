@@ -82,12 +82,16 @@ describe("shareable views", () => {
     const search = `?lib.sort=bogus&lib.order=sideways&lib.view=cards&lib.q=${"x".repeat(300)}&lib.status=reading`;
     const view = viewFromSearch(search);
     expect(view.filters).toEqual({ ...EMPTY_FILTERS, status: "reading" });
-    expect(view.layout).toBe("list");
+    expect(view.layout).toBe("grid");
+  });
+
+  it("opens an old bookmark of the retired List layout as the cover grid", () => {
+    expect(viewFromSearch("?lib.view=list").layout).toBe("grid");
   });
 
   it("replaces only its own parameters in an address", () => {
-    expect(searchWithView("?foo=1&lib.status=read", { ...EMPTY_FILTERS, notes: "with" }, "list")).toBe("?foo=1&lib.notes=with");
-    expect(searchWithView("?lib.status=read", EMPTY_FILTERS, "list")).toBe("");
+    expect(searchWithView("?foo=1&lib.status=read", { ...EMPTY_FILTERS, notes: "with" }, "grid")).toBe("?foo=1&lib.notes=with");
+    expect(searchWithView("?lib.status=read", EMPTY_FILTERS, "grid")).toBe("");
   });
 
   it("describes active constraints in words", () => {

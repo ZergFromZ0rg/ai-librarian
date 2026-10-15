@@ -1,13 +1,36 @@
 import React, { useEffect, useMemo, useState } from "react";
 import Cover from "./Cover.jsx";
-import { CoverFlags } from "./DocMarks.jsx";
 import LibraryDiary from "./LibraryDiary.jsx";
 import LibraryLedger from "./LibraryLedger.jsx";
 import { starText } from "./ratings.js";
 import { EMPTY_FILTERS, facetValues, filterLabels, filterLibrary, searchWithView, viewFromSearch } from "./libraryExplore.js";
-import { FORM_LABELS, bookForm, displayTitle, loadStored, saveStored } from "./storage.js";
+import { FORM_LABELS, displayTitle, loadStored, readingStatus, saveStored } from "./storage.js";
 
 const SAVED_KEY = "ai-librarian.library.saved-views";
+const STATUS_LABELS = { to_read: "To read", reading: "Reading", read: "Read", abandoned: "Abandoned" };
+
+// One book as a cover, the way a poster wall shows films: the artwork carries
+// the book, and the details wait for a hover or a focus. Touch screens have no
+// hover, so there the title sits under the cover instead.
+function Poster({ apiBase, doc, onOpen }) {
+  const title = doc.title || displayTitle(doc.filename);
+  const status = readingStatus(doc);
+  const progress = Math.round(doc.reading_progress || 0);
+  const notes = doc.note_count || 0;
+  return <button type="button" className="poster" onClick={() => onOpen(doc)} aria-label={doc.author ? `${title}, by ${doc.author}` : title}>
+    <Cover apiBase={apiBase} documentId={doc.document_id} filename={doc.title || doc.filename} author={doc.author} fileType={doc.file_type} width={320} className="poster-cover">
+      {notes > 0 && <span className="note-ribbon" role="img" aria-label={`${notes} ${notes === 1 ? "note" : "notes"}`} title={`${notes} ${notes === 1 ? "note" : "notes"}`} />}
+      {status === "reading" && progress > 0 && progress < 100 && <span className="poster-progress" aria-hidden="true"><span style={{ width: `${progress}%` }} /></span>}
+      <span className="poster-meta" aria-hidden="true">
+        <span className={`poster-status status-${status}`}>{STATUS_LABELS[status] || STATUS_LABELS.to_read}</span>
+        {doc.rating ? <span className="poster-stars">{starText(doc.rating)}</span> : null}
+        {doc.liked ? <span className="poster-heart">♥</span> : null}
+      </span>
+    </Cover>
+    <span className="poster-tip" aria-hidden="true"><strong>{title}</strong>{doc.author && <span>{doc.author}</span>}</span>
+    <span className="poster-caption" aria-hidden="true"><strong>{title}</strong>{doc.author && <span>{doc.author}</span>}</span>
+  </button>;
+}
 
 export default function LibraryExplore({ apiBase, documents, collections, onOpenDocument, preset }) {
   // The view lives in the address (?lib.status=read&lib.view=ledger…) so it can
@@ -28,7 +51,7 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
     if (next !== window.location.search) window.history.replaceState(null, "", `${window.location.pathname}${next}${window.location.hash}`);
   }, [filters, layout]);
   useEffect(() => () => {
-    const cleared = searchWithView(window.location.search, EMPTY_FILTERS, "list");
+    const cleared = searchWithView(window.location.search, EMPTY_FILTERS, "grid");
     if (cleared !== window.location.search) window.history.replaceState(null, "", `${window.location.pathname}${cleared}${window.location.hash}`);
   }, []);
   // What you wrote about each book, so the search box can find it. Refreshed
@@ -93,16 +116,12 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
       </div>
       </div>}
     </section>
-    <div className="explore-result-head"><strong>{results.length.toLocaleString()}</strong> book{results.length === 1 ? "" : "s"}      <span className="layout-toggle" role="group" aria-label="Layout">{[["list", "List"], ["ledger", "Ledger"], ["diary", "Diary"]].map(([value, label]) => <button type="button" key={value} className={layout === value ? "active" : ""} aria-pressed={layout === value} onClick={() => setLayout(value)}>{label}</button>)}</span>
+    <div className="explore-result-head"><strong>{results.length.toLocaleString()}</strong> book{results.length === 1 ? "" : "s"}      <span className="layout-toggle" role="group" aria-label="Layout">{[["grid", "Covers"], ["ledger", "Ledger"], ["diary", "Diary"]].map(([value, label]) => <button type="button" key={value} className={layout === value ? "active" : ""} aria-pressed={layout === value} onClick={() => setLayout(value)}>{label}</button>)}</span>
     </div>
     {layout === "ledger" && results.length > 0 && <LibraryLedger rows={results} filters={filters} onOpen={onOpenDocument} onSort={(key) => setFilters((current) => (current.sort === key ? { ...current, order: current.order === "reverse" ? "default" : "reverse" } : { ...current, sort: key, order: "default" }))} />}
     {layout === "diary" && results.length > 0 && <LibraryDiary apiBase={apiBase} rows={results} onOpen={onOpenDocument} />}
-    {layout === "list" && <div className="explore-results">
-      {results.map((doc) => <button type="button" className="explore-book" key={doc.document_id} onClick={() => onOpenDocument(doc)}>
-        <Cover apiBase={apiBase} documentId={doc.document_id} filename={doc.title || doc.filename} author={doc.author} fileType={doc.file_type} width={90}><CoverFlags doc={doc} /></Cover>
-        <span className="explore-book-copy"><strong>{doc.title || displayTitle(doc.filename)}</strong><span>{doc.author || "Unknown author"}</span><small>{doc.file_type?.toUpperCase() || "BOOK"}{bookForm(doc) ? ` · ${FORM_LABELS[bookForm(doc)]}` : ""} · {doc.reading_status?.replace("_", " ") || "to read"}{doc.rating ? ` · ${starText(doc.rating)}` : ""}{doc.liked ? " · ♥" : ""}</small></span>
-        <span className="explore-progress"><span style={{ width: `${doc.reading_progress || 0}%` }} />{doc.reading_progress || 0}%</span>
-      </button>)}
+    {layout === "grid" && <div className="poster-grid">
+      {results.map((doc) => <Poster key={doc.document_id} apiBase={apiBase} doc={doc} onOpen={onOpenDocument} />)}
     </div>}
     {!results.length && <p className="muted empty-state" role="status">{activeCount ? `No books match ${filterLabels(filters, collections).join(" · ")}. ` : "No books yet. "}{activeCount > 0 && <button type="button" className="text-button" onClick={() => setFilters(EMPTY_FILTERS)}>Clear filters</button>}</p>}
   </div>;

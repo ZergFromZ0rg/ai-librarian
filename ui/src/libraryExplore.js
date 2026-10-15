@@ -114,14 +114,14 @@ const PARAMS = {
   genre: "genre", author: "author", acquisition: "acq", finishedYear: "year", indexing: "index", notes: "notes", liked: "liked",
   sort: "sort", order: "order",
 };
-export const LAYOUTS = ["list", "ledger", "diary"];
+export const LAYOUTS = ["grid", "ledger", "diary"];
 const PREFIX = "lib.";
 
-export function viewToParams(filters, layout = "list") {
+export function viewToParams(filters, layout = "grid") {
   const f = { ...EMPTY_FILTERS, ...filters };
   const params = new URLSearchParams();
   for (const [key, name] of Object.entries(PARAMS)) if (f[key] !== EMPTY_FILTERS[key]) params.set(PREFIX + name, f[key]);
-  if (layout !== "list") params.set(`${PREFIX}view`, layout);
+  if (layout !== "grid") params.set(`${PREFIX}view`, layout);
   return params;
 }
 
@@ -136,7 +136,7 @@ export function viewFromSearch(search) {
     filters[key] = value;
   }
   const layout = source.get(`${PREFIX}view`);
-  return { filters, layout: LAYOUTS.includes(layout) ? layout : "list" };
+  return { filters, layout: LAYOUTS.includes(layout) ? layout : "grid" };
 }
 
 // `search` with this view's parameters replaced and everything else kept.
