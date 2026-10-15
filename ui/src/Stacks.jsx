@@ -721,7 +721,7 @@ export default function Stacks(props) {
         )}
       </div>
 
-      {tab === "browse" && <LibraryExplore apiBase={apiBase} documents={documents} collections={allCollections} onOpenDocument={onOpenDocument} preset={browsePreset} />}
+      {tab === "browse" && <LibraryExplore apiBase={apiBase} documents={documents} collections={allCollections} onOpenDocument={onOpenDocument} onNavigate={setTab} preset={browsePreset} />}
       {tab === "shelves" && <Shelves {...props} collection={activeCollection} libraryRoot={activeCollection?.path ?? props.libraryRoot} view={view} />}
       {tab === "sorted" && <ShelfView apiBase={apiBase} documents={documents} onChanged={onImported} onOpenDocument={onOpenDocument} onScopeShelf={onScopeShelf} />}
       {tab === "notes" && <NotesPanel apiBase={apiBase} onChanged={onImported} onOpenSource={(id) => onOpenDocument({ document_id: id })} />}

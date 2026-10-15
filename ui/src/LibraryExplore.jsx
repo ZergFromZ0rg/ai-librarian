@@ -2,8 +2,10 @@ import React, { useEffect, useMemo, useState } from "react";
 import Cover from "./Cover.jsx";
 import LibraryDiary from "./LibraryDiary.jsx";
 import LibraryLedger from "./LibraryLedger.jsx";
+import LibraryRail from "./LibraryRail.jsx";
 import { starText } from "./ratings.js";
 import { EMPTY_FILTERS, facetValues, filterLabels, filterLibrary, searchWithView, viewFromSearch } from "./libraryExplore.js";
+import { shelfFilters } from "./libraryRail.js";
 import { FORM_LABELS, displayTitle, loadStored, readingStatus, saveStored } from "./storage.js";
 
 const SAVED_KEY = "ai-librarian.library.saved-views";
@@ -32,13 +34,13 @@ function Poster({ apiBase, doc, onOpen }) {
   </button>;
 }
 
-export default function LibraryExplore({ apiBase, documents, collections, onOpenDocument, preset }) {
+export default function LibraryExplore({ apiBase, documents, collections, onOpenDocument, onNavigate, preset }) {
   // The view lives in the address (?lib.status=read&lib.view=ledger…) so it can
   // be bookmarked, and survives opening a book over it and closing it again.
   const [initial] = useState(() => viewFromSearch(window.location.search));
   const [filters, setFilters] = useState(initial.filters);
   const [layout, setLayout] = useState(initial.layout);
-  const [noteText, setNoteText] = useState(() => new Map());
+  const [notes, setNotes] = useState([]);
   const [saved, setSaved] = useState(() => {
     const value = loadStored(SAVED_KEY, [], true);
     return Array.isArray(value) ? value : [];
@@ -54,19 +56,23 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
     const cleared = searchWithView(window.location.search, EMPTY_FILTERS, "grid");
     if (cleared !== window.location.search) window.history.replaceState(null, "", `${window.location.pathname}${cleared}${window.location.hash}`);
   }, []);
-  // What you wrote about each book, so the search box can find it. Refreshed
-  // when a note is added, removed or edited (their stamps change).
+  // What you wrote about each book, so the search box can find it, and the
+  // quotes the side rail shows. Refreshed when a note is added, removed or
+  // edited (their stamps change).
   const noteStamp = useMemo(() => documents.filter((doc) => doc.collection_id === "notes").map((doc) => `${doc.document_id}${doc.updated_at}`).join("|"), [documents]);
   useEffect(() => {
     let cancelled = false;
     fetch(`${apiBase}/notes`).then((response) => (response.ok ? response.json() : { notes: [] })).then((data) => {
       if (cancelled) return;
-      const byBook = new Map();
-      for (const note of data.notes || []) if (note.source_document_id && note.text) byBook.set(note.source_document_id, `${byBook.get(note.source_document_id) || ""} ${note.text}`);
-      setNoteText(byBook);
+      setNotes(data.notes || []);
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [apiBase, noteStamp]);
+  const noteText = useMemo(() => {
+    const byBook = new Map();
+    for (const note of notes) if (note.source_document_id && note.text) byBook.set(note.source_document_id, `${byBook.get(note.source_document_id) || ""} ${note.text}`);
+    return byBook;
+  }, [notes]);
   const facets = useMemo(() => facetValues(documents), [documents]);
   const results = useMemo(() => filterLibrary(documents, filters, noteText), [documents, filters, noteText]);
   const update = (key, value) => setFilters((current) => ({ ...current, [key]: value }));
@@ -81,7 +87,8 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
   const facetCount = Object.entries(filters).filter(([key, value]) => !["sort", "order", "query"].includes(key) && value !== "all").length;
   const activeCount = facetCount + (filters.query ? 1 : 0);
   const summary = filterLabels({ ...filters, query: "" }, collections);
-  return <div className="library-explore">
+  return <div className="explore-layout">
+  <div className="library-explore">
     <section className="explore-controls" aria-label="Filter library">
       <div className="explore-search-row">
         <label className="explore-search"><span>Search this library</span><input className="input" value={filters.query} onChange={(event) => update("query", event.target.value)} placeholder="Title, author, or ISBN" /></label>
@@ -124,5 +131,7 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
       {results.map((doc) => <Poster key={doc.document_id} apiBase={apiBase} doc={doc} onOpen={onOpenDocument} />)}
     </div>}
     {!results.length && <p className="muted empty-state" role="status">{activeCount ? `No books match ${filterLabels(filters, collections).join(" · ")}. ` : "No books yet. "}{activeCount > 0 && <button type="button" className="text-button" onClick={() => setFilters(EMPTY_FILTERS)}>Clear filters</button>}</p>}
+  </div>
+  <LibraryRail apiBase={apiBase} documents={documents} notes={notes} filters={filters} onShelf={(preset) => setFilters((current) => shelfFilters(current, preset))} onNavigate={onNavigate} onOpenDocument={onOpenDocument} />
   </div>;
 }

@@ -5263,7 +5263,7 @@ main {
 .poster-caption strong { display: -webkit-box; overflow: hidden; font-size: 12.5px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .poster-caption span { overflow: hidden; color: var(--muted); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
 @media (hover: hover) {
-  .poster-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 22px 18px; }
+  .poster-grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 22px 18px; }
   .poster-caption { display: none; }
   .poster-meta { position: absolute; z-index: 1; inset: auto 0 0; display: flex; align-items: center; gap: 6px; padding: 26px 9px 10px; background: linear-gradient(transparent, rgba(8, 9, 11, 0.85)); color: #fff; font: 600 11px/1.2 var(--mono, monospace); opacity: 0; transition: opacity 0.14s; pointer-events: none; }
   .poster-status { font-size: 9.5px; letter-spacing: 0.05em; text-transform: uppercase; }
@@ -5916,3 +5916,78 @@ main {
   .aicheck-actions { grid-column: 1; grid-row: auto; }
 }
 
+
+/* ------------------------------------------------- library side rail -- */
+
+/* The books on the left, a rail on the right: shelves, what you are reading,
+   a picture of your year, a passage you saved. */
+.explore-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 28px; align-items: start; }
+.library-rail { display: grid; gap: 22px; min-width: 0; }
+.side-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.side-tile { display: grid; grid-template-columns: auto 1fr; grid-template-areas: "icon count" "label label"; align-items: center; row-gap: 14px; padding: 12px; border: 1px solid var(--rule); border-radius: 12px; background: var(--surface); color: var(--ink); text-align: left; cursor: pointer; transition: border-color 0.12s, box-shadow 0.12s, background 0.12s; }
+.side-tile:hover { border-color: var(--rule-strong); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06); }
+.side-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.side-tile-icon { grid-area: icon; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: var(--surface-2); color: var(--ink-2); }
+.side-tile strong { grid-area: count; justify-self: end; font-size: 22px; font-weight: 600; line-height: 1; }
+.side-tile-label { grid-area: label; font-size: 13px; font-weight: 600; }
+.side-tile.active { border-color: var(--accent); background: var(--accent); color: var(--on-primary); }
+.side-tile.active .side-tile-icon { background: rgba(255, 255, 255, 0.2); color: inherit; }
+:root[data-theme="dark"] .side-tile.active .side-tile-icon { background: rgba(0, 0, 0, 0.16); }
+
+.side-section h3 { margin: 0; }
+.side-head { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 0 2px; border: 0; background: none; color: var(--ink-2); font: 600 13px/1.3 var(--sans); cursor: pointer; }
+.side-head:hover { color: var(--ink); }
+.side-head svg { color: var(--accent); transform: rotate(-90deg); transition: transform 0.14s; }
+.side-head svg.open { transform: none; }
+.side-body { display: grid; gap: 10px; margin-top: 10px; }
+.side-more { justify-self: start; font-size: 12px; }
+.side-empty { margin: 0; padding: 14px; border: 1px dashed var(--rule-strong); border-radius: 12px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+
+.side-reading { display: grid; grid-template-columns: 52px minmax(0, 1fr); grid-template-areas: "cover copy" "progress progress"; gap: 10px 12px; padding: 12px; border: 1px solid var(--rule); border-radius: 12px; background: var(--surface); color: var(--ink); text-align: left; cursor: pointer; transition: border-color 0.12s, box-shadow 0.12s; }
+.side-reading:hover { border-color: var(--rule-strong); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06); }
+.side-reading:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.side-cover { grid-area: cover; width: 52px; aspect-ratio: 2 / 3; border-radius: 4px; }
+.side-reading-copy { grid-area: copy; display: grid; align-content: center; gap: 2px; min-width: 0; }
+.side-reading-copy strong { display: -webkit-box; overflow: hidden; font-size: 14px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.side-reading-copy span { color: var(--muted); font-size: 12px; }
+.side-progress { grid-area: progress; display: flex; align-items: center; gap: 10px; }
+.side-bar { flex: 1; height: 6px; overflow: hidden; border-radius: 3px; background: var(--surface-3); }
+.side-bar i { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+.side-percent { min-width: 34px; color: var(--muted); font: 12px var(--mono); text-align: right; }
+
+.side-stat-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 12px; }
+.side-metric { display: inline-flex; flex: none; border: 1px solid var(--rule-strong); border-radius: 7px; overflow: hidden; }
+.side-metric button { padding: 2px 9px; border: 0; background: transparent; color: var(--ink-2); font-size: 11.5px; cursor: pointer; }
+.side-metric button + button { border-left: 1px solid var(--rule-strong); }
+.side-metric button.active { background: var(--ink); color: var(--bg); }
+.side-chart { position: relative; }
+.side-chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.side-grid { stroke: var(--rule); stroke-width: 1; }
+.side-axis { fill: var(--muted); font: 10px var(--mono); }
+.side-area { fill: var(--accent); opacity: 0.1; }
+.side-line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.side-cross { stroke: var(--rule-strong); stroke-width: 1; }
+.side-dot { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }
+.side-hit { fill: transparent; }
+.side-tip { position: absolute; z-index: 3; display: grid; gap: 1px; padding: 6px 10px; border-radius: 6px; background: var(--ink); color: var(--bg); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25); font-size: 12px; line-height: 1.3; white-space: nowrap; pointer-events: none; transform: translate(-50%, calc(-100% - 12px)); }
+.side-tip.left { transform: translate(-14px, calc(-100% - 12px)); }
+.side-tip.right { transform: translate(calc(-100% + 14px), calc(-100% - 12px)); }
+.side-tip span { opacity: 0.75; }
+
+.side-quote { margin: 0; padding: 14px 14px 10px; border: 1px solid var(--rule); border-radius: 12px; background: var(--surface); }
+.side-quote blockquote { display: -webkit-box; margin: 0; overflow: hidden; border-left: 2px solid var(--accent); padding-left: 12px; color: var(--ink); font: 14.5px/1.55 var(--serif); -webkit-box-orient: vertical; -webkit-line-clamp: 9; }
+.side-quote figcaption { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-top: 10px; color: var(--muted); font-size: 12px; }
+.side-quote figcaption .text-button { min-width: 0; overflow: hidden; font-size: 12px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.side-quote .side-shuffle { flex: none; }
+
+@media (max-width: 1000px) {
+  .explore-layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .library-rail { order: -1; gap: 18px; }
+  .side-tiles { grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .side-tile { row-gap: 10px; padding: 10px; }
+  .side-tile strong { font-size: 18px; }
+  .side-tile-label { font-size: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .side-tile, .side-reading, .side-head svg { transition: none; }
+}
