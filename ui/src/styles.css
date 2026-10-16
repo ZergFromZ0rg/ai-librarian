@@ -5995,13 +5995,16 @@ main {
 /* ------------------------------------------- book page: cover first -- */
 
 /* Open a book and the cover leads: big, with the title, your stars and one
-   way in beside it. Everything that edits lives behind "Edit details", and the
-   rest sits quietly underneath. */
-.book-page { max-width: 1080px; padding: 28px 40px 110px; }
+   way in beside it. Under it, a tab for each part of the book: its details,
+   your review, where you are, your notes, the marks in the PDF, vocabulary,
+   and finding or checking its information. */
+.book-page { max-width: 1160px; padding: 28px 40px 110px; }
 .book-page-nav { margin-bottom: 20px; padding-bottom: 0; border-bottom: 0; }
 
-.book-hero { display: grid; grid-template-columns: clamp(220px, 28vw, 320px) minmax(0, 1fr); gap: clamp(28px, 5vw, 56px); align-items: start; margin-bottom: 48px; }
-.book-hero.no-cover { grid-template-columns: minmax(0, 1fr); }
+.book-layout { display: grid; grid-template-columns: clamp(220px, 26vw, 300px) minmax(0, 1fr); gap: clamp(28px, 4.5vw, 52px); align-items: start; }
+.book-layout.no-cover { grid-template-columns: minmax(0, 1fr); }
+.book-main { min-width: 0; }
+.book-hero-art { display: grid; gap: 14px; align-content: start; min-width: 0; }
 .book-hero-cover { width: 100%; aspect-ratio: auto; border-radius: 8px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.12), 0 22px 44px -18px rgba(0, 0, 0, 0.5); }
 .book-hero-cover:not(.cover-cloth) { background: var(--surface-2); }
 .book-hero-cover img { height: auto; object-fit: contain; }
@@ -6010,7 +6013,17 @@ main {
 .book-hero-cover:not(.cover-loaded):not(.cover-blank) { aspect-ratio: 2 / 3; }
 .book-hero-cover:not(.cover-loaded) img { opacity: 0; }
 
-.book-hero-main { min-width: 0; }
+/* Cover tools and the file, quietly under the cover. */
+.book-hero-tools { min-width: 0; }
+.book-cover-tools { display: grid; gap: 10px; padding: 10px; margin: 0 -10px; border: 1px dashed transparent; border-radius: 10px; }
+.book-cover-tools:focus-visible, .book-cover-tools.dragging { border-color: var(--accent); background: var(--accent-tint); outline: none; }
+.book-cover-preview { position: relative; }
+.book-cover-preview img { display: block; width: 100%; height: auto; border-radius: 6px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25); }
+.book-cover-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.book-cover-tools .book-cover-help { margin: 0; text-align: left; }
+.book-cover-tools .book-file-card { margin-top: 2px; padding-top: 14px; }
+
+.book-hero-main { min-width: 0; margin-bottom: 32px; }
 .book-hero-kicker { display: flex; align-items: center; gap: 10px; }
 .book-hero-main h1 { margin: 10px 0 8px; font: 500 clamp(32px, 4.4vw, 52px)/1.1 var(--serif); letter-spacing: -0.01em; overflow-wrap: anywhere; }
 .book-hero-author { margin: 0; color: var(--ink-2); font-size: 19px; }
@@ -6032,38 +6045,32 @@ main {
 .book-hero-desc.open { display: block; }
 .book-hero-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 28px; }
 .book-hero-actions .button { padding: 10px 20px; font-size: 14px; }
-.book-hero-edit { margin-left: auto; }
-.book-hero-unsaved { color: var(--warn); font-size: 12px; font-weight: 600; }
+.book-hero-unsaved { padding: 6px 12px; border: 1px solid var(--warn); border-radius: 999px; background: var(--warn-tint); color: var(--warn); font-size: 12px; font-weight: 600; cursor: pointer; }
+.book-layout.no-cover .book-hero-tools { margin-top: 22px; max-width: 360px; }
 
-.book-section { margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--rule); }
-.book-section .book-page-section-head { justify-content: flex-start; gap: 14px; }
-.book-section .book-page-section-head > :last-child:not(h2) { margin-left: auto; }
+.book-tabs { display: flex; gap: 4px; margin: 0 0 24px; overflow-x: auto; border-bottom: 1px solid var(--rule); scrollbar-width: none; }
+.book-tabs::-webkit-scrollbar { display: none; }
+.book-tabs button { position: relative; flex: none; margin-bottom: -1px; padding: 12px 14px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--muted); font: 600 13.5px var(--sans); white-space: nowrap; cursor: pointer; }
+.book-tabs button:hover { color: var(--ink); }
+.book-tabs button.active { border-bottom-color: var(--accent); color: var(--ink); }
+.book-tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 4px; }
+.book-tab-dot { display: inline-block; width: 7px; height: 7px; margin-left: 7px; border-radius: 50%; background: var(--warn); vertical-align: 1px; }
+.book-editor .book-editor-fields { grid-template-columns: minmax(0, 1fr); }
+.book-tab-group { display: grid; gap: 20px; }
+.book-tab-group[hidden] { display: none; }
+.book-tab-group .reading-progress-card, .book-tab-group .pdf-marks-card { margin-top: 0; }
+.book-tab-group .vocabulary-book { margin-top: 0; padding-top: 0; border-top: 0; }
+.book-tab-group.book-page-notes { margin-top: 0; padding-top: 0; border-top: 0; }
 .book-page-section-head h2 { margin: 0; font: 500 22px var(--serif); }
-.book-review-text { max-width: 68ch; margin: 14px 0 0; color: var(--ink); font: 16.5px/1.7 var(--serif); white-space: pre-wrap; }
-.book-section > .muted { margin: 12px 0 0; }
-.book-section .book-note-editor { margin-top: 16px; }
-.book-section .book-note:last-child { padding-bottom: 6px; border-bottom: 0; }
-
-.book-fold { margin-top: 28px; padding-top: 14px; border-top: 1px solid var(--rule); }
-.book-fold > summary { display: flex; align-items: center; justify-content: space-between; padding: 4px 0; font: 500 20px var(--serif); cursor: pointer; list-style: none; }
-.book-fold > summary::-webkit-details-marker { display: none; }
-.book-fold > summary::after { content: "+"; color: var(--accent); font: 400 22px var(--sans); }
-.book-fold[open] > summary::after { content: "\2013"; }
-.book-fold > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 4px; }
-.book-fold .pdf-marks-card { margin-top: 14px; padding: 0; border: 0; background: none; }
-.book-fold .vocabulary-book { margin-top: 14px; padding-top: 0; border-top: 0; }
-.book-fold .vocabulary-head h2 { display: none; }
-
-.book-edit-panel { margin: 0 0 48px; padding: 28px; border: 1px solid var(--rule); border-radius: 16px; background: var(--surface-2); }
-.book-edit-panel .book-page-section-head { margin-bottom: 22px; }
-.book-progress-panel { margin: -24px 0 40px; }
 
 @media (max-width: 760px) {
   .book-page { padding: 18px 18px 80px; }
-  .book-hero { grid-template-columns: minmax(0, 1fr); gap: 24px; }
-  .book-hero-art { max-width: 230px; margin: 0 auto; }
-  .book-hero-edit { margin-left: 0; }
-  .book-edit-panel { padding: 14px; border-radius: 12px; }
+  .book-layout { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  /* The cover leads, then the book; the cover tools and file card go last. */
+  .book-hero-art { display: contents; }
+  .book-hero-cover { max-width: 280px; margin: 0 auto; }
+  .book-main { order: 1; }
+  .book-hero-tools { order: 2; }
 }
 @media (prefers-reduced-motion: reduce) {
   .book-hero-status { transition: none; }

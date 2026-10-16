@@ -6,7 +6,7 @@ import { displayTitle } from "./storage.js";
 // A document's first page as a cover, or a plain labelled placeholder when there's no
 // image to show. `documentId` null means the file isn't in the library yet.
 // `children` are laid over the cover (e.g. read/owned flags).
-export default function Cover({ apiBase, documentId, filename, fileType = "pdf", width = 320, className = "", author = "", children }) {
+export default function Cover({ apiBase, documentId, filename, fileType = "pdf", width = 320, className = "", author = "", lazy = true, children }) {
   const [failed, setFailed] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [revision, setRevision] = useState(0);
@@ -27,7 +27,7 @@ export default function Cover({ apiBase, documentId, filename, fileType = "pdf",
         <img
           src={`${apiBase}/documents/${documentId}/thumbnail?w=${width}&v=${revision}`}
           alt=""
-          loading="lazy"
+          loading={lazy ? "lazy" : "eager"}
           draggable="false"
           onLoad={() => setLoaded(true)}
           onError={() => setFailed(true)}

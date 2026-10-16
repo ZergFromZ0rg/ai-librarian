@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import AiCheck from "./AiCheck.jsx";
 import { applyBody, matchRows } from "./catalogueMatch.js";
-import { clothColor } from "./clothCovers.js";
 import { DOC_TYPES, TYPE_LABEL, isWorkDocument } from "./documentsLibrary.js";
 import LookupPanel from "./LookupPanel.jsx";
 import { FORM_LABELS, displayTitle } from "./storage.js";
@@ -35,15 +35,16 @@ function apiValue(key, value) {
   return value;
 }
 
-export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCoverChanged }) {
+// `tab` says which group of the form is showing (details, review, or find); all of
+// it stays mounted so edits survive a change of tab. The cover tools and file card
+// are drawn into `coverSlot`, under the big cover on the page.
+export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCoverChanged, tab = "details", coverSlot = null }) {
   const [fields, setFields] = useState(() => values(doc));
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState("");
-  const [revision, setRevision] = useState(0);
-  const [coverFailed, setCoverFailed] = useState(false);
   const [coverBusy, setCoverBusy] = useState(false);
   const [coverError, setCoverError] = useState("");
   const [coverMessage, setCoverMessage] = useState("");
@@ -108,7 +109,7 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
     try {
       const updated = await request("/metadata-apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(applyBody(matchRowsNow, ticked, match, withCover)) });
       setFields(values(updated)); onDocument(updated);
-      if (withCover) { setRevision(Date.now()); setCoverFailed(false); onCoverChanged(); }
+      if (withCover) onCoverChanged();
       setMatch(null); setLookupOpen(false); setMessage("Details from Open Library applied.");
     } catch (failure) { setError(failure.message); }
     finally { setApplying(false); }
@@ -126,7 +127,7 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
       const form = new FormData();
       if (!reset) form.append("file", file);
       await request("/cover", { method: reset ? "DELETE" : "PUT", ...(!reset ? { body: form } : {}) });
-      setFile(null); setRevision(Date.now()); setCoverFailed(false); onCoverChanged();
+      setFile(null); onCoverChanged();
       setCoverMessage(reset ? (doc.record_type === "standalone" ? "Title cover restored." : "Original cover restored.") : "Cover updated.");
     } catch (failure) { setCoverError(failure.message); }
     finally { setCoverBusy(false); }
@@ -135,28 +136,32 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
   const hasSource = doc.record_type !== "standalone";
   // Papers, reports and other working files: no cover, ratings or catalogue lookup.
   const work = isWorkDocument(doc);
-  return <div className="book-management">
-    <aside className="book-cover-panel" aria-label="Book cover and file">
-      {!work && <>
-      <div className={`book-cover-drop${dragging ? " dragging" : ""}`} tabIndex={0} aria-label="Cover preview. Paste or drop an image to replace it."
-        onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); setDragging(true); }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={(event) => { event.preventDefault(); event.stopPropagation(); setDragging(false); choose(event.dataTransfer.files[0]); }}
-        onPaste={(event) => { const pasted = [...event.clipboardData.items].find((item) => item.type.startsWith("image/")); if (pasted) { event.preventDefault(); choose(pasted.getAsFile()); } }}>
-        {preview || !coverFailed ? <img key={preview || revision} src={preview || `${apiBase}/documents/${doc.document_id}/thumbnail?w=480&v=${revision}`} alt={file ? "New cover preview" : `Cover of ${doc.title}`} onError={() => { if (!file) setCoverFailed(true); else setCoverError("This image could not be previewed. Please choose another."); }} /> : <div className="book-cloth-cover" style={{ background: clothColor(doc.document_id).bg, borderLeftColor: clothColor(doc.document_id).edge }}><span>YOUR LIBRARY</span><strong>{doc.title || displayTitle(doc.filename)}</strong><small>{doc.author || ""}</small></div>}
-        {file && <span className="cover-preview-label">PREVIEW · NOT SAVED</span>}
-      </div>
+  const inForm = ["details", "review", "find"].includes(tab);
+  const coverTools = <div className={`book-cover-tools${dragging ? " dragging" : ""}`} tabIndex={work ? undefined : 0} aria-label={work ? "File" : "Cover and file. Paste or drop an image here to replace the cover."}
+    onDragOver={work ? undefined : (event) => { event.preventDefault(); event.stopPropagation(); setDragging(true); }}
+    onDragLeave={work ? undefined : () => setDragging(false)}
+    onDrop={work ? undefined : (event) => { event.preventDefault(); event.stopPropagation(); setDragging(false); choose(event.dataTransfer.files[0]); }}
+    onPaste={work ? undefined : (event) => { const pasted = [...event.clipboardData.items].find((item) => item.type.startsWith("image/")); if (pasted) { event.preventDefault(); choose(pasted.getAsFile()); } }}>
+    {!work && <>
+      {file && <div className="book-cover-preview"><img src={preview} alt="New cover preview" onError={() => setCoverError("This image could not be previewed. Please choose another.")} /><span className="cover-preview-label">PREVIEW · NOT SAVED</span></div>}
       <input ref={input} hidden type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { choose(event.target.files[0]); event.target.value = ""; }} />
-      <button type="button" className="button" disabled={coverBusy} onClick={() => input.current.click()}>Change cover</button>
-      <p className="book-cover-help">Drop an image above or choose a file.<br />JPG, PNG, WebP · up to 8 MB</p>
-      {file ? <div className="cover-preview-actions"><button type="button" className="button primary small" disabled={coverBusy} onClick={() => saveCover()}>{coverBusy ? "Saving…" : "Use this cover"}</button><button type="button" className="text-button" disabled={coverBusy} onClick={() => setFile(null)}>Cancel</button></div> : <button type="button" className="text-button" disabled={coverBusy} onClick={() => saveCover(true)}>{hasSource ? "Restore original cover" : "Use title cover"}</button>}
+      <div className="book-cover-actions">
+        <button type="button" className="button small" disabled={coverBusy} onClick={() => input.current.click()}>Change cover</button>
+        {file
+          ? <><button type="button" className="button primary small" disabled={coverBusy} onClick={() => saveCover()}>{coverBusy ? "Saving…" : "Use this cover"}</button><button type="button" className="text-button" disabled={coverBusy} onClick={() => setFile(null)}>Cancel</button></>
+          : <button type="button" className="text-button" disabled={coverBusy} onClick={() => saveCover(true)}>{hasSource ? "Restore original cover" : "Use title cover"}</button>}
+      </div>
+      <p className="book-cover-help">Or drop or paste an image here · JPG, PNG, WebP · up to 8 MB</p>
       {coverError && <p className="book-inline-error" role="alert">{coverError}</p>}
       {coverMessage && <p className="book-inline-success" role="status">{coverMessage}</p>}
-      </>}
-      {hasSource ? <div className="book-file-card"><span className="eyebrow">In your library</span><div><span className={`book-format format-${doc.file_type}`}>{format}</span><span>{doc.pages || 0} {doc.file_type === "epub" ? "sections" : doc.pages === 1 ? "page" : "pages"}</span></div><p title={doc.filename}>{doc.filename}</p><a href={`${apiBase}/documents/${doc.document_id}/file`} target="_blank" rel="noreferrer">Open {format} ↗</a></div> : <div className="book-file-card book-record-card"><span className="eyebrow">Catalogue record</span><p>This book has no digital file. Its metadata, cover, reading state, review, and notes still live in your library.</p></div>}
-    </aside>
-    <form className="book-editor" onSubmit={save}>
+    </>}
+    {hasSource ? <div className="book-file-card"><span className="eyebrow">In your library</span><div><span className={`book-format format-${doc.file_type}`}>{format}</span><span>{doc.pages || 0} {doc.file_type === "epub" ? "sections" : doc.pages === 1 ? "page" : "pages"}</span></div><p title={doc.filename}>{doc.filename}</p><a href={`${apiBase}/documents/${doc.document_id}/file`} target="_blank" rel="noreferrer">Open {format} ↗</a></div> : <div className="book-file-card book-record-card"><span className="eyebrow">Catalogue record</span><p>This book has no digital file. Its metadata, cover, reading state, review, and notes still live in your library.</p></div>}
+  </div>;
+  return <>
+    {coverSlot && createPortal(coverTools, coverSlot)}
+    <form className="book-editor" onSubmit={save} hidden={!inForm}>
       <fieldset disabled={saving} className="book-editor-fields">
+        <div className="book-tab-group" role="tabpanel" id="book-panel-find" aria-labelledby="book-tab-find" hidden={tab !== "find"}>
         {!work && <section className={`book-editor-card book-lookup-card${lookupOpen ? " open" : ""}`} aria-labelledby="lookup-heading">
           <div className="book-card-heading"><h2 id="lookup-heading">Find book information</h2><button type="button" className="text-button" title="Fill in the author, year, pages, ISBN and a cover from Open Library. You choose what to keep." aria-expanded={lookupOpen} onClick={() => { setLookupOpen((open) => !open); setMatch(null); }}>{lookupOpen ? "Close" : "Look up"}</button></div>
           {!lookupOpen && <p className="muted">Fill in the author, year, pages, ISBN and a cover from Open Library. You choose what to keep.</p>}
@@ -178,6 +183,8 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
           </div>}
         </section>}
         {!work && hasSource && ["pdf", "epub"].includes(doc.file_type) && <AiCheck apiBase={apiBase} doc={doc} locked={changed} onDocument={onDocument} />}
+        </div>
+        <div className="book-tab-group" role="tabpanel" id="book-panel-details" aria-labelledby="book-tab-details" hidden={tab !== "details"}>
         <section className="book-editor-card" aria-labelledby="metadata-heading">
           <div className="book-card-heading"><h2 id="metadata-heading">{work ? "Document details" : "Book details"}</h2><span className="muted">{work ? "Keep it findable" : "Make it yours"}</span></div>
           <div className="book-field-pair book-title-pair"><label className="book-field book-title-field">Title<input className="input" required maxLength={300} value={fields.title} onChange={(event) => set("title", event.target.value)} /></label>
@@ -201,12 +208,15 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
             </div>
           </details>
         </section>
+        </div>
+        <div className="book-tab-group" role="tabpanel" id="book-panel-review" aria-labelledby="book-tab-review" hidden={tab !== "review"}>
         <section className="book-editor-card book-review-card" aria-labelledby="review-heading">
           <div className="book-card-heading"><h2 id="review-heading">{work ? "Summary & takeaways" : "Your review"}</h2><span className="muted">{work ? "For your own reference" : "Just for you · rate it at the top of the page"}</span></div>
           <label className="book-field">{work ? "Key points" : "What did you think?"}<textarea className="input" rows={work ? 6 : 4} maxLength={20000} value={fields.review} onChange={(event) => set("review", event.target.value)} placeholder={work ? "What is this about, and what matters in it? What did you conclude or need to act on?" : "What stayed with you? Who would you recommend it to?"} /></label>
           {!work && <label className="book-check"><input type="checkbox" checked={fields.review_spoiler} onChange={(event) => set("review_spoiler", event.target.checked)} />This review contains spoilers <small>(hidden until you choose to show it)</small></label>}
           <p className="book-review-hint">{work ? "A short summary you can find again. Keep quoted passages and detailed thoughts in the notes below." : "Your overall impression lives here. Keep passages and detailed thoughts in the notes below."}</p>
         </section>
+        </div>
       </fieldset>
       <div className="book-editor-footer">
         <span role="status">{saving ? "Saving your changes…" : message || (changed ? "You have unsaved changes" : "All changes saved")}</span>
@@ -214,5 +224,5 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
       </div>
       {error && <p className="book-inline-error" role="alert">{error}</p>}
     </form>
-  </div>;
+  </>;
 }

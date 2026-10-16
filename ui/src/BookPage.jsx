@@ -28,12 +28,11 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState(false);
-  const [composing, setComposing] = useState(Boolean(passage?.snippet || passage?.matched));
-  const [editOpen, setEditOpen] = useState(false);
-  const [progressOpen, setProgressOpen] = useState(false);
+  // Opened from a search result with a passage: land on the notes, where it waits to be saved.
+  const [tab, setTab] = useState(passage?.snippet || passage?.matched ? "notes" : "details");
+  const [coverSlot, setCoverSlot] = useState(null);
   const [descOpen, setDescOpen] = useState(false);
-  const [spoilerShown, setSpoilerShown] = useState(false);
-  const editRef = useRef(null);
+  const tabsRef = useRef(null);
   const closeRef = useRef(null);
   const readerVisible = useRef(readerOpen);
   readerVisible.current = readerOpen;
@@ -47,8 +46,6 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
   }, [documentId, readerOpen]);
   const dirty = useRef(false);
   dirty.current = Boolean(draft || quote || detailsDirty || progressDirty || vocabularyDirty);
-  // Unsaved edits are never hidden: the editor opens by itself and stays open.
-  useEffect(() => { if (detailsDirty) setEditOpen(true); }, [detailsDirty]);
 
   async function request(path, options) {
     const response = await fetch(`${apiBase}${path}`, options);
@@ -94,7 +91,7 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
     try { await action(); setNotice(message); onChanged(); } catch (failure) { setError(failure.message); }
     finally { setBusy(false); }
   }
-  function resetDraft() { setDraft(""); setQuote(""); setPage(null); setEditing(null); setPreview(false); setComposing(false); }
+  function resetDraft() { setDraft(""); setQuote(""); setPage(null); setEditing(null); setPreview(false); }
   function saveNote(event) {
     event.preventDefault();
     run(async () => {
@@ -118,9 +115,8 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
   const markdown = (text) => <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={[katexPlugin]} skipHtml>{prepareMath(text)}</ReactMarkdown>;
   const hasSource = doc?.record_type !== "standalone";
   const work = isWorkDocument(doc);
-  const showEditor = composing || Boolean(draft || quote || editing);
 
-  // Stars and the heart save as soon as they are touched. While the editor has
+  // Stars and the heart save as soon as they are touched. While the form has
   // unsaved changes they wait, so a save here can never overwrite them.
   async function saveMarks(changes) {
     setBusy(true); setError(""); setNotice("");
@@ -128,16 +124,41 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
     catch (failure) { setError(failure.message); }
     finally { setBusy(false); }
   }
-  function openEdit(selector) {
-    setEditOpen(true);
+  // Jump to a tab from elsewhere on the page, and to a control inside it.
+  function goTab(next, selector) {
+    setTab(next);
     window.setTimeout(() => {
-      const target = (selector && editRef.current?.querySelector(selector)) || editRef.current;
+      const target = (selector && document.querySelector(`#book-panel-${next} ${selector}`)) || tabsRef.current;
       target?.scrollIntoView({ behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: selector ? "center" : "start" });
       if (selector && target?.focus) target.focus({ preventScroll: true });
     }, 30);
   }
 
-  let hero = null;
+  const tabs = doc ? [
+    ["details", "Details"],
+    ["review", work ? "Summary" : "Review"],
+    ["reading", "Reading"],
+    ["notes", notes.length ? `Notes · ${notes.length}` : "Notes"],
+    ...(hasSource && doc.file_type === "pdf" ? [["marks", "Marks"]] : []),
+    ["vocab", "Vocabulary"],
+    ...(!work ? [["find", "Find & check"]] : []),
+  ] : [];
+  function onTabKey(event) {
+    const ids = tabs.map(([id]) => id);
+    const at = ids.indexOf(tab);
+    let next;
+    if (event.key === "ArrowRight") next = (at + 1) % ids.length;
+    if (event.key === "ArrowLeft") next = (at - 1 + ids.length) % ids.length;
+    if (event.key === "Home") next = 0;
+    if (event.key === "End") next = ids.length - 1;
+    if (next === undefined) return;
+    event.preventDefault();
+    setTab(ids[next]);
+    document.getElementById(`book-tab-${ids[next]}`)?.focus();
+  }
+
+  let art = null;
+  let info = null;
   if (doc) {
     const status = readingStatus(doc);
     const progress = Math.min(100, Math.max(0, Math.round(Number(doc.reading_progress) || 0)));
@@ -148,9 +169,11 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
     const format = hasSource ? FORMATS[doc.file_type] || doc.file_type?.toUpperCase() || "File" : null;
     const marksLocked = busy || detailsDirty;
     const showProgress = status === "reading" || (progress > 0 && status !== "read");
-    hero = <header className={`book-hero${work ? " no-cover" : ""}`}>
-      {!work && <div className="book-hero-art"><Cover apiBase={apiBase} documentId={doc.document_id} filename={doc.title || doc.filename} author={doc.author} fileType={doc.file_type} width={640} className="book-hero-cover" /></div>}
-      <div className="book-hero-main">
+    art = work ? null : <aside className="book-hero-art">
+      <Cover apiBase={apiBase} documentId={doc.document_id} filename={doc.title || doc.filename} author={doc.author} fileType={doc.file_type} width={640} lazy={false} className="book-hero-cover" />
+      <div ref={setCoverSlot} className="book-hero-tools" />
+    </aside>;
+    info = <header className="book-hero-main">
         <div className="book-hero-kicker"><span className="eyebrow">{work ? "Document" : "Book"}</span>{format && <span className="book-format">{format}</span>}</div>
         <h1 id="book-page-title">{doc.title || displayTitle(doc.filename)}</h1>
         {doc.author && <p className="book-hero-author">{doc.author}</p>}
@@ -160,12 +183,12 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
             <span title={detailsDirty ? "Save or discard your edits first" : undefined}><StarRating size="medium" value={doc.rating || null} disabled={marksLocked} onChange={(value) => saveMarks({ rating: value })} /></span>
             <span title={detailsDirty ? "Save or discard your edits first" : undefined}><LikeButton liked={Boolean(doc.liked)} disabled={marksLocked} onChange={(value) => saveMarks({ liked: value })} /></span>
           </>}
-          <button type="button" className={`book-hero-status status-${status}`} title="Change the reading status" onClick={() => openEdit(".book-reading-status")}>{STATUS_LABELS[status] || STATUS_LABELS.to_read}</button>
+          <button type="button" className={`book-hero-status status-${status}`} title="Change the reading status" onClick={() => goTab("details", ".book-reading-status")}>{STATUS_LABELS[status] || STATUS_LABELS.to_read}</button>
         </div>
         {showProgress && <div className="book-hero-progress">
           <span className="book-hero-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-label="Reading progress"><i style={{ width: `${progress}%` }} /></span>
           <span>{progress}%{total ? ` · ${unit} ${here.toLocaleString()} of ${total.toLocaleString()}` : ""}</span>
-          <button type="button" className="text-button" aria-expanded={progressOpen} onClick={() => setProgressOpen((open) => !open)}>{progressOpen ? "Done" : "Update"}</button>
+          <button type="button" className="text-button" onClick={() => goTab("reading")}>Update</button>
         </div>}
         {doc.description && <div className="book-hero-about">
           <p className={`book-hero-desc${descOpen ? " open" : ""}`}>{doc.description}</p>
@@ -176,10 +199,9 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
             <button className="button primary" onClick={() => onRead(source(passage?.page || doc.current_page || 1))}>{doc.current_page ? "Resume" : "Read"} {doc.file_type === "epub" ? "EPUB" : doc.file_type === "pdf" ? "PDF" : "source"} ↗</button>
             <button className="button" disabled={!askEnabled} title={!askEnabled ? "Enable an answering model in Settings" : undefined} onClick={() => { if (!dirty.current || window.confirm("Discard your unsaved changes?")) onAsk(source()); }}>{work ? "Ask this document" : "Ask this book"}</button>
           </>}
-          <button type="button" className="text-button book-hero-edit" aria-expanded={editOpen} aria-controls="book-edit-panel" onClick={() => (editOpen ? setEditOpen(false) : openEdit())}>{editOpen ? "Close editor" : "Edit details"}</button>
-          {detailsDirty && <span className="book-hero-unsaved" role="status">Unsaved changes</span>}
+          {detailsDirty && <button type="button" className="book-hero-unsaved" onClick={() => goTab("details")}>Unsaved changes · review</button>}
         </div>
-      </div>
+        {work && <div ref={setCoverSlot} className="book-hero-tools" />}
     </header>;
   }
 
@@ -193,37 +215,33 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
         {error && <p className="notice error" role="alert">{error}</p>}
         {notice && <p className="notice" role="status">{notice}</p>}
         {!doc ? <h1 id="book-page-title">{error ? "Book unavailable" : "Opening book…"}</h1> : <>
-          {hero}
-          <div className="book-progress-panel" hidden={!progressOpen}>
-            <ReadingProgress apiBase={apiBase} doc={doc} onRead={onRead} showResume={false} onDirty={setProgressDirty} onDocument={(updated) => { setDocument(updated); onChanged(); }} />
+          <div className={`book-layout${work ? " no-cover" : ""}`}>
+          {art}
+          <div className="book-main">
+          {info}
+          <div ref={tabsRef} className="book-tabs" role="tablist" aria-label="About this book" onKeyDown={onTabKey}>
+            {tabs.map(([id, label]) => <button key={id} type="button" role="tab" id={`book-tab-${id}`} aria-selected={tab === id} aria-controls={`book-panel-${id}`} tabIndex={tab === id ? 0 : -1} className={tab === id ? "active" : ""} onClick={() => setTab(id)}>{label}{id === "details" && detailsDirty ? <span className="book-tab-dot" title="Unsaved changes" /> : null}</button>)}
           </div>
-          <section id="book-edit-panel" ref={editRef} className="book-edit-panel" hidden={!editOpen} aria-label="Edit details">
-            <div className="book-page-section-head"><h2>Edit details</h2><button type="button" className="text-button" onClick={() => setEditOpen(false)}>Close</button></div>
-            <BookDetails doc={doc} apiBase={apiBase} onDocument={(updated) => { setDocument(updated); onChanged(); }} onDirty={setDetailsDirty} onCoverChanged={onCoverChanged} />
-          </section>
 
-          <section className="book-section" aria-labelledby="review-view-heading">
-            <div className="book-page-section-head"><h2 id="review-view-heading">{work ? "Summary" : "Your review"}</h2>{doc.review && <button type="button" className="text-button" onClick={() => openEdit(".book-review-card textarea")}>Edit</button>}</div>
-            {!doc.review
-              ? <p className="muted">Nothing written yet. <button type="button" className="text-button" onClick={() => openEdit(".book-review-card textarea")}>{work ? "Write a summary" : "Write a review"}</button></p>
-              : doc.review_spoiler && !spoilerShown
-                ? <p className="muted"><em>Spoilers ahead.</em> <button type="button" className="text-button" onClick={() => setSpoilerShown(true)}>Show review</button></p>
-                : <p className="book-review-text">{doc.review}</p>}
-          </section>
+          <BookDetails doc={doc} apiBase={apiBase} tab={tab} coverSlot={coverSlot} onDocument={(updated) => { setDocument(updated); onChanged(); }} onDirty={setDetailsDirty} onCoverChanged={onCoverChanged} />
 
-          <section className="book-section book-page-notes" aria-labelledby="notes-heading">
-            <div className="book-page-section-head"><h2 id="notes-heading">Notes</h2><span className="muted">{notes.length} saved</span>{!showEditor && <button type="button" className="button small" onClick={() => setComposing(true)}>Add a note</button>}</div>
-            {showEditor && <form className="book-note-editor" onSubmit={saveNote}>
+          <div className="book-tab-group" role="tabpanel" id="book-panel-reading" aria-labelledby="book-tab-reading" hidden={tab !== "reading"}>
+            <ReadingProgress apiBase={apiBase} doc={doc} onRead={onRead} onDirty={setProgressDirty} onDocument={(updated) => { setDocument(updated); onChanged(); }} />
+          </div>
+
+          <div className="book-tab-group book-page-notes" role="tabpanel" id="book-panel-notes" aria-labelledby="book-tab-notes" hidden={tab !== "notes"}>
+            <div className="book-page-section-head"><h2>{work ? "Notes" : "Reading notebook"}</h2><span className="muted">{notes.length} saved · searchable in Notes</span></div>
+            <form className="book-note-editor" onSubmit={saveNote}>
               <h3>{editing ? "Edit note" : quote ? "Save this passage" : "Add a thought"}</h3>
               {quote && <><blockquote>{quote}</blockquote><p className="muted">Source location {page || "—"} · saved separately from your commentary</p></>}
-              {preview ? <div className="prose book-note-preview">{markdown(draft || "Nothing to preview yet.")}</div> : <textarea className="input" rows={5} maxLength={20000} autoFocus={composing && !editing && !quote} aria-label="Note in Markdown" placeholder="What stood out? Write in Markdown, including headings, lists, and equations…" value={draft} onChange={(event) => setDraft(event.target.value)} />}
+              {preview ? <div className="prose book-note-preview">{markdown(draft || "Nothing to preview yet.")}</div> : <textarea className="input" rows={5} maxLength={20000} aria-label="Note in Markdown" placeholder="What stood out? Write in Markdown, including headings, lists, and equations…" value={draft} onChange={(event) => setDraft(event.target.value)} />}
               <div className="book-page-actions">
                 <button className="button primary small" disabled={busy || (!draft.trim() && !quote)}>Save note</button>
                 <button type="button" className="text-button" onClick={() => setPreview(!preview)}>{preview ? "Write" : "Preview"}</button>
-                <button type="button" className="text-button" onClick={() => { if (!(draft || quote || editing) || window.confirm("Discard this draft?")) resetDraft(); }}>Cancel</button>
+                {(editing || quote || draft) && <button type="button" className="text-button" onClick={() => { if (window.confirm("Discard this draft?")) resetDraft(); }}>Cancel draft</button>}
               </div>
-            </form>}
-            {!notes.length && !showEditor && <p className="muted">Keep your thoughts beside the book. Saved passages and your own notes will show up here, and stay searchable in Notes.</p>}
+            </form>
+            {!notes.length && <p className="muted">Keep your interpretation alongside the source. Saved passages and your own notes will appear here.</p>}
             {notes.map((note) => <article className="book-note" key={note.document_id}>
               <div className="prose">{markdown(note.text)}</div>
               {note.source_quote && <blockquote>{note.source_quote}</blockquote>}
@@ -233,10 +251,17 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
                 <button className="text-button danger" disabled={busy} onClick={() => { if (window.confirm("Delete this note?")) run(async () => { await request(`/documents/${note.document_id}`, { method: "DELETE" }); if (editing === note.document_id) resetDraft(); await loadNotes(); }, "Note deleted."); }}>Delete</button>
               </footer>
             </article>)}
-          </section>
+          </div>
 
-          {hasSource && doc.file_type === "pdf" && <details className="book-fold"><summary>Marks in your PDF</summary><PdfMarks apiBase={apiBase} doc={doc} onChanged={onChanged} /></details>}
-          <details className="book-fold"><summary>Vocabulary</summary><VocabularyPanel apiBase={apiBase} documents={[doc]} documentId={doc.document_id} onOpenDocument={(_, at) => onRead(source(at || 1))} onDirty={setVocabularyDirty} /></details>
+          {hasSource && doc.file_type === "pdf" && <div className="book-tab-group" role="tabpanel" id="book-panel-marks" aria-labelledby="book-tab-marks" hidden={tab !== "marks"}>
+            <PdfMarks apiBase={apiBase} doc={doc} onChanged={onChanged} />
+          </div>}
+
+          <div className="book-tab-group" role="tabpanel" id="book-panel-vocab" aria-labelledby="book-tab-vocab" hidden={tab !== "vocab"}>
+            <VocabularyPanel apiBase={apiBase} documents={[doc]} documentId={doc.document_id} onOpenDocument={(_, at) => onRead(source(at || 1))} onDirty={setVocabularyDirty} />
+          </div>
+          </div>
+          </div>
         </>}
       </div>
     </section>, document.body,
