@@ -1177,6 +1177,17 @@ def _request_ocr_approval(doc_id: str, page_count: int) -> None:
     _fail_indexing(doc_id, message)
 
 
+def awaiting_ocr_approval(metadata: dict) -> bool:
+    """True for a scan parked by _request_ocr_approval that the reader has not
+    yet approved. Its page count is already known, so nothing is gained by
+    extracting it again before they say yes."""
+    return bool(
+        metadata.get("indexing_status") == "error"
+        and metadata.get("ocr_pages")
+        and not metadata.get("ocr_approved")
+    )
+
+
 def _genres_of(doc: dict) -> List[str]:
     try:
         genres = json.loads(doc.get("genres_json") or "[]")
@@ -2061,11 +2072,20 @@ def recover_interrupted_work() -> None:
     # pull it. The pipeline rebuild for stale documents happens in the worker,
     # so a crash partway through recovery leaves consistent database state.
     requeued = 0
+    parked = 0
     for metadata in list_metadata():
         doc_id = metadata.get("document_id")
         # Catalogue-only books have no source to index; without this their
         # empty stored path resolves to the documents directory, which exists.
         if not doc_id or metadata.get("record_type") == "standalone":
+            continue
+        # A scan waiting for the reader's OCR go-ahead never reached a current
+        # pipeline_version, so it always looks stale. Re-queuing it would
+        # extract the whole PDF again (minutes of CPU for a long book) only to
+        # park it again at the same gate; approve-ocr and retry re-queue it
+        # on demand.
+        if awaiting_ocr_approval(metadata):
+            parked += 1
             continue
         try:
             stale_pipeline = metadata.get("pipeline_version") != PIPELINE_VERSION
@@ -2096,6 +2116,8 @@ def recover_interrupted_work() -> None:
 
     if requeued:
         logger.info("Re-queued %d document(s) for indexing after restart", requeued)
+    if parked:
+        logger.info("Left %d scanned document(s) waiting for OCR approval", parked)
     signal_index_worker()
 
 
@@ -2684,11 +2706,7 @@ def _index_activity_snapshot() -> dict:
         document_id = document["document_id"]
         status = document.get("indexing_status") or "queued"
         live = runtime.get(document_id, {})
-        awaiting_ocr = bool(
-            status == "error"
-            and document.get("ocr_pages")
-            and not document.get("ocr_approved")
-        )
+        awaiting_ocr = awaiting_ocr_approval(document)
         if status == "indexed":
             stage, progress = "complete", 100
         elif awaiting_ocr:
@@ -3581,12 +3599,7 @@ async def approve_ocr(doc_id: str):
     metadata = await asyncio.to_thread(read_metadata, doc_id)
     if metadata.get("indexing_status") in {"queued", "indexing"}:
         raise HTTPException(status_code=409, detail="document is already queued for indexing")
-    waiting = (
-        metadata.get("indexing_status") == "error"
-        and metadata.get("ocr_pages")
-        and not metadata.get("ocr_approved")
-    )
-    if not waiting:
+    if not awaiting_ocr_approval(metadata):
         raise HTTPException(status_code=409, detail="this document is not waiting for OCR approval")
     if not await asyncio.to_thread(lambda: pdf_path(metadata).exists()):
         raise HTTPException(status_code=404, detail="the source document is missing")

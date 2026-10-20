@@ -391,6 +391,37 @@ def test_a_large_scan_waits_for_ocr_approval_then_indexes(service, monkeypatch):
     assert client.post(f"/documents/{doc_id}/approve-ocr").status_code == 409
 
 
+def test_restart_leaves_a_scan_parked_until_the_reader_approves_it(service, monkeypatch):
+    module, client, _indexed = service
+    monkeypatch.setattr(module, "OCR_APPROVAL_PAGES", 3)
+    monkeypatch.setattr(
+        "parsers.ocr_pages",
+        lambda _path, targets, languages, engine: {
+            number: {"text": f"Scanned page {number}: the absurd and freedom.", "engine": "tesseract"}
+            for number in targets
+        },
+    )
+    upload = client.post(
+        "/documents",
+        files={"file": ("scan.pdf", make_scanned_pdf(image_pages=6), "application/pdf")},
+    )
+    doc_id = upload.json()["document_id"]
+    wait_for_status(client, doc_id, "error")
+
+    # Its pipeline_version never became current, so it looks stale on every
+    # restart. Recovery must not queue it: re-extracting a long scan only to
+    # park it at the same gate is minutes of CPU for nothing. The queueing is
+    # synchronous, so the status is checked immediately.
+    module.recover_interrupted_work()
+    parked = module.read_metadata(doc_id)
+    assert parked["indexing_status"] == "error"
+    assert "Approve OCR" in parked["indexing_error"]
+
+    # Still approvable afterwards.
+    assert client.post(f"/documents/{doc_id}/approve-ocr").status_code == 200
+    wait_for_status(client, doc_id, "indexed", timeout=20)
+
+
 def test_ocr_mush_heuristic_never_drops_text_from_a_non_pdf_source(service):
     # A short text/Office file is a single pseudo-page, so a false "garbled"
     # verdict (here from OCR-like mush; in practice a base64 blob) used to drop
