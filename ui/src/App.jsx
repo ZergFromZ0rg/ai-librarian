@@ -29,7 +29,9 @@ import useIntake from "./useIntake.js";
 const PdfReader = lazy(() => import("./PdfReader.jsx"));
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
-const THEME_KEY = "ai-librarian.theme";
+// v2: the palette changed (cream / walnut), so an older saved "dark" (black)
+// choice is not carried over.
+const THEME_KEY = "ai-librarian.theme.v2";
 const ACTIVE_CHAT_KEY = "ai-librarian.ask.active";
 const KEYS_KEY = "ai-librarian.ask.keys";
 const OLLAMA_KEY = "ai-librarian.ask.ollama-models";
@@ -926,7 +928,10 @@ export default function App() {
         <div className="sidebar-head">
           <button type="button" className="sidebar-brand" onClick={() => { setSurface("workspace"); window.scrollTo({ top: 0 }); }} title="Search and Ask">
             <span className="brand-mark" aria-hidden="true" />
-            <span>AI Librarian</span>
+            <span className="sidebar-brand-text">
+              <span>AI Librarian</span>
+              <small>Reference chat</small>
+            </span>
           </button>
           <button type="button" className="sidebar-collapse" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}>
             <span aria-hidden="true">{sidebarCollapsed ? "›" : "‹"}</span>
@@ -1018,7 +1023,15 @@ export default function App() {
           <div className="hero-center">
             {!workspaceActive && (
               <div className="hero-intro">
-                <h1>{isAsk ? "Ask the library" : "Search the library"}</h1>
+                <div className="hero-title">
+                  <span className="eyebrow">Reference desk</span>
+                  <h1>{isAsk ? "Ask the library" : "Search the library"}</h1>
+                  <p className="hero-lede">
+                    {isAsk
+                      ? "A reference chat for your own collection, not a general chatbot. It answers only from the books and papers you have added, and every claim cites the page it came from."
+                      : "Find the exact passage in anything you have added, ranked by how well it answers what you typed."}
+                  </p>
+                </div>
                 <dl className="readout">
                   <div>
                     <dt>Documents</dt>

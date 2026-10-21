@@ -1,3 +1,4 @@
+import { hashSeed } from "./clothCovers.js";
 import { FORM_LABELS, bookForm, displayTitle, libraryKind, readingStatus } from "./storage.js";
 
 export const EMPTY_FILTERS = Object.freeze({
@@ -156,4 +157,26 @@ export function facetValues(documents) {
     finishedYears: [...new Set(books.map((doc) => (doc.finished_at || "").slice(0, 4)).filter(Boolean))].sort().reverse(),
     formats: [...new Set(books.map((doc) => doc.record_type === "standalone" ? "catalogue" : (doc.file_type || "other").toLowerCase()))].sort(),
   };
+}
+
+// How many covers stand on one shelf: as many as fit at `min` px each with
+// `gap` between them, and never fewer than one.
+export function shelfColumns(width, min, gap) {
+  if (!(width > 0)) return 1;
+  return Math.max(1, Math.floor((width + gap) / (min + gap)));
+}
+
+// The books cut into shelves of `columns` each; the last shelf may be short.
+export function shelfRows(items, columns) {
+  const size = Math.max(1, Math.floor(columns) || 1);
+  const rows = [];
+  for (let start = 0; start < items.length; start += size) rows.push(items.slice(start, start + size));
+  return rows;
+}
+
+// Real shelves hold books of different heights. This gives every book a fixed
+// height between 92% and 100% of the tallest, from its id alone, so a book
+// keeps its height when the list is filtered or sorted.
+export function bookHeight(seed) {
+  return 0.92 + (hashSeed(seed) % 9) / 100;
 }

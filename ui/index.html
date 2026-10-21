@@ -16,7 +16,7 @@
       // user last chose (or nothing, meaning "follow the OS").
       (function () {
         try {
-          var stored = window.localStorage.getItem("ai-librarian.theme");
+          var stored = window.localStorage.getItem("ai-librarian.theme.v2");
           if (stored === "light" || stored === "dark") {
             document.documentElement.dataset.theme = stored;
           }

@@ -97,14 +97,14 @@ export default function Settings({
             className={`settings-theme-option${theme === "light" ? " active" : ""}`}
             onClick={() => onThemeChange("light")}
           >
-            ☼ Light
+            ☼ Cream
           </button>
           <button
             type="button"
             className={`settings-theme-option${theme === "dark" ? " active" : ""}`}
             onClick={() => onThemeChange("dark")}
           >
-            ☾ Dark
+            ☾ Walnut
           </button>
         </div>
       </section>

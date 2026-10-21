@@ -26,7 +26,7 @@ describe("library explore", () => {
   });
 });
 
-import { EMPTY_FILTERS, filterLabels, searchWithView, viewFromSearch, viewToParams } from "./libraryExplore.js";
+import { EMPTY_FILTERS, bookHeight, filterLabels, searchWithView, shelfColumns, shelfRows, viewFromSearch, viewToParams } from "./libraryExplore.js";
 
 const shelf = [
   { document_id: "a", title: "Dune", kind: "book", rating: 5, page_count: 600, finished_at: "2026-01-02", note_count: 2, file_type: "epub", reading_status: "read" },
@@ -137,5 +137,30 @@ describe("the library holds books, and a book has a form", () => {
     const params = viewToParams({ ...EMPTY_FILTERS, form: "collection" });
     expect(params.get("lib.form")).toBe("collection");
     expect(viewFromSearch(`?${params}`).filters.form).toBe("collection");
+  });
+});
+
+describe("bookshelf rows", () => {
+  it("fits as many covers as the width allows, at least one", () => {
+    expect(shelfColumns(900, 128, 18)).toBe(6);
+    expect(shelfColumns(128, 128, 18)).toBe(1);
+    expect(shelfColumns(60, 128, 18)).toBe(1);
+    expect(shelfColumns(0, 128, 18)).toBe(1);
+    expect(shelfColumns(274, 128, 18)).toBe(2);
+  });
+
+  it("cuts the books into shelves, leaving the last one short", () => {
+    expect(shelfRows([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
+    expect(shelfRows([], 4)).toEqual([]);
+    expect(shelfRows([1, 2], 0)).toEqual([[1], [2]]);
+  });
+
+  it("gives a book the same height every time, within the shelf range", () => {
+    expect(bookHeight("abc123")).toBe(bookHeight("abc123"));
+    for (const id of ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]) {
+      const height = bookHeight(id);
+      expect(height).toBeGreaterThanOrEqual(0.92);
+      expect(height).toBeLessThanOrEqual(1);
+    }
   });
 });

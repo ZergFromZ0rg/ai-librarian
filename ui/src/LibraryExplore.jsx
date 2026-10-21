@@ -1,25 +1,25 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Cover from "./Cover.jsx";
 import LibraryDiary from "./LibraryDiary.jsx";
 import LibraryLedger from "./LibraryLedger.jsx";
 import LibraryRail from "./LibraryRail.jsx";
 import { starText } from "./ratings.js";
-import { EMPTY_FILTERS, facetValues, filterLabels, filterLibrary, searchWithView, viewFromSearch } from "./libraryExplore.js";
+import { EMPTY_FILTERS, bookHeight, facetValues, filterLabels, filterLibrary, searchWithView, shelfColumns, shelfRows, viewFromSearch } from "./libraryExplore.js";
 import { shelfFilters } from "./libraryRail.js";
 import { FORM_LABELS, displayTitle, loadStored, readingStatus, saveStored } from "./storage.js";
 
 const SAVED_KEY = "ai-librarian.library.saved-views";
 const STATUS_LABELS = { to_read: "To read", reading: "Reading", read: "Read", abandoned: "Abandoned" };
 
-// One book as a cover, the way a poster wall shows films: the artwork carries
-// the book, and the details wait for a hover or a focus. Touch screens have no
-// hover, so there the title sits under the cover instead.
+// One book standing on a shelf: the artwork carries the book, and the details
+// wait for a hover or a focus. Touch screens have no hover, so there the shelf
+// shows a label strip under each plank instead (see Bookcase).
 function Poster({ apiBase, doc, onOpen }) {
   const title = doc.title || displayTitle(doc.filename);
   const status = readingStatus(doc);
   const progress = Math.round(doc.reading_progress || 0);
   const notes = doc.note_count || 0;
-  return <button type="button" className="poster" onClick={() => onOpen(doc)} aria-label={doc.author ? `${title}, by ${doc.author}` : title}>
+  return <button type="button" className="poster" style={{ "--height": bookHeight(doc.document_id) }} onClick={() => onOpen(doc)} aria-label={doc.author ? `${title}, by ${doc.author}` : title}>
     <Cover apiBase={apiBase} documentId={doc.document_id} filename={doc.title || doc.filename} author={doc.author} fileType={doc.file_type} width={320} className="poster-cover">
       {notes > 0 && <span className="note-ribbon" role="img" aria-label={`${notes} ${notes === 1 ? "note" : "notes"}`} title={`${notes} ${notes === 1 ? "note" : "notes"}`} />}
       {status === "reading" && progress > 0 && progress < 100 && <span className="poster-progress" aria-hidden="true"><span style={{ width: `${progress}%` }} /></span>}
@@ -30,8 +30,51 @@ function Poster({ apiBase, doc, onOpen }) {
       </span>
     </Cover>
     <span className="poster-tip" aria-hidden="true"><strong>{title}</strong>{doc.author && <span>{doc.author}</span>}</span>
-    <span className="poster-caption" aria-hidden="true"><strong>{title}</strong>{doc.author && <span>{doc.author}</span>}</span>
   </button>;
+}
+
+// Covers per shelf: a cover is at least `min` px wide, with `gap` px between.
+// Phones get smaller covers so a shelf still holds three.
+const COVERS = { hover: { min: 128, gap: 18 }, touch: { min: 84, gap: 12 } };
+
+// The books on a bookcase, one shelf per row. The number of covers on a shelf
+// follows the width of the case, so every plank is as full as it can be and
+// only the last one is short. Each shelf gets its own plank; on touch screens
+// a strip of titles hangs under it, like the labels on a library shelf.
+function Bookcase({ apiBase, books, onOpen }) {
+  const rowsRef = useRef(null);
+  const [fit, setFit] = useState({ columns: 6, gap: COVERS.hover.gap });
+  useLayoutEffect(() => {
+    const el = rowsRef.current;
+    if (!el) return undefined;
+    const measure = () => {
+      const style = window.getComputedStyle(el);
+      const inner = el.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0);
+      const { min, gap } = window.matchMedia?.("(hover: none)").matches ? COVERS.touch : COVERS.hover;
+      setFit((current) => {
+        const columns = shelfColumns(inner, min, gap);
+        return current.columns === columns && current.gap === gap ? current : { columns, gap };
+      });
+    };
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(el);
+    return () => observer?.disconnect();
+  }, []);
+  const shelves = useMemo(() => shelfRows(books, fit.columns), [books, fit.columns]);
+  return <div className="case">
+    <div className="case-rows" ref={rowsRef} style={{ "--columns": fit.columns, "--gap": `${fit.gap}px` }}>
+      {shelves.map((row, index) => <section className="case-shelf" key={index} aria-label={`Shelf ${index + 1} of ${shelves.length}`}>
+        <div className="case-books">
+          {row.map((doc) => <Poster key={doc.document_id} apiBase={apiBase} doc={doc} onOpen={onOpen} />)}
+        </div>
+        <div className="case-plank" aria-hidden="true" />
+        <div className="case-labels" aria-hidden="true">
+          {row.map((doc) => <span className="case-label" key={doc.document_id}><strong>{doc.title || displayTitle(doc.filename)}</strong>{doc.author && <span>{doc.author}</span>}</span>)}
+        </div>
+      </section>)}
+    </div>
+  </div>;
 }
 
 export default function LibraryExplore({ apiBase, documents, collections, onOpenDocument, onNavigate, preset }) {
@@ -127,9 +170,7 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
     </div>
     {layout === "ledger" && results.length > 0 && <LibraryLedger rows={results} filters={filters} onOpen={onOpenDocument} onSort={(key) => setFilters((current) => (current.sort === key ? { ...current, order: current.order === "reverse" ? "default" : "reverse" } : { ...current, sort: key, order: "default" }))} />}
     {layout === "diary" && results.length > 0 && <LibraryDiary apiBase={apiBase} rows={results} onOpen={onOpenDocument} />}
-    {layout === "grid" && <div className="poster-grid">
-      {results.map((doc) => <Poster key={doc.document_id} apiBase={apiBase} doc={doc} onOpen={onOpenDocument} />)}
-    </div>}
+    {layout === "grid" && results.length > 0 && <Bookcase apiBase={apiBase} books={results} onOpen={onOpenDocument} />}
     {!results.length && <p className="muted empty-state" role="status">{activeCount ? `No books match ${filterLabels(filters, collections).join(" · ")}. ` : "No books yet. "}{activeCount > 0 && <button type="button" className="text-button" onClick={() => setFilters(EMPTY_FILTERS)}>Clear filters</button>}</p>}
   </div>
   <LibraryRail apiBase={apiBase} documents={documents} notes={notes} filters={filters} onShelf={(preset) => setFilters((current) => shelfFilters(current, preset))} onNavigate={onNavigate} onOpenDocument={onOpenDocument} />
