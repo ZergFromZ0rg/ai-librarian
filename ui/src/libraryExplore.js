@@ -115,14 +115,12 @@ const PARAMS = {
   genre: "genre", author: "author", acquisition: "acq", finishedYear: "year", indexing: "index", notes: "notes", liked: "liked",
   sort: "sort", order: "order",
 };
-export const LAYOUTS = ["grid", "ledger", "diary"];
 const PREFIX = "lib.";
 
-export function viewToParams(filters, layout = "grid") {
+export function viewToParams(filters) {
   const f = { ...EMPTY_FILTERS, ...filters };
   const params = new URLSearchParams();
   for (const [key, name] of Object.entries(PARAMS)) if (f[key] !== EMPTY_FILTERS[key]) params.set(PREFIX + name, f[key]);
-  if (layout !== "grid") params.set(`${PREFIX}view`, layout);
   return params;
 }
 
@@ -136,15 +134,14 @@ export function viewFromSearch(search) {
     if (key === "order" && !["default", "reverse"].includes(value)) continue;
     filters[key] = value;
   }
-  const layout = source.get(`${PREFIX}view`);
-  return { filters, layout: LAYOUTS.includes(layout) ? layout : "grid" };
+  return { filters };
 }
 
 // `search` with this view's parameters replaced and everything else kept.
-export function searchWithView(search, filters, layout) {
+export function searchWithView(search, filters) {
   const merged = new URLSearchParams(search);
   for (const key of [...merged.keys()]) if (key.startsWith(PREFIX)) merged.delete(key);
-  for (const [key, value] of viewToParams(filters, layout)) merged.set(key, value);
+  for (const [key, value] of viewToParams(filters)) merged.set(key, value);
   const text = merged.toString();
   return text ? `?${text}` : "";
 }

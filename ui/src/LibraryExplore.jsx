@@ -1,7 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Cover from "./Cover.jsx";
-import LibraryDiary from "./LibraryDiary.jsx";
-import LibraryLedger from "./LibraryLedger.jsx";
 import LibraryRail from "./LibraryRail.jsx";
 import { starText } from "./ratings.js";
 import { EMPTY_FILTERS, bookHeight, facetValues, filterLabels, filterLibrary, searchWithView, shelfColumns, shelfRows, viewFromSearch } from "./libraryExplore.js";
@@ -78,11 +76,10 @@ function Bookcase({ apiBase, books, onOpen }) {
 }
 
 export default function LibraryExplore({ apiBase, documents, collections, onOpenDocument, onNavigate, preset }) {
-  // The view lives in the address (?lib.status=read&lib.view=ledger…) so it can
+  // The view lives in the address (?lib.status=read&lib.sort=rating…) so it can
   // be bookmarked, and survives opening a book over it and closing it again.
   const [initial] = useState(() => viewFromSearch(window.location.search));
   const [filters, setFilters] = useState(initial.filters);
-  const [layout, setLayout] = useState(initial.layout);
   const [notes, setNotes] = useState([]);
   const [saved, setSaved] = useState(() => {
     const value = loadStored(SAVED_KEY, [], true);
@@ -92,11 +89,11 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
   const [showFilters, setShowFilters] = useState(false);
   useEffect(() => { if (preset) setFilters({ ...EMPTY_FILTERS, ...preset }); }, [preset]);
   useEffect(() => {
-    const next = searchWithView(window.location.search, filters, layout);
+    const next = searchWithView(window.location.search, filters);
     if (next !== window.location.search) window.history.replaceState(null, "", `${window.location.pathname}${next}${window.location.hash}`);
-  }, [filters, layout]);
+  }, [filters]);
   useEffect(() => () => {
-    const cleared = searchWithView(window.location.search, EMPTY_FILTERS, "grid");
+    const cleared = searchWithView(window.location.search, EMPTY_FILTERS);
     if (cleared !== window.location.search) window.history.replaceState(null, "", `${window.location.pathname}${cleared}${window.location.hash}`);
   }, []);
   // What you wrote about each book, so the search box can find it, and the
@@ -166,11 +163,8 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
       </div>
       </div>}
     </section>
-    <div className="explore-result-head"><strong>{results.length.toLocaleString()}</strong> book{results.length === 1 ? "" : "s"}      <span className="layout-toggle" role="group" aria-label="Layout">{[["grid", "Covers"], ["ledger", "Ledger"], ["diary", "Diary"]].map(([value, label]) => <button type="button" key={value} className={layout === value ? "active" : ""} aria-pressed={layout === value} onClick={() => setLayout(value)}>{label}</button>)}</span>
-    </div>
-    {layout === "ledger" && results.length > 0 && <LibraryLedger rows={results} filters={filters} onOpen={onOpenDocument} onSort={(key) => setFilters((current) => (current.sort === key ? { ...current, order: current.order === "reverse" ? "default" : "reverse" } : { ...current, sort: key, order: "default" }))} />}
-    {layout === "diary" && results.length > 0 && <LibraryDiary apiBase={apiBase} rows={results} onOpen={onOpenDocument} />}
-    {layout === "grid" && results.length > 0 && <Bookcase apiBase={apiBase} books={results} onOpen={onOpenDocument} />}
+    <div className="explore-result-head"><strong>{results.length.toLocaleString()}</strong> book{results.length === 1 ? "" : "s"}</div>
+    {results.length > 0 && <Bookcase apiBase={apiBase} books={results} onOpen={onOpenDocument} />}
     {!results.length && <p className="muted empty-state" role="status">{activeCount ? `No books match ${filterLabels(filters, collections).join(" · ")}. ` : "No books yet. "}{activeCount > 0 && <button type="button" className="text-button" onClick={() => setFilters(EMPTY_FILTERS)}>Clear filters</button>}</p>}
   </div>
   <LibraryRail apiBase={apiBase} documents={documents} notes={notes} filters={filters} onShelf={(preset) => setFilters((current) => shelfFilters(current, preset))} onNavigate={onNavigate} onOpenDocument={onOpenDocument} />

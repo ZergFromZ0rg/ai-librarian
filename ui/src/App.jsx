@@ -541,12 +541,6 @@ export default function App() {
     focusConsole();
   }
 
-  function scopeToShelf(shelf) {
-    setScope({ shelf, documentName: shelf.split("/").join(" › ") });
-    setSource(null);
-    focusConsole();
-  }
-
   const isAsk = mode === "ask" && askEnabled;
   // The conversation Ask is writing into: shown in the top bar so it's never
   // ambiguous which chat a question will land in.
@@ -1143,7 +1137,6 @@ export default function App() {
               onJob={(nextJob, context = {}) => setJob({ ...nextJob, ...context })}
               onOpenDocument={(doc) => openDocument(doc)}
               onScope={(doc) => scopeTo(doc.document_id, doc.filename)}
-              onScopeShelf={scopeToShelf}
               onUpload={uploadFiles}
               uploading={uploading}
               intakeCount={intake.items.length}

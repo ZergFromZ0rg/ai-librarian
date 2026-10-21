@@ -73,25 +73,25 @@ describe("shareable views", () => {
   it("writes only what differs from the defaults and reads it back", () => {
     expect(viewToParams(EMPTY_FILTERS).toString()).toBe("");
     const filters = { ...EMPTY_FILTERS, status: "read", notes: "with", query: "winter reads", sort: "rating", order: "reverse" };
-    const text = viewToParams(filters, "ledger").toString();
+    const text = viewToParams(filters).toString();
     expect(text).toContain("lib.status=read");
-    expect(viewFromSearch(`?${text}`)).toEqual({ filters, layout: "ledger" });
+    expect(viewFromSearch(`?${text}`)).toEqual({ filters });
   });
 
   it("ignores unknown, oversized, and malformed values", () => {
     const search = `?lib.sort=bogus&lib.order=sideways&lib.view=cards&lib.q=${"x".repeat(300)}&lib.status=reading`;
     const view = viewFromSearch(search);
     expect(view.filters).toEqual({ ...EMPTY_FILTERS, status: "reading" });
-    expect(view.layout).toBe("grid");
   });
 
-  it("opens an old bookmark of the retired List layout as the cover grid", () => {
-    expect(viewFromSearch("?lib.view=list").layout).toBe("grid");
+  it("ignores the view parameter of old bookmarks (the layouts are gone)", () => {
+    expect(viewFromSearch("?lib.view=ledger&lib.status=read").filters).toEqual({ ...EMPTY_FILTERS, status: "read" });
+    expect(searchWithView("?lib.view=ledger", EMPTY_FILTERS)).toBe("");
   });
 
   it("replaces only its own parameters in an address", () => {
-    expect(searchWithView("?foo=1&lib.status=read", { ...EMPTY_FILTERS, notes: "with" }, "grid")).toBe("?foo=1&lib.notes=with");
-    expect(searchWithView("?lib.status=read", EMPTY_FILTERS, "grid")).toBe("");
+    expect(searchWithView("?foo=1&lib.status=read", { ...EMPTY_FILTERS, notes: "with" })).toBe("?foo=1&lib.notes=with");
+    expect(searchWithView("?lib.status=read", EMPTY_FILTERS)).toBe("");
   });
 
   it("describes active constraints in words", () => {

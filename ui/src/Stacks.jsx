@@ -1,42 +1,16 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import ActionProgress from "./ActionProgress.jsx";
 import Cover from "./Cover.jsx";
 import { starText } from "./ratings.js";
-import { CoverFlags, MarkControls } from "./DocMarks.jsx";
+import { MarkControls } from "./DocMarks.jsx";
 import IndexActivity from "./IndexActivity.jsx";
 import LibraryExplore from "./LibraryExplore.jsx";
 import LibraryStats from "./LibraryStats.jsx";
 import NotesPanel from "./NotesPanel.jsx";
-import OwnedBooks from "./OwnedBooks.jsx";
-import ShelfView from "./ShelfView.jsx";
 import VocabularyPanel from "./VocabularyPanel.jsx";
 import { ingestActionProgress, isActiveIngestJob, reindexActionProgress } from "./actionProgress.js";
-import { displayTitle, loadStored, saveStored } from "./storage.js";
-
-const VIEW_KEY = "ai-librarian.stacks.view";
-
-function formatSize(bytes) {
-  if (!bytes && bytes !== 0) return "";
-  const units = ["B", "KB", "MB", "GB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value < 10 && unit > 0 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
-}
-
-function breadcrumbs(path) {
-  const crumbs = [{ label: "Library", path: "" }];
-  if (!path) return crumbs;
-  const parts = path.split("/");
-  parts.forEach((part, index) => {
-    crumbs.push({ label: part, path: parts.slice(0, index + 1).join("/") });
-  });
-  return crumbs;
-}
+import { displayTitle } from "./storage.js";
 
 function StatusBadge({ status }) {
   return <span className={`badge badge-${status}`}>{status}</span>;
@@ -142,231 +116,6 @@ function CollectionBar({ collections, activeId, onSelect, onCreate, onUpdate, on
       )}
       </>}
     </section>
-  );
-}
-
-// A Finder-style walk of the mounted /library volume, shown as shelves of
-// covers. Folders and PDFs only; importing references the file in place (no
-// copy) and, for a folder, kicks off a recursive ingest job. It opens on
-// `libraryRoot` (the folder auto-ingest watches) rather than the top of a
-// possibly much broader mount.
-function Shelves({ apiBase, documents, libraryRoot, collection, settingRoot, job, onSetLibraryFolder, onImported, onJob, onOpenDocument, view }) {
-  const [path, setPath] = useState(null); // null = not yet resolved to the starting folder
-  const [tree, setTree] = useState(null);
-  const [status, setStatus] = useState("loading");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState({});
-  const openedRef = useRef(false);
-
-  const loadTree = useCallback(
-    async (target) => {
-      setStatus("loading");
-      setError("");
-      try {
-        const response = await fetch(`${apiBase}/library/tree?path=${encodeURIComponent(target)}`);
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
-        setTree(data);
-        setPath(data.path);
-        setStatus("ready");
-      } catch (loadError) {
-        setError(loadError.message);
-        setStatus("error");
-      }
-    },
-    [apiBase],
-  );
-
-  // Switching collection is intentional and should open that collection's
-  // root. A normal catalogue refresh, on the other hand, never yanks the
-  // reader out of a sub-folder.
-  useEffect(() => {
-    if (libraryRoot === null) return;
-    if (openedRef.current && path === libraryRoot) return;
-    openedRef.current = true;
-    loadTree(libraryRoot || "");
-  }, [libraryRoot, collection?.id, loadTree]);
-
-  // A file's "indexed" flag comes from the tree listing, which goes stale as
-  // imports finish; refresh this folder quietly whenever the catalogue moves.
-  const indexedCount = documents.filter((doc) => doc.indexing_status === "indexed").length;
-  useEffect(() => {
-    if (path === null) return;
-    fetch(`${apiBase}/library/tree?path=${encodeURIComponent(path)}`)
-      .then((response) => (response.ok ? response.json() : null))
-      .then((data) => {
-        if (data && data.path === path) setTree(data);
-      })
-      .catch(() => {});
-  }, [indexedCount, documents.length]);
-
-  const importEntry = useCallback(
-    async (entryPath) => {
-      setBusy((current) => ({ ...current, [entryPath]: true }));
-      setError("");
-      try {
-        const response = await fetch(`${apiBase}/library/import`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: entryPath, ...(collection?.legacy ? {} : { collection_id: collection?.id }) }),
-        });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
-        if (data.job_id) onJob?.(data, { uiOrigin: "import", uiPath: entryPath });
-        onImported?.();
-      } catch (importError) {
-        setError(importError.message);
-      } finally {
-        setBusy((current) => {
-          const next = { ...current };
-          delete next[entryPath];
-          return next;
-        });
-      }
-    },
-    [apiBase, collection?.id, collection?.legacy, onImported, onJob],
-  );
-
-  async function setAsLibrary(entryPath) {
-    const result = await onSetLibraryFolder(entryPath);
-    if (result?.ok) loadTree(entryPath);
-  }
-
-  const byId = useMemo(() => new Map(documents.map((doc) => [doc.document_id, doc])), [documents]);
-  const entries = tree?.entries || [];
-  const dirs = entries.filter((entry) => entry.type === "dir");
-  const files = entries.filter((entry) => entry.type === "file");
-  const atLibraryRoot = path === libraryRoot;
-  const joinPath = (name) => (path ? `${path}/${name}` : name);
-  const progressFor = (entryPath, origin) =>
-    job?.uiOrigin === origin && job?.uiPath === entryPath ? ingestActionProgress(job) : null;
-  const currentImportProgress = progressFor(path || ".", "import");
-  const currentRootProgress = job?.uiOrigin === "set-library" && [path, path || "."].includes(job?.uiPath)
-    ? ingestActionProgress(job)
-    : null;
-
-  return (
-    <div className="shelves">
-      <div className="shelves-bar">
-        <nav className="breadcrumb" aria-label="Folder path">
-          {breadcrumbs(path || "").map((crumb, index, all) => (
-            <React.Fragment key={crumb.path}>
-              {index > 0 && <span className="breadcrumb-sep">/</span>}
-              {index === all.length - 1 ? (
-                <span className="breadcrumb-current">{crumb.label}</span>
-              ) : (
-                <button type="button" className="text-button" onClick={() => loadTree(crumb.path)}>
-                  {crumb.label}
-                </button>
-              )}
-            </React.Fragment>
-          ))}
-        </nav>
-        <div className="shelves-bar-actions">
-          {currentRootProgress && <ActionProgress progress={currentRootProgress} compact />}
-          {path !== null && !atLibraryRoot && (
-            <button type="button" className="text-button" disabled={settingRoot || isActiveIngestJob(job)} onClick={() => setAsLibrary(path)} title="Make this the folder auto-ingest watches">
-              {settingRoot ? "Setting…" : "Set as library folder"}
-            </button>
-          )}
-          {path !== null && (currentImportProgress || files.some((file) => !file.indexed)) && (
-            currentImportProgress ? (
-              <ActionProgress progress={currentImportProgress} compact />
-            ) : (
-              <button type="button" className="button" disabled={Boolean(busy[path || "."]) || isActiveIngestJob(job)} onClick={() => importEntry(path || ".")}>
-                {busy[path || "."] ? "Queueing…" : "Import this folder"}
-              </button>
-            )
-          )}
-        </div>
-      </div>
-
-      {error && <div className="notice error">{error}</div>}
-      {status === "loading" && !tree && <p className="muted">Loading…</p>}
-      {status === "ready" && entries.length === 0 && <p className="muted">This folder has no supported documents yet.</p>}
-
-      {dirs.length > 0 && (
-        <div className="folders">
-          {dirs.map((entry) => {
-            const entryPath = joinPath(entry.name);
-            const importProgress = progressFor(entryPath, "import");
-            const rootProgress = progressFor(entryPath, "set-library");
-            return (
-              <div className="folder" key={`dir-${entry.name}`}>
-                <button type="button" className="folder-open" onClick={() => loadTree(entryPath)}>
-                  <span className="folder-tab" aria-hidden="true" />
-                  <span className="folder-name">{entry.name}</span>
-                  <span className="folder-count">
-                    {entry.document_count == null ? "—" : `${entry.document_count} file${entry.document_count === 1 ? "" : "s"}`}
-                  </span>
-                </button>
-                <div className="folder-actions">
-                  {importProgress ? (
-                    <ActionProgress progress={importProgress} compact />
-                  ) : (
-                    <button type="button" className="text-button" disabled={Boolean(busy[entryPath]) || isActiveIngestJob(job)} onClick={() => importEntry(entryPath)}>
-                      {busy[entryPath] ? "Queueing…" : "Import all"}
-                    </button>
-                  )}
-                  {rootProgress ? (
-                    <ActionProgress progress={rootProgress} compact />
-                  ) : (
-                    <button type="button" className="text-button" disabled={settingRoot || isActiveIngestJob(job)} onClick={() => setAsLibrary(entryPath)}>
-                      {settingRoot ? "Setting…" : "Set as library"}
-                    </button>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {files.length > 0 && (
-        <div className={view === "grid" ? "cover-grid" : "file-rows"}>
-          {files.map((entry) => {
-            const entryPath = joinPath(entry.name);
-            const doc = entry.document_id ? byId.get(entry.document_id) : null;
-            const openable = Boolean(doc);
-            const action = entry.indexed ? null : (
-              <button type="button" className="button" disabled={Boolean(busy[entryPath])} onClick={() => importEntry(entryPath)}>
-                {busy[entryPath] ? "Importing…" : "Import"}
-              </button>
-            );
-            if (view === "grid") {
-              return (
-                <div className={`cover-card${openable ? "" : " unindexed"}`} key={`file-${entry.name}`}>
-                  <button type="button" className="cover-card-open" disabled={!openable} onClick={() => onOpenDocument(doc)} title={entry.name}>
-                    <Cover apiBase={apiBase} documentId={doc ? doc.document_id : null} filename={entry.name} fileType={doc?.file_type || entry.file_type} author={doc?.author} width={320}>
-                      {doc && <CoverFlags doc={doc} />}
-                    </Cover>
-                  </button>
-                  <div className="cover-card-meta">
-                    <span className="cover-card-title" title={entry.name}>{displayTitle(entry.name)}</span>
-                    <span className="cover-card-detail">
-                      {doc ? <StatusBadge status={doc.indexing_status} /> : <span>not in library</span>}
-                      <span>{doc?.pages ? `${doc.pages} pp.` : formatSize(entry.size)}</span>
-                    </span>
-                    {action}
-                  </div>
-                </div>
-              );
-            }
-            return (
-              <div className="file-row" key={`file-${entry.name}`}>
-                <button type="button" className="file-row-open" disabled={!openable} onClick={() => onOpenDocument(doc)}>
-                  <Cover apiBase={apiBase} documentId={doc ? doc.document_id : null} filename={entry.name} fileType={doc?.file_type || entry.file_type} width={160} className="cover-mini" />
-                  <span className="file-row-name" title={entry.name}>{displayTitle(entry.name)}</span>
-                </button>
-                <span className="file-row-detail">{doc?.pages ? `${doc.pages} pp.` : ""}</span>
-                <span className="file-row-detail">{formatSize(entry.size)}</span>
-                {doc ? <StatusBadge status={doc.indexing_status} /> : action}
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
   );
 }
 
@@ -574,26 +323,22 @@ function Catalogue({ apiBase, documents, reindexing, reindexProgress, onReindex,
   );
 }
 
-// The library below the console — the folders on disk and the index of
-// everything already processed — plus the ways in (upload,
-// rescan, import) and the progress of whatever is being processed.
+// The library: the books you have browse and filter, your notes, vocabulary and
+// statistics, and the index of everything already processed — plus the ways in
+// (upload, rescan) and the progress of whatever is being processed.
 export default function Stacks(props) {
-  const { apiBase, documents, collections: allCollections = [], onUpload, uploading, intakeCount = 0, onReviewUploads, onRescan, onCreateCollection, onUpdateCollection, onDeleteCollection, onImported, onOpenDocument, onScopeShelf, scanStarting, collectionBusy, notice, job, sectionRef } = props;
+  const { apiBase, documents, collections: allCollections = [], onUpload, uploading, intakeCount = 0, onReviewUploads, onRescan, onCreateCollection, onUpdateCollection, onDeleteCollection, onImported, onOpenDocument, scanStarting, collectionBusy, notice, job, sectionRef } = props;
   // Built-in libraries (Notes) have no folder to scan, rename or remove.
   const collections = useMemo(() => allCollections.filter((collection) => !collection.builtin), [allCollections]);
   const noteCount = allCollections.find((collection) => collection.builtin)?.document_count || 0;
   const [tab, setTab] = useState("browse");
   const [browsePreset, setBrowsePreset] = useState(null);
-  const [view, setView] = useState(() => (loadStored(VIEW_KEY, "grid") === "list" ? "list" : "grid"));
   const [activeCollectionId, setActiveCollectionId] = useState("");
   const fileInput = useRef(null);
   const sourceDocuments = useMemo(
     () => documents.filter((document) => document.record_type !== "standalone"),
     [documents],
   );
-  const standaloneCount = documents.length - sourceDocuments.length;
-
-  useEffect(() => saveStored(VIEW_KEY, view), [view]);
 
   useEffect(() => {
     if (!collections.length) return;
@@ -684,12 +429,6 @@ export default function Stacks(props) {
           <button type="button" role="tab" aria-selected={tab === "browse"} className={tab === "browse" ? "active" : ""} onClick={() => setTab("browse")}>
             Browse
           </button>
-          <button type="button" role="tab" aria-selected={tab === "shelves"} className={tab === "shelves" ? "active" : ""} onClick={() => setTab("shelves")}>
-            Folders
-          </button>
-          <button type="button" role="tab" aria-selected={tab === "sorted"} className={tab === "sorted" ? "active" : ""} onClick={() => setTab("sorted")}>
-            Shelves
-          </button>
           <button type="button" role="tab" aria-selected={tab === "notes"} className={tab === "notes" ? "active" : ""} onClick={() => setTab("notes")}>
             Notes <span className="tab-count">{noteCount}</span>
           </button>
@@ -699,9 +438,6 @@ export default function Stacks(props) {
           <button type="button" role="tab" aria-selected={tab === "statistics"} className={tab === "statistics" ? "active" : ""} onClick={() => setTab("statistics")}>
             Statistics
           </button>
-          <button type="button" role="tab" aria-selected={tab === "owned"} className={tab === "owned" ? "active" : ""} onClick={() => setTab("owned")}>
-            Without files <span className="tab-count">{standaloneCount}</span>
-          </button>
           <button type="button" role="tab" aria-selected={tab === "activity"} className={tab === "activity" ? "active" : ""} onClick={() => setTab("activity")}>
             Activity <span className="tab-count">{counts.pending + counts.error}</span>
           </button>
@@ -709,25 +445,12 @@ export default function Stacks(props) {
             Index <span className="tab-count">{sourceDocuments.length}</span>
           </button>
         </div>
-        {tab === "shelves" && (
-          <div className="segmented small" role="radiogroup" aria-label="Layout">
-            <button type="button" role="radio" aria-checked={view === "grid"} className={view === "grid" ? "active" : ""} onClick={() => setView("grid")}>
-              Covers
-            </button>
-            <button type="button" role="radio" aria-checked={view === "list"} className={view === "list" ? "active" : ""} onClick={() => setView("list")}>
-              List
-            </button>
-          </div>
-        )}
       </div>
 
       {tab === "browse" && <LibraryExplore apiBase={apiBase} documents={documents} collections={allCollections} onOpenDocument={onOpenDocument} onNavigate={setTab} preset={browsePreset} />}
-      {tab === "shelves" && <Shelves {...props} collection={activeCollection} libraryRoot={activeCollection?.path ?? props.libraryRoot} view={view} />}
-      {tab === "sorted" && <ShelfView apiBase={apiBase} documents={documents} onChanged={onImported} onOpenDocument={onOpenDocument} onScopeShelf={onScopeShelf} />}
       {tab === "notes" && <NotesPanel apiBase={apiBase} onChanged={onImported} onOpenSource={(id) => onOpenDocument({ document_id: id })} />}
       {tab === "vocabulary" && <VocabularyPanel apiBase={apiBase} documents={documents} onOpenDocument={onOpenDocument} />}
       {tab === "statistics" && <LibraryStats documents={documents} collections={allCollections} onExplore={(preset) => { setBrowsePreset({ ...preset }); setTab("browse"); }} />}
-      {tab === "owned" && <OwnedBooks apiBase={apiBase} documents={documents} onOpenDocument={onOpenDocument} onChanged={onImported} />}
       {tab === "activity" && <IndexActivity apiBase={apiBase} onOpenDocument={onOpenDocument} onRetry={props.onReindex} onApproveOcr={props.onApproveOcr} onChanged={onImported} />}
       {tab === "catalogue" && <Catalogue {...props} documents={sourceDocuments} />}
     </section>
