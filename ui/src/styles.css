@@ -6110,9 +6110,6 @@ main {
 .book-hero-progress { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 18px; color: var(--muted); font-size: 13px; }
 .book-hero-bar { flex: 1 1 140px; max-width: 260px; height: 6px; overflow: hidden; border-radius: 3px; background: var(--surface-3); }
 .book-hero-bar i { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
-.book-hero-about { max-width: 62ch; margin-top: 24px; }
-.book-hero-desc { display: -webkit-box; margin: 0; overflow: hidden; color: var(--ink-2); font: 16px/1.65 var(--serif); white-space: pre-line; -webkit-box-orient: vertical; -webkit-line-clamp: 6; }
-.book-hero-desc.open { display: block; }
 .book-hero-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 28px; }
 .book-hero-actions .button { padding: 10px 20px; font-size: 14px; }
 .book-hero-unsaved { padding: 6px 12px; border: 1px solid var(--warn); border-radius: 999px; background: var(--warn-tint); color: var(--warn); font-size: 12px; font-weight: 600; cursor: pointer; }
@@ -6144,4 +6141,53 @@ main {
 }
 @media (prefers-reduced-motion: reduce) {
   .book-hero-status { transition: none; }
+}
+
+/* ------------------------- book page: edit in place, and fit one window -- */
+/* The title and the author are text boxes with no box: they read as the
+   heading and the author line, and show a soft field when hovered or focused.
+   Everything else on the Details tab is compact so the page needs no scrolling
+   on a normal laptop screen. */
+.book-page { padding: 18px 40px 90px; }
+.book-page-nav { margin-bottom: 10px; }
+.book-layout { grid-template-columns: clamp(200px, 22vw, 260px) minmax(0, 1fr); gap: clamp(24px, 3.5vw, 40px); }
+.book-hero-main { margin-bottom: 12px; }
+.book-hero-edit-slot { min-width: 0; }
+.book-hero-main h1 { margin: 6px 0 0; font: 500 clamp(28px, 3.6vw, 42px)/1.12 var(--serif); letter-spacing: -0.01em; }
+.book-hero-edit { display: block; width: calc(100% + 16px); margin: 0 -8px; padding: 2px 8px; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; letter-spacing: inherit; line-height: inherit; resize: none; overflow: hidden; outline: none; box-shadow: 0 0 0 2px transparent; transition: background 0.12s, box-shadow 0.12s; }
+.book-hero-edit:hover:not(:disabled):not(:focus) { background: var(--surface-2); }
+.book-hero-edit:focus { background: var(--surface); box-shadow: 0 0 0 2px var(--accent-ring); }
+.book-hero-edit::placeholder { color: var(--faint); }
+.book-hero-edit.book-hero-author { margin-top: 2px; color: var(--ink-2); font: 400 17px/1.4 var(--sans); letter-spacing: 0; }
+.book-hero-meta { margin: 2px 0 0; font-size: 13px; }
+.book-hero-marks { margin-top: 12px; gap: 8px 14px; }
+.book-rating-medium .book-star { font-size: 24px; }
+.book-hero-status { padding: 4px 12px; font-size: 12px; }
+.book-hero-progress { margin-top: 10px; font-size: 12px; }
+.book-hero-actions { margin-top: 12px; gap: 8px; }
+.book-hero-actions .button { height: 32px; padding: 0 16px; font-size: 13px; }
+.book-tabs { margin-bottom: 12px; }
+.book-tabs button { padding: 8px 12px; font-size: 13px; }
+
+.book-editor-fields { gap: 12px; }
+.book-editor-card { padding: 12px 16px 14px; border-radius: 10px; }
+.book-card-heading { margin-bottom: 8px; }
+.book-card-heading h2 { font-size: 13px; }
+.book-field { gap: 3px; margin-bottom: 8px; font-size: 11px; }
+.book-field input.input, .book-field select.input { height: 30px; padding: 3px 9px; font-size: 13px; border-radius: 5px; }
+.book-field-pair, .book-field-trio { gap: 10px; }
+.book-status-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 6px 14px; margin-top: 2px; padding-top: 10px; border-top: 1px solid var(--rule); }
+.book-status-row fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.book-status-row legend { margin-bottom: 3px; padding: 0; color: var(--ink-2); font-size: 11px; font-weight: 550; }
+.book-segments { display: inline-flex; gap: 2px; padding: 2px; border-radius: 6px; }
+.book-segments label { flex: none; padding: 0 10px; border-radius: 4px; font-size: 12px; line-height: 22px; white-space: nowrap; }
+.book-status-row .book-date-field { width: 128px; margin: 0; }
+.book-status-row .book-date-field input.input { height: 26px; padding: 0 8px; font-size: 12px; }
+.book-status-row .book-check { margin: 0 0 4px; }
+.book-publication { margin-top: 8px; padding-top: 8px; }
+.book-publication-fields { margin-top: 10px; }
+.book-editor-footer { bottom: 8px; margin-top: 10px; padding: 7px 12px; }
+@media (max-width: 760px) {
+  .book-page { padding: 14px 16px 70px; }
+  .book-layout { grid-template-columns: minmax(0, 1fr); gap: 24px; }
 }

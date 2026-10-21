@@ -8,7 +8,7 @@ import ReadingProgress from "./ReadingProgress.jsx";
 import StarRating, { LikeButton } from "./StarRating.jsx";
 import VocabularyPanel from "./VocabularyPanel.jsx";
 import { isWorkDocument } from "./documentsLibrary.js";
-import { displayTitle, readingStatus } from "./storage.js";
+import { readingStatus } from "./storage.js";
 import { katexPlugin, prepareMath, remarkPlugins } from "./markdown.js";
 
 const STATUS_LABELS = { to_read: "To read", reading: "Reading", read: "Read", abandoned: "Abandoned" };
@@ -31,7 +31,7 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
   // Opened from a search result with a passage: land on the notes, where it waits to be saved.
   const [tab, setTab] = useState(passage?.snippet || passage?.matched ? "notes" : "details");
   const [coverSlot, setCoverSlot] = useState(null);
-  const [descOpen, setDescOpen] = useState(false);
+  const [titleSlot, setTitleSlot] = useState(null);
   const tabsRef = useRef(null);
   const closeRef = useRef(null);
   const readerVisible = useRef(readerOpen);
@@ -175,8 +175,7 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
     </aside>;
     info = <header className="book-hero-main">
         <div className="book-hero-kicker"><span className="eyebrow">{work ? "Document" : "Book"}</span>{format && <span className="book-format">{format}</span>}</div>
-        <h1 id="book-page-title">{doc.title || displayTitle(doc.filename)}</h1>
-        {doc.author && <p className="book-hero-author">{doc.author}</p>}
+        <div ref={setTitleSlot} className="book-hero-edit-slot" />
         {meta.length > 0 && <p className="book-hero-meta">{meta.join(" · ")}</p>}
         <div className="book-hero-marks">
           {!work && <>
@@ -189,10 +188,6 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
           <span className="book-hero-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-label="Reading progress"><i style={{ width: `${progress}%` }} /></span>
           <span>{progress}%{total ? ` · ${unit} ${here.toLocaleString()} of ${total.toLocaleString()}` : ""}</span>
           <button type="button" className="text-button" onClick={() => goTab("reading")}>Update</button>
-        </div>}
-        {doc.description && <div className="book-hero-about">
-          <p className={`book-hero-desc${descOpen ? " open" : ""}`}>{doc.description}</p>
-          {doc.description.length > 320 && <button type="button" className="text-button" aria-expanded={descOpen} onClick={() => setDescOpen((open) => !open)}>{descOpen ? "Less" : "More"}</button>}
         </div>}
         <div className="book-hero-actions">
           {hasSource && <>
@@ -223,7 +218,7 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
             {tabs.map(([id, label]) => <button key={id} type="button" role="tab" id={`book-tab-${id}`} aria-selected={tab === id} aria-controls={`book-panel-${id}`} tabIndex={tab === id ? 0 : -1} className={tab === id ? "active" : ""} onClick={() => setTab(id)}>{label}{id === "details" && detailsDirty ? <span className="book-tab-dot" title="Unsaved changes" /> : null}</button>)}
           </div>
 
-          <BookDetails doc={doc} apiBase={apiBase} tab={tab} coverSlot={coverSlot} onDocument={(updated) => { setDocument(updated); onChanged(); }} onDirty={setDetailsDirty} onCoverChanged={onCoverChanged} />
+          <BookDetails doc={doc} apiBase={apiBase} tab={tab} coverSlot={coverSlot} titleSlot={titleSlot} onDocument={(updated) => { setDocument(updated); onChanged(); }} onDirty={setDetailsDirty} onCoverChanged={onCoverChanged} />
 
           <div className="book-tab-group" role="tabpanel" id="book-panel-reading" aria-labelledby="book-tab-reading" hidden={tab !== "reading"}>
             <ReadingProgress apiBase={apiBase} doc={doc} onRead={onRead} onDirty={setProgressDirty} onDocument={(updated) => { setDocument(updated); onChanged(); }} />

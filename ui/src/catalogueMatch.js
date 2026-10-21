@@ -9,7 +9,6 @@ const ROWS = [
   ["page_count", "Pages"],
   ["language", "Language"],
   ["genres", "Genres"],
-  ["description", "Description"],
   ["isbn_13", "ISBN-13"],
   ["isbn_10", "ISBN-10"],
 ];

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import AiCheck from "./AiCheck.jsx";
 import { applyBody, matchRows } from "./catalogueMatch.js";
@@ -18,7 +18,7 @@ function genres(doc) {
 function values(doc) {
   return {
     title: doc.title || displayTitle(doc.filename), subtitle: doc.subtitle || "", author: doc.author || "",
-    subject: doc.subject || "", genres: genres(doc).join(", "), description: doc.description || "",
+    genres: genres(doc).join(", "),
     kind: doc.kind_override || "auto", form: doc.book_form_override || "auto", doc_type: doc.doc_type_override || "auto", owned: doc.owned == null ? null : Boolean(doc.owned),
     acquisition_source: doc.acquisition_source || "", reading_status: doc.reading_status || (doc.read_at ? "read" : "to_read"),
     started_at: (doc.started_at || "").slice(0, 10), finished_at: (doc.finished_at || doc.read_at || "").slice(0, 10),
@@ -35,10 +35,37 @@ function apiValue(key, value) {
   return value;
 }
 
+// Text you edit where you read it: a text box with no box, so it looks like the
+// heading or the author line it sits in. It wraps and grows with its content
+// (title and author are single-line values; Enter just leaves the field).
+function HeroText({ className, value, onChange, label, placeholder, maxLength, disabled }) {
+  const ref = useRef(null);
+  const fit = () => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  };
+  useLayoutEffect(fit, [value]);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === "undefined") return undefined;
+    let width = el.clientWidth;
+    const observer = new ResizeObserver(() => { if (el.clientWidth !== width) { width = el.clientWidth; fit(); } });
+    observer.observe(el);
+    document.fonts?.ready.then(fit).catch(() => {});
+    return () => observer.disconnect();
+  }, []);
+  return <textarea ref={ref} rows={1} className={`book-hero-edit ${className}`} value={value} maxLength={maxLength} disabled={disabled}
+    aria-label={label} placeholder={placeholder} title={`Click to edit the ${label.toLowerCase()}`} spellCheck={label === "Title"}
+    onChange={(event) => onChange(event.target.value.replace(/\s*\n+\s*/g, " "))}
+    onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } }} />;
+}
+
 // `tab` says which group of the form is showing (details, review, or find); all of
 // it stays mounted so edits survive a change of tab. The cover tools and file card
 // are drawn into `coverSlot`, under the big cover on the page.
-export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCoverChanged, tab = "details", coverSlot = null }) {
+export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCoverChanged, tab = "details", coverSlot = null, titleSlot = null }) {
   const [fields, setFields] = useState(() => values(doc));
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
@@ -157,8 +184,13 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
     </>}
     {hasSource ? <div className="book-file-card"><span className="eyebrow">In your library</span><div><span className={`book-format format-${doc.file_type}`}>{format}</span><span>{doc.pages || 0} {doc.file_type === "epub" ? "sections" : doc.pages === 1 ? "page" : "pages"}</span></div><p title={doc.filename}>{doc.filename}</p><a href={`${apiBase}/documents/${doc.document_id}/file`} target="_blank" rel="noreferrer">Open {format} ↗</a></div> : <div className="book-file-card book-record-card"><span className="eyebrow">Catalogue record</span><p>This book has no digital file. Its metadata, cover, reading state, review, and notes still live in your library.</p></div>}
   </div>;
+  const heroText = <>
+    <h1 id="book-page-title"><HeroText className="book-hero-title" label="Title" placeholder="Untitled" maxLength={300} value={fields.title} disabled={saving} onChange={(value) => set("title", value)} /></h1>
+    <HeroText className="book-hero-author" label="Author" placeholder="Add an author" maxLength={240} value={fields.author} disabled={saving} onChange={(value) => set("author", value)} />
+  </>;
   return <>
     {coverSlot && createPortal(coverTools, coverSlot)}
+    {titleSlot && createPortal(heroText, titleSlot)}
     <form className="book-editor" onSubmit={save} hidden={!inForm}>
       <fieldset disabled={saving} className="book-editor-fields">
         <div className="book-tab-group" role="tabpanel" id="book-panel-find" aria-labelledby="book-tab-find" hidden={tab !== "find"}>
@@ -187,17 +219,15 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
         <div className="book-tab-group" role="tabpanel" id="book-panel-details" aria-labelledby="book-tab-details" hidden={tab !== "details"}>
         <section className="book-editor-card" aria-labelledby="metadata-heading">
           <div className="book-card-heading"><h2 id="metadata-heading">{work ? "Document details" : "Book details"}</h2><span className="muted">{work ? "Keep it findable" : "Make it yours"}</span></div>
-          <div className="book-field-pair book-title-pair"><label className="book-field book-title-field">Title<input className="input" required maxLength={300} value={fields.title} onChange={(event) => set("title", event.target.value)} /></label>
-          <label className="book-field">Subtitle<input className="input" maxLength={300} placeholder="Optional subtitle" value={fields.subtitle} onChange={(event) => set("subtitle", event.target.value)} /></label></div>
-          <div className="book-field-trio"><label className="book-field">Author<input className="input" maxLength={240} placeholder="Add an author" value={fields.author} onChange={(event) => set("author", event.target.value)} /></label><label className="book-field">Subject<input className="input" maxLength={240} placeholder="e.g. Philosophy" value={fields.subject} onChange={(event) => set("subject", event.target.value)} /></label><label className="book-field" title="Separate multiple genres with commas">Genres<input className="input" maxLength={1000} placeholder="Philosophy, Essays" value={fields.genres} onChange={(event) => set("genres", event.target.value)} /></label></div>
-          <label className="book-field">Description<textarea className="input book-description" rows={2} maxLength={20000} placeholder="A short synopsis or your catalogue description" value={fields.description} onChange={(event) => set("description", event.target.value)} /></label>
+          <div className="book-field-pair"><label className="book-field">Subtitle<input className="input" maxLength={300} placeholder="Optional subtitle" value={fields.subtitle} onChange={(event) => set("subtitle", event.target.value)} /></label><label className="book-field" title="Separate multiple genres with commas">Genres<input className="input" maxLength={1000} placeholder="Philosophy, Essays" value={fields.genres} onChange={(event) => set("genres", event.target.value)} /></label></div>
           <div className={work ? "book-field-pair" : "book-field-trio"}><label className="book-field">Library type<select className="input" value={fields.kind} onChange={(event) => set("kind", event.target.value)}><option value="auto">Automatic · {doc.kind || "document"}</option><option value="book">Book</option><option value="paper">Paper</option><option value="document">Document</option></select></label>{!work && <label className="book-field">Form<select className="input" value={fields.form} onChange={(event) => set("form", event.target.value)}><option value="auto">Automatic · {FORM_LABELS[doc.book_form] || "not classified"}</option>{Object.entries(FORM_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>}{work ? <label className="book-field">Document type<select className="input" value={fields.doc_type} onChange={(event) => set("doc_type", event.target.value)}><option value="auto">Automatic · {TYPE_LABEL[doc.doc_type] || "Other"}</option>{DOC_TYPES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label> : <label className="book-field">Source<select className="input" value={fields.acquisition_source} onChange={(event) => set("acquisition_source", event.target.value)}><option value="">Not specified</option><option value="book_store">Book store</option><option value="kindle">Kindle</option><option value="audiobook">Audiobook</option><option value="borrowed">Borrowed</option><option value="second_hand">Second hand</option><option value="gifted">Gifted</option><option value="library">Library</option><option value="other">Other</option></select></label>}</div>
-          <div className="book-status-fields">
-            {!work && <fieldset><legend>Ownership</legend><div className="book-segments">{[[true, "Owned"], [false, "Not owned"]].map(([value, label]) => <label className={fields.owned === value ? "selected" : ""} key={label}><input type="radio" name="book-owned" checked={fields.owned === value} onChange={() => set("owned", value)} />{label}</label>)}</div>{fields.owned == null && <small className="muted">Not specified</small>}</fieldset>}
+          <div className="book-status-row">
+            {!work && <fieldset><legend>Ownership</legend><div className="book-segments">{[[true, "Owned"], [false, "Not owned"]].map(([value, label]) => <label className={fields.owned === value ? "selected" : ""} key={label}><input type="radio" name="book-owned" checked={fields.owned === value} onChange={() => set("owned", value)} />{label}</label>)}</div></fieldset>}
             <fieldset className="book-reading-status"><legend>Reading status</legend><div className="book-segments">{[["to_read", "To read"], ["reading", "Reading"], ["read", "Read"], ["abandoned", "Abandoned"]].map(([value, label]) => <label className={fields.reading_status === value ? "selected" : ""} key={value}><input type="radio" name="book-reading-status" checked={fields.reading_status === value} onChange={() => setReadingStatus(value)} />{label}</label>)}</div></fieldset>
+            {fields.reading_status !== "to_read" && <label className="book-field book-date-field">Started<input className="input" type="date" value={fields.started_at} max={fields.finished_at || undefined} onChange={(event) => set("started_at", event.target.value)} /></label>}
+            {fields.reading_status === "read" && <label className="book-field book-date-field">Finished<input className="input" type="date" value={fields.finished_at} min={fields.started_at || undefined} onChange={(event) => set("finished_at", event.target.value)} /></label>}
+            {fields.reading_status === "read" && <label className="book-check" title="Shown as a re-read in your diary"><input type="checkbox" checked={fields.reread} onChange={(event) => set("reread", event.target.checked)} />Re-read</label>}
           </div>
-          {fields.reading_status !== "to_read" && <div className="book-field-pair book-reading-dates"><label className="book-field">Started<input className="input" type="date" value={fields.started_at} max={fields.finished_at || undefined} onChange={(event) => set("started_at", event.target.value)} /></label>{fields.reading_status === "read" && <label className="book-field">Finished<input className="input" type="date" value={fields.finished_at} min={fields.started_at || undefined} onChange={(event) => set("finished_at", event.target.value)} /></label>}</div>}
-          {fields.reading_status === "read" && <label className="book-check"><input type="checkbox" checked={fields.reread} onChange={(event) => set("reread", event.target.checked)} />I've read this book before <small>(shown as a re-read in your diary)</small></label>}
           <details className="book-publication">
             <summary>Publication details</summary>
             <div className="book-publication-fields">
