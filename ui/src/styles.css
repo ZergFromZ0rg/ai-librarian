@@ -5445,3 +5445,16 @@ main {
   .book-page { padding: 14px 16px 70px; }
   .book-layout { grid-template-columns: minmax(0, 1fr); gap: 24px; }
 }
+
+/* ------------------------------------------- library: a narrow left column -- */
+/* In a window of about 1000px the books get only the width left beside the
+   300px rail. The filter row used to have a minimum width wider than that,
+   which stretched the whole column and slid the bookcase under the rail. It
+   now wraps, and the column never grows past its box. */
+.library-explore { grid-template-columns: minmax(0, 1fr); min-width: 0; }
+.explore-search-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 12px; }
+.explore-search-row .explore-search { flex: 1 1 220px; min-width: 0; }
+.explore-search-row > label:not(.explore-search) { flex: 0 1 150px; min-width: 0; }
+@media (min-width: 1001px) and (max-width: 1280px) {
+  .explore-layout { grid-template-columns: minmax(0, 1fr) 248px; gap: 22px; }
+}

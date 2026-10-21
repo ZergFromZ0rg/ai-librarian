@@ -33,7 +33,10 @@ function Poster({ apiBase, doc, onOpen }) {
 
 // Covers per shelf: a cover is at least `min` px wide, with `gap` px between.
 // Phones get smaller covers so a shelf still holds three.
-const COVERS = { hover: { min: 128, gap: 18 }, touch: { min: 84, gap: 12 } };
+// In a narrow column (a window of about 1000px beside the rail) the covers
+// shrink a little rather than leaving two to a shelf.
+const COVERS = { hover: { min: 128, gap: 18 }, compact: { min: 108, gap: 14 }, touch: { min: 84, gap: 12 } };
+const COMPACT_BELOW = 520;
 
 // The books on a bookcase, one shelf per row. The number of covers on a shelf
 // follows the width of the case, so every plank is as full as it can be and
@@ -48,7 +51,7 @@ function Bookcase({ apiBase, books, onOpen }) {
     const measure = () => {
       const style = window.getComputedStyle(el);
       const inner = el.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0);
-      const { min, gap } = window.matchMedia?.("(hover: none)").matches ? COVERS.touch : COVERS.hover;
+      const { min, gap } = window.matchMedia?.("(hover: none)").matches ? COVERS.touch : inner < COMPACT_BELOW ? COVERS.compact : COVERS.hover;
       setFit((current) => {
         const columns = shelfColumns(inner, min, gap);
         return current.columns === columns && current.gap === gap ? current : { columns, gap };
