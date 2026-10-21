@@ -926,7 +926,11 @@ export default function App() {
     <div inert={Boolean(bookId) || intakeOpen} className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}`} onDragEnter={handleDragEnter} onDragLeave={handleDragLeave} onDrop={handleDrop}>
       <aside className="app-sidebar" aria-label="Workspace navigation">
         <div className="sidebar-head">
-          <button type="button" className="sidebar-brand" onClick={() => { setSurface("workspace"); window.scrollTo({ top: 0 }); }} title="Search and Ask">
+          <button type="button" className="sidebar-brand" onClick={() => {
+            // The name is a way home: with Ask available that is always a fresh chat.
+            if (askEnabled) newChat();
+            else { setSurface("workspace"); window.scrollTo({ top: 0 }); }
+          }} title={askEnabled ? "New chat" : "Search"}>
             <span className="brand-mark" aria-hidden="true" />
             <span className="sidebar-brand-text">
               <span>AI Librarian</span>
