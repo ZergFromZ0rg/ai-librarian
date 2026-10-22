@@ -111,6 +111,8 @@ function DocumentsIcon() {
 export default function App() {
   const [health, setHealth] = useState(null);
   const [documents, setDocuments] = useState([]);
+  // False until the first list arrives, so an empty library is not announced while it is still loading.
+  const [documentsLoaded, setDocumentsLoaded] = useState(false);
   const [askEnabled, setAskEnabled] = useState(false);
   const [floors, setFloors] = useState(DEFAULT_FLOORS);
   const [theme, setTheme] = useState(() => currentTheme() || "light");
@@ -286,6 +288,7 @@ export default function App() {
       const data = await api("/documents");
       const next = data.documents || [];
       setDocuments(next);
+      setDocumentsLoaded(true);
       return next;
     } catch (error) {
       say(error.message, "error");
@@ -1126,6 +1129,7 @@ export default function App() {
               sectionRef={stacksRef}
               apiBase={API_BASE}
               documents={documents}
+              documentsLoaded={documentsLoaded}
               collections={collections}
               libraryRoot={libraryRoot}
               settingRoot={settingRoot}

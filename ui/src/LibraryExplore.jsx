@@ -1,31 +1,29 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import BookPeek from "./BookPeek.jsx";
 import Cover from "./Cover.jsx";
 import LibraryRail from "./LibraryRail.jsx";
 import { starText } from "./ratings.js";
-import { EMPTY_FILTERS, bookHeight, facetValues, filterLabels, filterLibrary, searchWithView, shelfColumns, shelfRows, viewFromSearch } from "./libraryExplore.js";
-import { shelfFilters } from "./libraryRail.js";
+import { EMPTY_FILTERS, NO_SHELF, bookHeight, facetValues, filterChips, filterLabels, filterLibrary, libraryBooks, searchWithView, shelfColumns, shelfList, shelfRows, viewFromSearch } from "./libraryExplore.js";
 import { FORM_LABELS, displayTitle, loadStored, readingStatus, saveStored } from "./storage.js";
 
 const SAVED_KEY = "ai-librarian.library.saved-views";
-const STATUS_LABELS = { to_read: "To read", reading: "Reading", read: "Read", abandoned: "Abandoned" };
+const STATUS_TABS = [["all", "All"], ["to_read", "To read"], ["reading", "Reading"], ["read", "Read"], ["abandoned", "Abandoned"]];
+const VISIBLE_SHELVES = 8;
 
-// One book standing on a shelf: the artwork carries the book, and the details
-// wait for a hover or a focus. Touch screens have no hover, so there the shelf
-// shows a label strip under each plank instead (see Bookcase).
-function Poster({ apiBase, doc, onOpen }) {
+// One book standing on a shelf. The cover is all there is on it: a hover or a
+// focus lifts the book off the shelf and names it above, and a click opens the
+// details panel. Everything else about the book waits in that panel, so the
+// artwork stays clean. Touch screens have no hover, so there the shelf shows a
+// label strip under each plank instead (see Bookcase).
+function Poster({ apiBase, doc, selected, onPeek, onOpen }) {
   const title = doc.title || displayTitle(doc.filename);
   const status = readingStatus(doc);
   const progress = Math.round(doc.reading_progress || 0);
   const notes = doc.note_count || 0;
-  return <button type="button" className="poster" style={{ "--height": bookHeight(doc.document_id) }} onClick={() => onOpen(doc)} aria-label={doc.author ? `${title}, by ${doc.author}` : title}>
+  return <button type="button" className={`poster${selected ? " selected" : ""}`} style={{ "--height": bookHeight(doc.document_id) }} aria-controls="book-peek" aria-expanded={selected} onClick={(event) => onPeek(doc, event.currentTarget)} onDoubleClick={() => onOpen(doc)} aria-label={doc.author ? `${title}, by ${doc.author}` : title}>
     <Cover apiBase={apiBase} documentId={doc.document_id} filename={doc.title || doc.filename} author={doc.author} fileType={doc.file_type} width={320} className="poster-cover">
       {notes > 0 && <span className="note-ribbon" role="img" aria-label={`${notes} ${notes === 1 ? "note" : "notes"}`} title={`${notes} ${notes === 1 ? "note" : "notes"}`} />}
       {status === "reading" && progress > 0 && progress < 100 && <span className="poster-progress" aria-hidden="true"><span style={{ width: `${progress}%` }} /></span>}
-      <span className="poster-meta" aria-hidden="true">
-        <span className={`poster-status status-${status}`}>{STATUS_LABELS[status] || STATUS_LABELS.to_read}</span>
-        {doc.rating ? <span className="poster-stars">{starText(doc.rating)}</span> : null}
-        {doc.liked ? <span className="poster-heart">♥</span> : null}
-      </span>
     </Cover>
     <span className="poster-tip" aria-hidden="true"><strong>{title}</strong>{doc.author && <span>{doc.author}</span>}</span>
   </button>;
@@ -42,7 +40,7 @@ const COMPACT_BELOW = 520;
 // follows the width of the case, so every plank is as full as it can be and
 // only the last one is short. Each shelf gets its own plank; on touch screens
 // a strip of titles hangs under it, like the labels on a library shelf.
-function Bookcase({ apiBase, books, onOpen }) {
+function Bookcase({ apiBase, books, selectedId, onPeek, onOpen }) {
   const rowsRef = useRef(null);
   const [fit, setFit] = useState({ columns: 6, gap: COVERS.hover.gap });
   useLayoutEffect(() => {
@@ -67,7 +65,7 @@ function Bookcase({ apiBase, books, onOpen }) {
     <div className="case-rows" ref={rowsRef} style={{ "--columns": fit.columns, "--gap": `${fit.gap}px` }}>
       {shelves.map((row, index) => <section className="case-shelf" key={index} aria-label={`Shelf ${index + 1} of ${shelves.length}`}>
         <div className="case-books">
-          {row.map((doc) => <Poster key={doc.document_id} apiBase={apiBase} doc={doc} onOpen={onOpen} />)}
+          {row.map((doc) => <Poster key={doc.document_id} apiBase={apiBase} doc={doc} selected={doc.document_id === selectedId} onPeek={onPeek} onOpen={onOpen} />)}
         </div>
         <div className="case-plank" aria-hidden="true" />
         <div className="case-labels" aria-hidden="true">
@@ -78,7 +76,13 @@ function Bookcase({ apiBase, books, onOpen }) {
   </div>;
 }
 
-export default function LibraryExplore({ apiBase, documents, collections, onOpenDocument, onNavigate, preset }) {
+const SORTS = [["title", "Title"], ["author", "Author"], ["status", "Status"], ["rating", "Rating"], ["format", "Format"], ["pages", "Page count"], ["notes", "Notes"], ["added", "Recently added"], ["recent", "Recently read"], ["finished", "Recently finished"]];
+
+function Icon({ children }) {
+  return <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{children}</svg>;
+}
+
+export default function LibraryExplore({ apiBase, documents, collections, loaded = true, onOpenDocument, onNavigate, onPatch, preset }) {
   // The view lives in the address (?lib.status=read&lib.sort=rating…) so it can
   // be bookmarked, and survives opening a book over it and closing it again.
   const [initial] = useState(() => viewFromSearch(window.location.search));
@@ -90,6 +94,9 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
   });
   const [saveName, setSaveName] = useState("");
   const [showFilters, setShowFilters] = useState(false);
+  const [allShelves, setAllShelves] = useState(false);
+  const [peekId, setPeekId] = useState(null);
+  const opener = useRef(null);
   useEffect(() => { if (preset) setFilters({ ...EMPTY_FILTERS, ...preset }); }, [preset]);
   useEffect(() => {
     const next = searchWithView(window.location.search, filters);
@@ -100,8 +107,8 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
     if (cleared !== window.location.search) window.history.replaceState(null, "", `${window.location.pathname}${cleared}${window.location.hash}`);
   }, []);
   // What you wrote about each book, so the search box can find it, and the
-  // quotes the side rail shows. Refreshed when a note is added, removed or
-  // edited (their stamps change).
+  // notes and quotes the side panel and the details panel show. Refreshed when
+  // a note is added, removed or edited (their stamps change).
   const noteStamp = useMemo(() => documents.filter((doc) => doc.collection_id === "notes").map((doc) => `${doc.document_id}${doc.updated_at}`).join("|"), [documents]);
   useEffect(() => {
     let cancelled = false;
@@ -117,8 +124,13 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
     return byBook;
   }, [notes]);
   const facets = useMemo(() => facetValues(documents), [documents]);
+  const shelves = useMemo(() => shelfList(documents), [documents]);
+  const bookCount = useMemo(() => libraryBooks(documents).length, [documents]);
   const results = useMemo(() => filterLibrary(documents, filters, noteText), [documents, filters, noteText]);
+  const chips = useMemo(() => filterChips(filters, collections), [filters, collections]);
   const update = (key, value) => setFilters((current) => ({ ...current, [key]: value }));
+  // Starting over keeps how the books are ordered, which is not a filter.
+  const clearAll = () => setFilters((current) => ({ ...EMPTY_FILTERS, sort: current.sort, order: current.order }));
   function saveView(event) {
     event.preventDefault();
     const name = saveName.trim();
@@ -127,25 +139,48 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
     setSaved(next); saveStored(SAVED_KEY, next); setSaveName("");
   }
   function removeView(id) { const next = saved.filter((view) => view.id !== id); setSaved(next); saveStored(SAVED_KEY, next); }
-  const facetCount = Object.entries(filters).filter(([key, value]) => !["sort", "order", "query"].includes(key) && value !== "all").length;
-  const activeCount = facetCount + (filters.query ? 1 : 0);
-  const summary = filterLabels({ ...filters, query: "" }, collections);
+  const hasFilters = chips.length > 0 || filters.status !== "all" || filters.shelf !== "all" || Boolean(filters.query);
+  const peekDoc = peekId ? documents.find((doc) => doc.document_id === peekId) : null;
+  const peek = (doc, element) => { if (element) opener.current = element; setPeekId(doc.document_id); };
+  const closePeek = () => { setPeekId(null); opener.current?.focus?.({ preventScroll: true }); };
+  const openPage = (doc) => { setPeekId(null); onOpenDocument(doc); };
+  const shownShelves = allShelves ? shelves.shelves : shelves.shelves.slice(0, VISIBLE_SHELVES);
+  // A shelf picked from elsewhere (a link, a saved view) always shows, even past the fold.
+  const picked = shelves.shelves.find((shelf) => shelf.name.toLocaleLowerCase() === filters.shelf.toLocaleLowerCase());
+  const visibleShelves = picked && !shownShelves.includes(picked) ? [...shownShelves, picked] : shownShelves;
+
   return <div className="explore-layout">
   <div className="library-explore">
-    <section className="explore-controls" aria-label="Filter library">
-      <div className="explore-search-row">
-        <label className="explore-search"><span>Search this library</span><input className="input" value={filters.query} onChange={(event) => update("query", event.target.value)} placeholder="Title, author, or ISBN" /></label>
-        <label><span>Sort</span><select value={filters.sort} onChange={(event) => update("sort", event.target.value)}><option value="title">Title</option><option value="author">Author</option><option value="status">Status</option><option value="rating">Rating</option><option value="format">Format</option><option value="pages">Page count</option><option value="notes">Notes</option><option value="added">Recently added</option><option value="recent">Recently read</option><option value="finished">Recently finished</option></select></label>
-        <button className="text-button" type="button" aria-pressed={filters.order === "reverse"} onClick={() => update("order", filters.order === "reverse" ? "default" : "reverse")}>{filters.order === "reverse" ? "Reversed" : "Reverse"}</button>
-        <button className="button explore-filter-toggle" type="button" aria-expanded={showFilters} aria-controls="explore-filter-panel" onClick={() => setShowFilters((open) => !open)}>
-          Filters{facetCount > 0 && <span className="explore-filter-count">{facetCount}</span>}
+    <section className="explore-toolbar" aria-label="Find books">
+      <div className="toolbar-row">
+        <label className="toolbar-search">
+          <Icon><circle cx="11" cy="11" r="6.5" /><path d="M16 16l4.5 4.5" /></Icon>
+          <span className="sr-only">Search this library</span>
+          <input type="search" value={filters.query} onChange={(event) => update("query", event.target.value)} placeholder="Search titles, authors, subjects, genres…" />
+        </label>
+        <label className="toolbar-sort"><span className="sr-only">Sort by</span>
+          <select value={filters.sort} onChange={(event) => update("sort", event.target.value)}>{SORTS.map(([value, label]) => <option value={value} key={value}>Sort: {label}</option>)}</select>
+        </label>
+        <button className={`toolbar-icon${filters.order === "reverse" ? " on" : ""}`} type="button" aria-pressed={filters.order === "reverse"} aria-label="Reverse the order" title="Reverse the order" onClick={() => update("order", filters.order === "reverse" ? "default" : "reverse")}>
+          <Icon><path d="M8 4v16M4.5 7.5L8 4l3.5 3.5M16 20V4M12.5 16.5L16 20l3.5-3.5" /></Icon>
         </button>
-        {activeCount > 0 && <button className="text-button" type="button" onClick={() => setFilters(EMPTY_FILTERS)}>Clear {activeCount}</button>}
+        <button className={`toolbar-filters${showFilters ? " open" : ""}`} type="button" aria-expanded={showFilters} aria-controls="explore-filter-panel" onClick={() => setShowFilters((open) => !open)}>
+          <Icon><path d="M4 6h16M7 12h10M10 18h4" /></Icon>
+          Filters{chips.length > 0 && <span className="explore-filter-count">{chips.length}</span>}
+        </button>
       </div>
-      {!showFilters && facetCount > 0 && <p className="explore-filter-summary" role="status">{summary.join(" · ")}</p>}
+      <div className="toolbar-row toolbar-status-row">
+        <div className="status-tabs" role="group" aria-label="Reading status">
+          {STATUS_TABS.map(([value, label]) => <button type="button" key={value} className={filters.status === value ? "active" : ""} aria-pressed={filters.status === value} onClick={() => update("status", value)}>{label}</button>)}
+        </div>
+        <span className="toolbar-count" role="status"><strong>{results.length.toLocaleString()}</strong> {results.length === 1 ? "book" : "books"}</span>
+      </div>
+      {chips.length > 0 && <div className="toolbar-chips" role="group" aria-label="Active filters">
+        {chips.map((chip) => <span className="filter-chip" key={chip.key}>{chip.text}<button type="button" aria-label={`Remove filter ${chip.text}`} onClick={() => update(chip.key, EMPTY_FILTERS[chip.key])}>×</button></span>)}
+        {chips.length > 1 && <button type="button" className="text-button" onClick={clearAll}>Clear all</button>}
+      </div>}
       {showFilters && <div id="explore-filter-panel" className="explore-filter-panel">
       <div className="explore-facets">
-        <label>Status<select value={filters.status} onChange={(e) => update("status", e.target.value)}><option value="all">All</option><option value="to_read">To read</option><option value="reading">Reading</option><option value="read">Read</option><option value="abandoned">Abandoned</option></select></label>
         <label>Ownership<select value={filters.ownership} onChange={(e) => update("ownership", e.target.value)}><option value="all">All</option><option value="owned">Owned</option><option value="unowned">Not owned</option></select></label>
         <label>Rating<select value={filters.rating} onChange={(e) => update("rating", e.target.value)}><option value="all">All</option><option value="rated">Any rating</option>{[5,4.5,4,3.5,3,2.5,2,1.5,1,0.5].map((n) => <option key={n} value={n}>{starText(n)}</option>)}</select></label>
         <label>Liked<select value={filters.liked} onChange={(e) => update("liked", e.target.value)}><option value="all">All</option><option value="liked">♥ Liked</option></select></label>
@@ -166,10 +201,23 @@ export default function LibraryExplore({ apiBase, documents, collections, onOpen
       </div>
       </div>}
     </section>
-    <div className="explore-result-head"><strong>{results.length.toLocaleString()}</strong> book{results.length === 1 ? "" : "s"}</div>
-    {results.length > 0 && <Bookcase apiBase={apiBase} books={results} onOpen={onOpenDocument} />}
-    {!results.length && <p className="muted empty-state" role="status">{activeCount ? `No books match ${filterLabels(filters, collections).join(" · ")}. ` : "No books yet. "}{activeCount > 0 && <button type="button" className="text-button" onClick={() => setFilters(EMPTY_FILTERS)}>Clear filters</button>}</p>}
+
+    {shelves.shelves.length > 0 && <nav className="shelf-strip" aria-label="Shelves">
+      <span className="eyebrow">Shelves</span>
+      <button type="button" className={`shelf-chip${filters.shelf === "all" ? " active" : ""}`} aria-pressed={filters.shelf === "all"} onClick={() => update("shelf", "all")}>All <i>{bookCount}</i></button>
+      {visibleShelves.map((shelf) => <button type="button" key={shelf.name} className={`shelf-chip${picked === shelf ? " active" : ""}`} aria-pressed={picked === shelf} onClick={() => update("shelf", picked === shelf ? "all" : shelf.name)}>{shelf.name} <i>{shelf.count}</i></button>)}
+      {shelves.shelves.length > VISIBLE_SHELVES && <button type="button" className="shelf-chip shelf-more" aria-expanded={allShelves} onClick={() => setAllShelves((open) => !open)}>{allShelves ? "Fewer" : `+${shelves.shelves.length - VISIBLE_SHELVES} more`}</button>}
+      {shelves.unshelved > 0 && <button type="button" className={`shelf-chip shelf-none${filters.shelf === NO_SHELF ? " active" : ""}`} aria-pressed={filters.shelf === NO_SHELF} onClick={() => update("shelf", filters.shelf === NO_SHELF ? "all" : NO_SHELF)}>No shelf <i>{shelves.unshelved}</i></button>}
+    </nav>}
+
+    {results.length > 0 && <Bookcase apiBase={apiBase} books={results} selectedId={peekDoc?.document_id} onPeek={peek} onOpen={openPage} />}
+    {!results.length && bookCount === 0 && loaded && <div className="quiet-prompt quiet-library" role="status">
+      <svg className="quiet-book" viewBox="0 0 64 44" width="72" height="50" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M32 9c-5-3.5-14-4.5-26-3v31c12-1.5 21-.5 26 3 5-3.5 14-4.5 26-3V6c-12-1.5-21-.5-26 3zM32 9v31" /><path d="M12 15c4-.6 8-.4 14 1.2M12 22c4-.6 8-.4 14 1.2M38 16.2c6-1.6 10-1.8 14-1.2M38 23.2c6-1.6 10-1.8 14-1.2" opacity="0.55" /></svg>
+      <p><strong>Your first shelf is waiting.</strong><span>Add a book and it will stand here.</span></p>
+    </div>}
+    {!results.length && bookCount > 0 && <p className="muted empty-state" role="status">No books match {filterLabels(filters, collections).join(" · ") || "these filters"}. {hasFilters && <button type="button" className="text-button" onClick={clearAll}>Clear filters</button>}</p>}
   </div>
-  <LibraryRail apiBase={apiBase} documents={documents} notes={notes} filters={filters} onShelf={(preset) => setFilters((current) => shelfFilters(current, preset))} onNavigate={onNavigate} onOpenDocument={onOpenDocument} />
+  <LibraryRail apiBase={apiBase} documents={documents} notes={notes} status={filters.status} onStatus={(status) => setFilters((current) => ({ ...current, status }))} onNavigate={onNavigate} onOpenDocument={onOpenDocument} />
+  {peekDoc && <BookPeek apiBase={apiBase} doc={peekDoc} documents={documents} notes={notes} shelfNames={shelves.shelves.map((shelf) => shelf.name)} onClose={closePeek} onOpenPage={openPage} onPeek={peek} onPatch={onPatch} />}
   </div>;
 }

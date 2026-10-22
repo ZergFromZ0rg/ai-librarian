@@ -224,7 +224,7 @@ The Library panel has two tabs:
 - **Browse** walks the mount like Finder or Explorer — sub-folders (with a PDF count) and PDF files, with a breadcrumb to navigate back up, even past the designated library folder if `LIBRARY_PATH` was mounted broad. **Attach main library folder** at the top imports everything under the currently designated folder in one click — useful to skip ahead of the next scheduled scan. Per-folder, **Set as library folder** narrows the designation to right there (and imports it immediately); **Import all** imports a folder without changing the designation; a single file gets its own **Import**. Removing a document from **Indexed** un-indexes it but leaves the original file untouched.
 - **Indexed** is the list of documents currently in the index, with their status, page/chunk counts, retry, and remove.
 
-**Upload files** (or dropping files on the page) copies a file onto the server, into `data/app/documents/` — use it for anything that isn't under the mount. It goes through the review step below first.
+**Add books** (or dropping files on the page) copies a file onto the server, into `data/app/documents/` — use it for anything that isn't under the mount. It goes through the review step below first.
 
 ### Adding files you upload
 

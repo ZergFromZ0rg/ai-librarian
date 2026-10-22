@@ -6,6 +6,7 @@ import { starText } from "./ratings.js";
 import { MarkControls } from "./DocMarks.jsx";
 import IndexActivity from "./IndexActivity.jsx";
 import LibraryExplore from "./LibraryExplore.jsx";
+import { libraryBooks, shelfList } from "./libraryExplore.js";
 import LibraryStats from "./LibraryStats.jsx";
 import NotesPanel from "./NotesPanel.jsx";
 import VocabularyPanel from "./VocabularyPanel.jsx";
@@ -16,7 +17,7 @@ function StatusBadge({ status }) {
   return <span className={`badge badge-${status}`}>{status}</span>;
 }
 
-function CollectionBar({ collections, activeId, onSelect, onCreate, onUpdate, onDelete, busy }) {
+function CollectionBar({ collections, activeId, onSelect, onCreate, onUpdate, onDelete, busy, scan }) {
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
@@ -58,9 +59,18 @@ function CollectionBar({ collections, activeId, onSelect, onCreate, onUpdate, on
             <span className="collection-chip-count" title="Books in this collection (papers and documents are in Documents)">{collection.book_count ?? collection.document_count ?? 0}</span>
           </button>
         ))}
-        <button type="button" className="text-button collection-manage" aria-expanded={managing} onClick={() => { setManaging((open) => !open); if (managing) setAdding(false); }}>
-          {managing ? "Done" : "Manage"}
-        </button>
+        <span className="collection-tools">
+          {scan.progress ? (
+            <ActionProgress progress={scan.progress} compact />
+          ) : (
+            <button type="button" className="text-button" disabled={scan.disabled} onClick={scan.onScan} title="Scan the selected collection now.">
+              {scan.starting ? "Starting scan…" : "Scan now"}
+            </button>
+          )}
+          <button type="button" className="text-button" aria-expanded={managing} onClick={() => { setManaging((open) => !open); if (managing) setAdding(false); }}>
+            {managing ? "Done" : "Manage"}
+          </button>
+        </span>
       </div>
       {managing && <>
       <div className="collection-set-head">
@@ -121,7 +131,7 @@ function CollectionBar({ collections, activeId, onSelect, onCreate, onUpdate, on
 
 // Every indexed document (uploads included, which have no folder), as a
 // table: status, size, where it came from, and the maintenance actions.
-function Catalogue({ apiBase, documents, reindexing, reindexProgress, onReindex, onRemove, onOpenDocument, onScope, onPatch, onApproveOcr }) {
+function Catalogue({ apiBase, documents, counts, reindexing, reindexProgress, onReindex, onRemove, onOpenDocument, onScope, onPatch, onApproveOcr }) {
   const [filter, setFilter] = useState("");
   const [sort, setSort] = useState("recent");
   const [selected, setSelected] = useState(() => new Set());
@@ -164,6 +174,13 @@ function Catalogue({ apiBase, documents, reindexing, reindexProgress, onReindex,
 
   return (
     <div className="catalogue">
+      <p className="index-summary">
+        <span><strong>{counts.indexed.toLocaleString()}</strong> indexed</span>
+        {counts.catalogued > 0 && <span><strong>{counts.catalogued.toLocaleString()}</strong> catalogue-only</span>}
+        {counts.pending > 0 && <span><strong>{counts.pending.toLocaleString()}</strong> in progress</span>}
+        {counts.error > 0 && <span className="danger-text"><strong>{counts.error.toLocaleString()}</strong> failed</span>}
+        <span><strong>{counts.passages.toLocaleString()}</strong> passages</span>
+      </p>
       <div className="catalogue-bar">
         <input
           type="search"
@@ -327,7 +344,7 @@ function Catalogue({ apiBase, documents, reindexing, reindexProgress, onReindex,
 // statistics, and the index of everything already processed — plus the ways in
 // (upload, rescan) and the progress of whatever is being processed.
 export default function Stacks(props) {
-  const { apiBase, documents, collections: allCollections = [], onUpload, uploading, intakeCount = 0, onReviewUploads, onRescan, onCreateCollection, onUpdateCollection, onDeleteCollection, onImported, onOpenDocument, scanStarting, collectionBusy, notice, job, sectionRef } = props;
+  const { apiBase, documents, documentsLoaded = true, collections: allCollections = [], onUpload, uploading, intakeCount = 0, onReviewUploads, onRescan, onCreateCollection, onUpdateCollection, onDeleteCollection, onImported, onOpenDocument, scanStarting, collectionBusy, notice, job, sectionRef } = props;
   // Built-in libraries (Notes) have no folder to scan, rename or remove.
   const collections = useMemo(() => allCollections.filter((collection) => !collection.builtin), [allCollections]);
   const noteCount = allCollections.find((collection) => collection.builtin)?.document_count || 0;
@@ -361,20 +378,26 @@ export default function Stacks(props) {
     return out;
   }, [documents]);
 
+  const books = useMemo(() => libraryBooks(documents).length, [documents]);
+  const shelves = useMemo(() => shelfList(documents).shelves.length, [documents]);
   const jobProgress = ingestActionProgress(job);
   const scanProgress = job?.uiOrigin === "scan" ? jobProgress : null;
 
   return (
     <section className="stacks" ref={sectionRef} id="stacks">
       <header className="stacks-head">
-        <div>
-          <h2>Library</h2>
-          <p className="stacks-stats">
-            <span><strong>{counts.indexed}</strong> indexed</span>
-            {counts.catalogued > 0 && <span><strong>{counts.catalogued}</strong> catalogue-only</span>}
-            {counts.pending > 0 && <span><strong>{counts.pending}</strong> in progress</span>}
-            {counts.error > 0 && <span className="danger-text"><strong>{counts.error}</strong> failed</span>}
-            <span><strong>{counts.passages.toLocaleString()}</strong> passages</span>
+        <div className="stacks-title">
+          <div className="stacks-title-row">
+            <h2>Library</h2>
+            {(counts.pending > 0 || counts.error > 0) && (
+              <button type="button" className={`index-pill${counts.error > 0 ? " attention" : ""}`} onClick={() => setTab("activity")} title="See what is being indexed, and what failed">
+                <span className="index-pill-dot" aria-hidden="true" />
+                {[counts.pending > 0 ? `${counts.pending.toLocaleString()} indexing` : null, counts.error > 0 ? `${counts.error.toLocaleString()} need attention` : null].filter(Boolean).join(" · ")}
+              </button>
+            )}
+          </div>
+          <p className="stacks-sub">
+            {books.toLocaleString()} {books === 1 ? "book" : "books"}{shelves > 0 ? ` on ${shelves.toLocaleString()} ${shelves === 1 ? "shelf" : "shelves"}` : ""}
           </p>
         </div>
         <div className="stacks-head-actions">
@@ -389,20 +412,14 @@ export default function Stacks(props) {
               event.target.value = "";
             }}
           />
-          {scanProgress ? (
-            <ActionProgress progress={scanProgress} compact />
-          ) : (
-            <button type="button" className="text-button" disabled={scanStarting || isActiveIngestJob(job)} onClick={() => onRescan(activeCollection)} title="Scan the selected collection now.">
-              {scanStarting ? "Starting scan…" : "Scan now"}
-            </button>
-          )}
           {intakeCount > 0 && (
             <button type="button" className="button" onClick={onReviewUploads} title="Uploads that have been read and are waiting for you to check and save them">
               Review uploads <span className="tab-count">{intakeCount}</span>
             </button>
           )}
-          <button type="button" className="button primary" disabled={uploading} onClick={() => fileInput.current?.click()}>
-            {uploading ? "Uploading…" : "Upload files"}
+          <button type="button" className="button primary add-books" disabled={uploading} onClick={() => fileInput.current?.click()}>
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
+            {uploading ? "Adding…" : "Add books"}
           </button>
         </div>
       </header>
@@ -415,6 +432,7 @@ export default function Stacks(props) {
         onUpdate={onUpdateCollection}
         onDelete={onDeleteCollection}
         busy={collectionBusy || isActiveIngestJob(job)}
+        scan={{ progress: scanProgress, starting: scanStarting, disabled: scanStarting || isActiveIngestJob(job), onScan: () => onRescan(activeCollection) }}
       />
 
       {(notice?.text || jobProgress) && (
@@ -447,12 +465,12 @@ export default function Stacks(props) {
         </div>
       </div>
 
-      {tab === "browse" && <LibraryExplore apiBase={apiBase} documents={documents} collections={allCollections} onOpenDocument={onOpenDocument} onNavigate={setTab} preset={browsePreset} />}
+      {tab === "browse" && <LibraryExplore apiBase={apiBase} documents={documents} collections={allCollections} onOpenDocument={onOpenDocument} onNavigate={setTab} onPatch={props.onPatch} loaded={documentsLoaded} preset={browsePreset} />}
       {tab === "notes" && <NotesPanel apiBase={apiBase} onChanged={onImported} onOpenSource={(id) => onOpenDocument({ document_id: id })} />}
       {tab === "vocabulary" && <VocabularyPanel apiBase={apiBase} documents={documents} onOpenDocument={onOpenDocument} />}
       {tab === "statistics" && <LibraryStats documents={documents} collections={allCollections} onExplore={(preset) => { setBrowsePreset({ ...preset }); setTab("browse"); }} />}
       {tab === "activity" && <IndexActivity apiBase={apiBase} onOpenDocument={onOpenDocument} onRetry={props.onReindex} onApproveOcr={props.onApproveOcr} onChanged={onImported} />}
-      {tab === "catalogue" && <Catalogue {...props} documents={sourceDocuments} />}
+      {tab === "catalogue" && <Catalogue {...props} documents={sourceDocuments} counts={counts} />}
     </section>
   );
 }

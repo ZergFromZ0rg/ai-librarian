@@ -1,36 +1,35 @@
-import { EMPTY_FILTERS, filterLibrary, libraryBooks } from "./libraryExplore.js";
+import { libraryBooks } from "./libraryExplore.js";
 import { displayTitle, readingStatus } from "./storage.js";
 
-// The shelves the side rail jumps to. Each is a set of Library filters, so the
-// rail and the Filters panel are two doors to the same room.
-export const RAIL_SHELVES = [
-  { key: "all", label: "All", preset: {}, hint: "Every book in the library" },
-  { key: "owned", label: "Owned", preset: { ownership: "owned" }, hint: "Books you own" },
-  { key: "to_read", label: "To read", preset: { status: "to_read" }, hint: "Books you plan to read" },
-  { key: "borrowed", label: "Borrowed", preset: { acquisition: "borrowed" }, hint: "Books you borrowed" },
-];
+// The reading goal is one number: books to finish in a calendar year. It is
+// kept in this browser (see GOAL_KEY), like the other small preferences.
+export const GOAL_KEY = "ai-librarian.reading-goal";
+export const MAX_GOAL = 999;
 
-const SETTINGS = new Set(["query", "sort", "order"]);
-const FACETS = Object.keys(EMPTY_FILTERS).filter((key) => !SETTINGS.has(key));
-
-// A shelf is "on" when its filters are exactly the ones in force, whatever the
-// search text and sort order are.
-export function shelfActive(filters, preset) {
-  return FACETS.every((key) => (filters?.[key] ?? "all") === (preset[key] ?? "all"));
+// A whole number of books from whatever was typed or stored; 0 means no goal.
+export function parseGoal(value) {
+  const number = Math.floor(Number(value));
+  return Number.isFinite(number) && number > 0 ? Math.min(number, MAX_GOAL) : 0;
 }
 
-// Opening a shelf starts a fresh view of it: the search text is dropped, the
-// sort order the reader chose stays.
-export function shelfFilters(filters, preset) {
-  return { ...EMPTY_FILTERS, sort: filters?.sort ?? EMPTY_FILTERS.sort, order: filters?.order ?? EMPTY_FILTERS.order, ...preset };
-}
-
-// How many books each shelf would show, counted by the same filter that
-// shows them, so a tile and its list can never disagree.
-export function shelfCounts(documents) {
-  const counts = {};
-  for (const shelf of RAIL_SHELVES) counts[shelf.key] = filterLibrary(documents, { ...EMPTY_FILTERS, ...shelf.preset }).length;
-  return counts;
+// Where the year stands against the goal. `pace` compares the books finished
+// with the share of the year gone by, rounded to whole books: "ahead" or
+// "behind" only when the gap is at least one book, otherwise "on".
+export function goalProgress(finished, target, now = new Date()) {
+  const goal = parseGoal(target);
+  if (!goal) return null;
+  const start = new Date(now.getFullYear(), 0, 1);
+  const end = new Date(now.getFullYear() + 1, 0, 1);
+  const expected = goal * ((now - start) / (end - start));
+  const gap = Math.round(finished - expected);
+  return {
+    finished,
+    target: goal,
+    percent: Math.min(100, Math.round((finished / goal) * 100)),
+    left: Math.max(0, goal - finished),
+    pace: finished >= goal ? "done" : gap >= 1 ? "ahead" : gap <= -1 ? "behind" : "on",
+    gap: Math.abs(gap),
+  };
 }
 
 const pagesOf = (doc) => Number(doc.page_count || doc.pages || 0);

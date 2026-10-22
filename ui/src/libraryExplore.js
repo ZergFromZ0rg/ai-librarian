@@ -4,7 +4,7 @@ import { FORM_LABELS, bookForm, displayTitle, libraryKind, readingStatus } from 
 export const EMPTY_FILTERS = Object.freeze({
   query: "", status: "all", ownership: "all", rating: "all", format: "all",
   form: "all", collection: "all", genre: "all", author: "all", acquisition: "all", finishedYear: "all", indexing: "all", notes: "all", liked: "all",
-  sort: "title", order: "default",
+  shelf: "all", sort: "title", order: "default",
 });
 
 export function genresFor(doc) {
@@ -14,6 +14,42 @@ export function genresFor(doc) {
   } catch (_error) {
     return [];
   }
+}
+
+// The first part of a shelf path is the kind of thing filed ("Books/Philosophy",
+// "Papers/Physics"); a book's own shelf is what follows it.
+const TOP_LEVEL_SHELVES = new Set(["Books", "Papers", "Documents", "Notes", "Reports", "Manuals", "Slides", "Data", "Writing", "Legal & Finance"]);
+export const NO_SHELF = "(none)";
+
+function shelfParts(path) {
+  const parts = String(path || "").split("/").map((part) => part.trim()).filter(Boolean);
+  if (TOP_LEVEL_SHELVES.has(parts[0])) parts.shift();
+  return parts;
+}
+
+// The shelf a book stands on, as one name: "Books/Philosophy/Albert Camus" is
+// on the Philosophy shelf. The reader's own shelf always wins. A suggested one
+// only counts when it names a subject: "Books/Albert Camus" is just the author.
+export function bookShelf(doc) {
+  const own = shelfParts(doc.shelf);
+  if (own.length) return own[0];
+  const suggested = shelfParts(doc.shelf_suggested);
+  if (suggested.length >= 2) return suggested[0];
+  if (suggested.length === 1 && doc.subject && suggested[0].toLocaleLowerCase() === String(doc.subject).trim().toLocaleLowerCase()) return suggested[0];
+  return "";
+}
+
+// The library's shelves, fullest first, and how many books stand on none.
+export function shelfList(documents) {
+  const counts = new Map();
+  let unshelved = 0;
+  for (const doc of libraryBooks(documents)) {
+    const name = bookShelf(doc);
+    if (!name) { unshelved += 1; continue; }
+    counts.set(name, (counts.get(name) || 0) + 1);
+  }
+  const shelves = [...counts].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  return { shelves, unshelved };
 }
 
 // The Library holds books. Papers and documents are tracked in the Documents
@@ -50,7 +86,7 @@ export function filterLibrary(documents, filters = EMPTY_FILTERS, noteText = new
   const rows = libraryBooks(documents).filter((doc) => {
     const title = titleOf(doc);
     if (needle) {
-      const haystack = `${title} ${doc.author || ""} ${doc.isbn_10 || ""} ${doc.isbn_13 || ""} ${doc.description || ""} ${doc.review || ""} ${genresFor(doc).join(" ")} ${noteText.get(doc.document_id) || ""}`;
+      const haystack = `${title} ${doc.author || ""} ${doc.isbn_10 || ""} ${doc.isbn_13 || ""} ${doc.description || ""} ${doc.review || ""} ${genresFor(doc).join(" ")} ${doc.subject || ""} ${bookShelf(doc)} ${noteText.get(doc.document_id) || ""}`;
       if (!haystack.toLocaleLowerCase().includes(needle)) return false;
     }
     if (f.status !== "all" && readingStatus(doc) !== f.status) return false;
@@ -63,6 +99,10 @@ export function filterLibrary(documents, filters = EMPTY_FILTERS, noteText = new
     if (f.collection !== "all" && (doc.collection_id || "legacy-root") !== f.collection) return false;
     if (f.genre !== "all" && !genresFor(doc).some((genre) => genre.toLocaleLowerCase() === f.genre.toLocaleLowerCase())) return false;
     if (f.author !== "all" && (doc.author || "Unknown author") !== f.author) return false;
+    if (f.shelf !== "all") {
+      const shelf = bookShelf(doc);
+      if (f.shelf === NO_SHELF ? shelf : shelf.toLocaleLowerCase() !== f.shelf.toLocaleLowerCase()) return false;
+    }
     if (f.acquisition !== "all" && (doc.acquisition_source || "unknown") !== f.acquisition) return false;
     if (f.finishedYear !== "all" && !(doc.finished_at || "").startsWith(f.finishedYear)) return false;
     if (f.indexing !== "all" && doc.indexing_status !== f.indexing) return false;
@@ -85,26 +125,40 @@ export function filterLibrary(documents, filters = EMPTY_FILTERS, noteText = new
   });
 }
 
-// Active constraints in words, for an empty result that says why it is empty.
-export function filterLabels(filters, collections = []) {
+// Every active constraint, in words, with the filter it belongs to: the empty
+// result says why it is empty, and each one becomes a chip that can be removed.
+function describeFilters(filters, collections = []) {
   const f = { ...EMPTY_FILTERS, ...filters };
   const label = (name, value) => `${name}: ${value}`;
   const out = [];
-  if (f.query.trim()) out.push(`“${f.query.trim()}”`);
-  if (f.status !== "all") out.push(label("Status", { to_read: "To read", reading: "Reading", read: "Read", abandoned: "Abandoned" }[f.status] || f.status));
-  if (f.ownership !== "all") out.push(f.ownership === "owned" ? "Owned" : "Not owned");
-  if (f.rating !== "all") out.push(f.rating === "rated" ? "Rated" : `${f.rating} ${Number(f.rating) === 1 ? "star" : "stars"}`);
-  if (f.liked === "liked") out.push("Liked");
-  if (f.format !== "all") out.push(label("Format", f.format));
-  if (f.form !== "all") out.push(label("Form", FORM_LABELS[f.form] || "Not classified"));
-  if (f.collection !== "all") out.push(label("Collection", collections.find((item) => item.id === f.collection)?.name || f.collection));
-  if (f.genre !== "all") out.push(label("Genre", f.genre));
-  if (f.author !== "all") out.push(label("Author", f.author));
-  if (f.acquisition !== "all") out.push(label("Acquired", f.acquisition.replace("_", " ")));
-  if (f.finishedYear !== "all") out.push(label("Finished", f.finishedYear));
-  if (f.indexing !== "all") out.push(label("Index", f.indexing));
-  if (f.notes !== "all") out.push(f.notes === "with" ? "Has notes" : "No notes");
+  const add = (key, text) => out.push({ key, text });
+  if (f.query.trim()) add("query", `“${f.query.trim()}”`);
+  if (f.status !== "all") add("status", label("Status", { to_read: "To read", reading: "Reading", read: "Read", abandoned: "Abandoned" }[f.status] || f.status));
+  if (f.shelf !== "all") add("shelf", label("Shelf", f.shelf === NO_SHELF ? "none" : f.shelf));
+  if (f.ownership !== "all") add("ownership", f.ownership === "owned" ? "Owned" : "Not owned");
+  if (f.rating !== "all") add("rating", f.rating === "rated" ? "Rated" : `${f.rating} ${Number(f.rating) === 1 ? "star" : "stars"}`);
+  if (f.liked === "liked") add("liked", "Liked");
+  if (f.format !== "all") add("format", label("Format", f.format));
+  if (f.form !== "all") add("form", label("Form", FORM_LABELS[f.form] || "Not classified"));
+  if (f.collection !== "all") add("collection", label("Collection", collections.find((item) => item.id === f.collection)?.name || f.collection));
+  if (f.genre !== "all") add("genre", label("Genre", f.genre));
+  if (f.author !== "all") add("author", label("Author", f.author));
+  if (f.acquisition !== "all") add("acquisition", label("Acquired", f.acquisition.replace("_", " ")));
+  if (f.finishedYear !== "all") add("finishedYear", label("Finished", f.finishedYear));
+  if (f.indexing !== "all") add("indexing", label("Index", f.indexing));
+  if (f.notes !== "all") add("notes", f.notes === "with" ? "Has notes" : "No notes");
   return out;
+}
+
+export function filterLabels(filters, collections = []) {
+  return describeFilters(filters, collections).map((item) => item.text);
+}
+
+// The removable chips under the toolbar. The search text, the reading status
+// and the shelf are not chips: each already has a control that shows it.
+const SHOWN_ELSEWHERE = new Set(["query", "status", "shelf"]);
+export function filterChips(filters, collections = []) {
+  return describeFilters(filters, collections).filter((item) => !SHOWN_ELSEWHERE.has(item.key));
 }
 
 // The shareable form of a view: filters and layout as query parameters, only
@@ -113,7 +167,7 @@ export function filterLabels(filters, collections = []) {
 const PARAMS = {
   query: "q", status: "status", ownership: "own", rating: "rating", format: "format", form: "form", collection: "coll",
   genre: "genre", author: "author", acquisition: "acq", finishedYear: "year", indexing: "index", notes: "notes", liked: "liked",
-  sort: "sort", order: "order",
+  shelf: "shelf", sort: "sort", order: "order",
 };
 const PREFIX = "lib.";
 

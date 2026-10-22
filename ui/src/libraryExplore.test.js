@@ -26,7 +26,7 @@ describe("library explore", () => {
   });
 });
 
-import { EMPTY_FILTERS, bookHeight, filterLabels, searchWithView, shelfColumns, shelfRows, viewFromSearch, viewToParams } from "./libraryExplore.js";
+import { EMPTY_FILTERS, NO_SHELF, bookHeight, bookShelf, filterChips, filterLabels, searchWithView, shelfColumns, shelfList, shelfRows, viewFromSearch, viewToParams } from "./libraryExplore.js";
 
 const shelf = [
   { document_id: "a", title: "Dune", kind: "book", rating: 5, page_count: 600, finished_at: "2026-01-02", note_count: 2, file_type: "epub", reading_status: "read" },
@@ -162,5 +162,84 @@ describe("bookshelf rows", () => {
       expect(height).toBeGreaterThanOrEqual(0.92);
       expect(height).toBeLessThanOrEqual(1);
     }
+  });
+});
+
+describe("searching subjects, genres and shelves", () => {
+  const books = [
+    { document_id: "a", title: "The Myth of Sisyphus", kind: "book", subject: "Existentialism", genres_json: '["Essays"]', shelf: "Books/Philosophy" },
+    { document_id: "b", title: "Dune", kind: "book", genres_json: '["Science Fiction"]', shelf_suggested: "Books/Literature & Fiction/Frank Herbert" },
+    { document_id: "c", title: "Walden", kind: "book", subject: "Nature writing", shelf_suggested: "Books/Henry David Thoreau" },
+  ];
+  const found = (query) => filterLibrary(books, { query }).map((doc) => doc.document_id);
+
+  it("finds a book by its subject, a genre or the shelf it stands on", () => {
+    expect(found("existentialism")).toEqual(["a"]);
+    expect(found("science fiction")).toEqual(["b"]);
+    expect(found("philosophy")).toEqual(["a"]);
+    expect(found("literature")).toEqual(["b"]);
+    expect(found("nature")).toEqual(["c"]);
+  });
+});
+
+describe("shelves", () => {
+  it("names a book's shelf from the reader's choice, or a suggested subject", () => {
+    expect(bookShelf({ shelf: "Books/Philosophy/Albert Camus" })).toBe("Philosophy");
+    expect(bookShelf({ shelf: "Books/Art", shelf_suggested: "Books/History/Someone" })).toBe("Art");
+    expect(bookShelf({ shelf: "Mathematics" })).toBe("Mathematics");
+    expect(bookShelf({ shelf_suggested: "Books/Physics/Richard Feynman" })).toBe("Physics");
+    expect(bookShelf({ shelf_suggested: "Documents/Physics/Someone" })).toBe("Physics");
+  });
+
+  it("does not take an author for a shelf", () => {
+    expect(bookShelf({ shelf_suggested: "Books/Albert Camus" })).toBe("");
+    expect(bookShelf({ shelf_suggested: "Books/Philosophy", subject: "Philosophy" })).toBe("Philosophy");
+    expect(bookShelf({ shelf: "Books", shelf_suggested: "Books" })).toBe("");
+    expect(bookShelf({})).toBe("");
+  });
+
+  const books = [
+    { document_id: "a", title: "A", kind: "book", shelf: "Books/Philosophy" },
+    { document_id: "b", title: "B", kind: "book", shelf: "Books/Philosophy/Camus" },
+    { document_id: "c", title: "C", kind: "book", shelf: "Books/Art" },
+    { document_id: "d", title: "D", kind: "book", shelf_suggested: "Books/Ursula Le Guin" },
+    { document_id: "n", title: "A note", kind_override: "note", collection_id: "notes", shelf: "Notes/Philosophy" },
+  ];
+
+  it("lists shelves fullest first with the number left on none, notes excluded", () => {
+    expect(shelfList(books)).toEqual({ shelves: [{ name: "Philosophy", count: 2 }, { name: "Art", count: 1 }], unshelved: 1 });
+  });
+
+  it("filters to one shelf, or to the books on none", () => {
+    const ids = (shelf) => filterLibrary(books, { shelf }).map((doc) => doc.document_id);
+    expect(ids("philosophy")).toEqual(["a", "b"]);
+    expect(ids("Art")).toEqual(["c"]);
+    expect(ids(NO_SHELF)).toEqual(["d"]);
+  });
+
+  it("keeps the shelf in the shareable address and says it in words", () => {
+    expect(viewToParams({ shelf: "Art" }).get("lib.shelf")).toBe("Art");
+    expect(viewFromSearch("?lib.shelf=Art").filters.shelf).toBe("Art");
+    expect(filterLabels({ shelf: "Art" })).toEqual(["Shelf: Art"]);
+    expect(filterLabels({ shelf: NO_SHELF })).toEqual(["Shelf: none"]);
+  });
+});
+
+describe("filter chips", () => {
+  it("has a chip for each filter set in the panel, each with the filter to clear", () => {
+    expect(filterChips({ genre: "Fiction", ownership: "owned", rating: "4" })).toEqual([
+      { key: "ownership", text: "Owned" },
+      { key: "rating", text: "4 stars" },
+      { key: "genre", text: "Genre: Fiction" },
+    ]);
+  });
+
+  it("leaves out what the toolbar already shows: the search text, the status and the shelf", () => {
+    expect(filterChips({ query: "dune", status: "read", shelf: "Art", sort: "rating", order: "reverse" })).toEqual([]);
+    expect(filterChips(EMPTY_FILTERS)).toEqual([]);
+  });
+
+  it("names a collection by its name", () => {
+    expect(filterChips({ collection: "c1" }, [{ id: "c1", name: "Study" }])).toEqual([{ key: "collection", text: "Collection: Study" }]);
   });
 });

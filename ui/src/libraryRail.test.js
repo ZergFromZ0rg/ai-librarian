@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EMPTY_FILTERS } from "./libraryExplore.js";
-import { RAIL_SHELVES, currentlyReading, finishedByMonth, niceCeiling, pickQuote, quoteCandidates, readingProgress, shelfActive, shelfCounts, shelfFilters } from "./libraryRail.js";
+import { currentlyReading, finishedByMonth, goalProgress, niceCeiling, parseGoal, pickQuote, quoteCandidates, readingProgress } from "./libraryRail.js";
 
 const docs = [
   { document_id: "a", title: "Dune", kind: "book", owned: 1, reading_status: "read", page_count: 600, finished_at: "2026-10-02" },
@@ -11,22 +10,26 @@ const docs = [
   { document_id: "n", title: "A note", kind_override: "note", collection_id: "notes" },
 ];
 
-describe("shelves", () => {
-  it("counts each shelf with the same filter that lists it", () => {
-    expect(shelfCounts(docs)).toEqual({ all: 5, owned: 2, to_read: 1, borrowed: 1 });
+describe("reading goal", () => {
+  it("keeps a goal to whole books, none when it is empty or nonsense", () => {
+    expect([12, "24", " 7.9 "].map(parseGoal)).toEqual([12, 24, 7]);
+    expect(["", "abc", 0, -3, null, undefined].map(parseGoal)).toEqual([0, 0, 0, 0, 0, 0]);
+    expect(parseGoal(5000)).toBe(999);
   });
 
-  it("is on for its own filters whatever the search text and sort", () => {
-    const owned = RAIL_SHELVES.find((shelf) => shelf.key === "owned").preset;
-    expect(shelfActive({ ...EMPTY_FILTERS, ownership: "owned", query: "dune", sort: "rating" }, owned)).toBe(true);
-    expect(shelfActive({ ...EMPTY_FILTERS, ownership: "owned", status: "read" }, owned)).toBe(false);
-    expect(shelfActive(EMPTY_FILTERS, {})).toBe(true);
-    expect(shelfActive({ ...EMPTY_FILTERS, genre: "Fiction" }, {})).toBe(false);
+  it("has no progress without a goal", () => {
+    expect(goalProgress(3, 0)).toBeNull();
   });
 
-  it("opens a shelf fresh but keeps the chosen sort", () => {
-    const next = shelfFilters({ ...EMPTY_FILTERS, query: "x", genre: "Fiction", sort: "rating", order: "reverse" }, { status: "to_read" });
-    expect(next).toEqual({ ...EMPTY_FILTERS, status: "to_read", sort: "rating", order: "reverse" });
+  it("shows how far along the year is against the share of the year gone", () => {
+    const midYear = new Date(2026, 6, 2); // about half way
+    expect(goalProgress(6, 12, midYear)).toMatchObject({ percent: 50, left: 6, pace: "on", gap: 0 });
+    expect(goalProgress(9, 12, midYear)).toMatchObject({ pace: "ahead", gap: 3 });
+    expect(goalProgress(2, 12, midYear)).toMatchObject({ pace: "behind", gap: 4 });
+  });
+
+  it("is done, and never over 100%, once the goal is reached", () => {
+    expect(goalProgress(15, 12, new Date(2026, 2, 1))).toMatchObject({ percent: 100, left: 0, pace: "done" });
   });
 });
 

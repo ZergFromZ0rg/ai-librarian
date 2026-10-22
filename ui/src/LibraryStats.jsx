@@ -1,6 +1,11 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
+import MonthLine from "./MonthLine.jsx";
+import { finishedByMonth } from "./libraryRail.js";
 import { libraryStats } from "./libraryStats.js";
 import { ratingNumber, starText } from "./ratings.js";
+import { loadStored, saveStored } from "./storage.js";
+
+const METRIC_KEY = "ai-librarian.rail.metric";
 
 function Breakdown({ title, rows, onSelect }) {
   const max = Math.max(1, ...rows.map((row) => row.value));
@@ -44,6 +49,30 @@ function Columns({ title, note, rows, onSelect, empty }) {
   </section>;
 }
 
+// The line of the last twelve months, books or pages. Not tied to the calendar
+// year like the columns above it, so it still reads well in January.
+function LastTwelveMonths({ documents }) {
+  const months = useMemo(() => finishedByMonth(documents), [documents]);
+  const [metric, setMetric] = useState(() => (loadStored(METRIC_KEY, "books") === "pages" ? "pages" : "books"));
+  const choose = (value) => { setMetric(value); saveStored(METRIC_KEY, value); };
+  const total = months.reduce((sum, month) => sum + month[metric], 0);
+  const unit = metric === "books" ? (total === 1 ? "book" : "books") : (total === 1 ? "page" : "pages");
+  return <section className="stats-panel stats-wide stats-months">
+    <div className="stats-panel-head">
+      <h3>Last 12 months</h3>
+      <span className="month-head">
+        <span className="muted">{total.toLocaleString()} {unit}</span>
+        <span className="month-metric" role="group" aria-label="Chart shows">
+          {["books", "pages"].map((value) => <button type="button" key={value} className={metric === value ? "active" : ""} aria-pressed={metric === value} onClick={() => choose(value)}>{value === "books" ? "Books" : "Pages"}</button>)}
+        </span>
+      </span>
+    </div>
+    {months.some((month) => month.books > 0)
+      ? <MonthLine months={months} metric={metric} />
+      : <p className="muted">Books you finish will chart here. Mark a book as read and set the date you finished it.</p>}
+  </section>;
+}
+
 export default function LibraryStats({ documents, collections = [], onExplore }) {
   const stats = useMemo(() => libraryStats(documents), [documents]);
   const collectionNames = new Map(collections.map((item) => [item.id, item.name]));
@@ -60,6 +89,7 @@ export default function LibraryStats({ documents, collections = [], onExplore })
     <RatingHistogram stats={stats} onSelect={(preset) => onExplore(preset)} />
     <Columns title="Books finished by year" rows={stats.years} empty="No finished dates yet. Mark a book as read and set the date you finished it." onSelect={(row) => onExplore({ status: "read", finishedYear: row.label, sort: "finished" })} />
     <Columns title={`${stats.year} by month`} rows={stats.months} empty={`Nothing finished in ${stats.year} yet.`} onSelect={(row) => onExplore({ status: "read", finishedYear: String(stats.year), sort: "finished" })} />
+    <LastTwelveMonths documents={documents} />
     <div className="stats-grid">
       <Breakdown title="Reading status" rows={stats.statuses} onSelect={(row) => onExplore({ status: row.key })} />
       <Breakdown title="Formats" rows={stats.formats} onSelect={(row) => onExplore({ format: row.label.toLowerCase() })} />
