@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import ActionProgress from "./ActionProgress.jsx";
+import ErrorBoundary from "./ErrorBoundary.jsx";
 import Cover from "./Cover.jsx";
 import { starText } from "./ratings.js";
 import { MarkControls } from "./DocMarks.jsx";
@@ -465,12 +466,14 @@ export default function Stacks(props) {
         </div>
       </div>
 
+      <ErrorBoundary layer="inline" title="This tab could not be shown" resetKey={tab}>
       {tab === "browse" && <LibraryExplore apiBase={apiBase} documents={documents} collections={allCollections} onOpenDocument={onOpenDocument} onNavigate={setTab} loaded={documentsLoaded} preset={browsePreset} />}
       {tab === "notes" && <NotesPanel apiBase={apiBase} onChanged={onImported} onOpenSource={(id) => onOpenDocument({ document_id: id })} />}
       {tab === "vocabulary" && <VocabularyPanel apiBase={apiBase} documents={documents} onOpenDocument={onOpenDocument} />}
       {tab === "statistics" && <LibraryStats documents={documents} collections={allCollections} onExplore={(preset) => { setBrowsePreset({ ...preset }); setTab("browse"); }} />}
       {tab === "activity" && <IndexActivity apiBase={apiBase} onOpenDocument={onOpenDocument} onRetry={props.onReindex} onApproveOcr={props.onApproveOcr} onChanged={onImported} />}
       {tab === "catalogue" && <Catalogue {...props} documents={sourceDocuments} counts={counts} />}
+      </ErrorBoundary>
     </section>
   );
 }

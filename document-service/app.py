@@ -6281,9 +6281,26 @@ async def health_ready():
 # static files. html=True serves index.html for "/". Missing in local dev
 # (no image build has happened) -- guarded so `pytest`/`uvicorn app:app`
 # without a built ui/dist still starts, just without a UI at "/".
+class UiFiles(StaticFiles):
+    """The built UI, with caching that survives an update.
+
+    ``index.html`` names the build's scripts by a hash of their contents, and an
+    update replaces them. If a browser kept the old ``index.html`` (with no
+    ``Cache-Control`` it may reuse it for hours), the page asked for scripts the
+    server no longer had and broke. So the page is revalidated on every visit
+    (a cheap 304 when nothing changed), while the hashed files under ``/assets``,
+    which never change under the same name, may be kept for good."""
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        first = os.path.relpath(full_path, self.directory).split(os.sep)[0]
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable" if first == "assets" else "no-cache"
+        return response
+
+
 _UI_DIST_DIR = Path(os.environ.get("UI_DIST_DIR", str(Path(__file__).resolve().parent / "static")))
 if _UI_DIST_DIR.is_dir():
-    app.mount("/", StaticFiles(directory=_UI_DIST_DIR, html=True), name="ui")
+    app.mount("/", UiFiles(directory=_UI_DIST_DIR, html=True), name="ui")
 
 
 if __name__ == "__main__":

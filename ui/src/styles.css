@@ -5634,3 +5634,15 @@ main {
 .book-hero-main h1 { font-size: clamp(34px, 4.2vw, 50px); font-weight: 600; line-height: 1.06; }
 .book-page-section-head h2 { font-size: 26px; font-weight: 600; }
 .stat-cards strong, .histogram-average strong, .reading-progress-head strong { font-family: var(--display); font-weight: 600; font-variant-numeric: lining-nums; }
+
+/* ---- when something fails: a notice in its place, never a blank page ---- */
+.failure-layer { position: fixed; z-index: 1100; inset: 0; display: grid; place-items: center; padding: 20px; background: var(--overlay); }
+.failure-card { display: grid; gap: 10px; width: min(460px, 100%); padding: 22px 24px; border: 1px solid var(--rule-strong); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow-pop); }
+.failure-card h2 { font: 600 26px/1.15 var(--display); }
+.failure-card p { margin: 0; color: var(--ink-2); font-size: 14px; line-height: 1.55; }
+.failure-detail { padding: 8px 10px; border-radius: 8px; background: var(--bg); color: var(--muted) !important; font: 12px/1.45 var(--mono) !important; overflow-wrap: anywhere; }
+.failure-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 4px; }
+.failure-inline { margin: 40px auto; }
+.failure-page { margin: 12vh auto 0; }
+.update-banner { position: fixed; z-index: 1200; top: 12px; left: 50%; display: flex; align-items: center; gap: 14px; max-width: calc(100vw - 24px); padding: 8px 8px 8px 16px; border: 1px solid var(--rule-strong); border-radius: 999px; background: var(--surface); box-shadow: var(--shadow-pop); color: var(--ink); font-size: 13px; font-weight: 550; transform: translateX(-50%); }
+.update-banner .button { height: 28px; border-radius: 999px; }

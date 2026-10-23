@@ -116,7 +116,7 @@ export default function PdfReader({ apiBase, doc, page, onClose }) {
               const bytes = await pdf.saveDocument();
               const form = new FormData();
               form.append("file", new Blob([bytes], { type: "application/pdf" }), "annotated.pdf");
-              const response = await fetch(`${apiBase}/documents/${id}/annotated-copy`, { method: "POST", body: form });
+              const response = await fetch(`${apiBase}/documents/${id}/annotated-copy`, { method: "POST", body: form, signal: AbortSignal.timeout?.(90000) });
               if (!response.ok) {
                 const body = await response.json().catch(() => ({}));
                 throw new Error(typeof body.detail === "string" ? body.detail : `the server answered ${response.status}`);

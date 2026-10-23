@@ -14,7 +14,7 @@ import { katexPlugin, prepareMath, remarkPlugins } from "./markdown.js";
 const STATUS_LABELS = { to_read: "To read", reading: "Reading", read: "Read", abandoned: "Abandoned" };
 const FORMATS = { word: "DOCX", excel: "XLSX", powerpoint: "PPTX", markdown: "Markdown", text: "TXT" };
 
-export default function BookPage({ apiBase, documentId, passage, shelfNames, onClose, onRead, onAsk, onChanged, onCoverChanged, readerOpen, askEnabled }) {
+export default function BookPage({ apiBase, documentId, passage, shelfNames, guardRef, onClose, onRead, onAsk, onChanged, onCoverChanged, readerOpen, askEnabled }) {
   const [doc, setDoc] = useState(null);
   const [notes, setNotes] = useState([]);
   const [detailsDirty, setDetailsDirty] = useState(false);
@@ -46,6 +46,12 @@ export default function BookPage({ apiBase, documentId, passage, shelfNames, onC
   }, [documentId, readerOpen]);
   const dirty = useRef(false);
   dirty.current = Boolean(draft || quote || detailsDirty || progressDirty || vocabularyDirty);
+  // The browser's Back button asks this before it closes the page.
+  useEffect(() => {
+    if (!guardRef) return undefined;
+    guardRef.current = () => dirty.current;
+    return () => { guardRef.current = null; };
+  }, [guardRef]);
 
   async function request(path, options) {
     const response = await fetch(`${apiBase}${path}`, options);

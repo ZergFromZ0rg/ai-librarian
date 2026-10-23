@@ -78,6 +78,11 @@ describe("shareable views", () => {
     expect(viewFromSearch(`?${text}`)).toEqual({ filters });
   });
 
+  it("ignores a reading status the tabs do not offer", () => {
+    expect(viewFromSearch("?lib.status=garbage").filters.status).toBe("all");
+    expect(viewFromSearch("?lib.status=reading").filters.status).toBe("reading");
+  });
+
   it("ignores unknown, oversized, and malformed values", () => {
     const search = `?lib.sort=bogus&lib.order=sideways&lib.view=cards&lib.q=${"x".repeat(300)}&lib.status=reading`;
     const view = viewFromSearch(search);

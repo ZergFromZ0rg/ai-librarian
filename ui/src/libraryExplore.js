@@ -10,7 +10,7 @@ export const EMPTY_FILTERS = Object.freeze({
 export function genresFor(doc) {
   try {
     const genres = JSON.parse(doc.genres_json || "[]");
-    return Array.isArray(genres) ? genres.filter(Boolean) : [];
+    return Array.isArray(genres) ? genres.filter((genre) => typeof genre === "string" && genre.trim()) : [];
   } catch (_error) {
     return [];
   }
@@ -186,6 +186,8 @@ export function viewFromSearch(search) {
     if (value == null || value.length > 200) continue;
     if (key === "sort" && !SORTS[value]) continue;
     if (key === "order" && !["default", "reverse"].includes(value)) continue;
+    // A status the tabs do not offer would leave no tab lit and hide every book.
+    if (key === "status" && !["all", "to_read", "reading", "read", "abandoned"].includes(value)) continue;
     filters[key] = value;
   }
   return { filters };

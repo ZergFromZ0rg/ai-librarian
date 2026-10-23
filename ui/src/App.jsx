@@ -4,6 +4,9 @@ import AskThread, { AskRail } from "./AskThread.jsx";
 import Console from "./Console.jsx";
 import SearchResults from "./SearchResults.jsx";
 import DocumentsLibrary from "./DocumentsLibrary.jsx";
+import ErrorBoundary from "./ErrorBoundary.jsx";
+import ReaderLoading from "./ReaderLoading.jsx";
+import { newVersionAvailable, runningBundle } from "./newVersion.js";
 import { shelfList } from "./libraryExplore.js";
 import Settings from "./Settings.jsx";
 import SourceViewer from "./SourceViewer.jsx";
@@ -137,6 +140,53 @@ export default function App() {
   const [reindexProgress, setReindexProgress] = useState(null);
   const [dragActive, setDragActive] = useState(false);
   const dragCounter = useRef(0);
+  const lastDragOver = useRef(0);
+  // The drop overlay counts drag enters and leaves, which can drift (a drag that
+  // ends outside the window, or on something that is removed mid-drag), leaving
+  // the overlay stuck over the app. A drag that is really still going reports
+  // itself every fraction of a second, so silence for a few seconds means it is over.
+  useEffect(() => {
+    if (!dragActive) return undefined;
+    const over = () => { lastDragOver.current = Date.now(); };
+    const end = () => { dragCounter.current = 0; setDragActive(false); };
+    over();
+    window.addEventListener("dragover", over);
+    window.addEventListener("dragend", end);
+    window.addEventListener("drop", end);
+    const timer = setInterval(() => { if (Date.now() - lastDragOver.current > 3000) end(); }, 1000);
+    return () => {
+      window.removeEventListener("dragover", over);
+      window.removeEventListener("dragend", end);
+      window.removeEventListener("drop", end);
+      clearInterval(timer);
+    };
+  }, [dragActive]);
+  // The app was updated while this page stayed open: say so, before a part of it
+  // that loads on demand (the PDF reader) can no longer be found.
+  const [updateReady, setUpdateReady] = useState(false);
+  useEffect(() => {
+    if (!runningBundle()) return undefined; // the dev server has no hashed build to compare
+    let done = false;
+    let timer = null;
+    const check = async () => {
+      if (done || document.hidden) return;
+      if (await newVersionAvailable({ base: import.meta.env.BASE_URL })) {
+        done = true;
+        clearInterval(timer);
+        setUpdateReady(true);
+      }
+    };
+    timer = setInterval(check, 5 * 60 * 1000);
+    document.addEventListener("visibilitychange", check);
+    window.addEventListener("focus", check);
+    check();
+    return () => {
+      done = true;
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", check);
+      window.removeEventListener("focus", check);
+    };
+  }, []);
 
   // A legacy default root is retained for existing installations. Newer
   // installations work with a set of named collections (Books, Work, etc.).
@@ -180,20 +230,48 @@ export default function App() {
   const [inquiries, setInquiries] = useState(loadInquiries);
   const [source, setSource] = useState(null);
   const [pdfReader, setPdfReader] = useState(null);
-  const [bookId, setBookId] = useState(() => window.location.hash.match(/^#book\/([a-zA-Z0-9-]+)$/)?.[1] || null);
+  const bookFromHash = () => window.location.hash.match(/^#book\/([a-zA-Z0-9-]+)$/)?.[1] || null;
+  const [bookId, setBookId] = useState(bookFromHash);
   const [bookPassage, setBookPassage] = useState(null);
+  // The book page is a step in the browser's history, so Back closes it. Each
+  // step we add carries its place in a chain (`idx`), which lets us tell a Back
+  // from a Forward, and undo one when it would throw away unsaved edits.
+  const bookIdRef = useRef(bookId);
+  const bookGuard = useRef(null); // the open book page sets this to "has unsaved edits?"
+  const historyIndex = useRef(window.history.state?.idx || 0);
   useEffect(() => {
-    const changed = () => { setBookId(window.location.hash.match(/^#book\/([a-zA-Z0-9-]+)$/)?.[1] || null); setBookPassage(null); };
+    const changed = () => {
+      const next = bookFromHash();
+      const index = window.history.state?.idx || 0;
+      const moved = index - historyIndex.current;
+      historyIndex.current = index;
+      if (next === bookIdRef.current) return;
+      if (bookIdRef.current && bookGuard.current?.() && !window.confirm("Discard your unsaved changes?")) {
+        if (moved) { historyIndex.current = index - moved; window.history.go(-moved); }
+        return;
+      }
+      bookIdRef.current = next;
+      // Whatever was open over the book (the reader saves its marks as it unmounts) goes with it.
+      setBookId(next); setBookPassage(null); setPdfReader(null); setSource(null);
+    };
     window.addEventListener("hashchange", changed);
     return () => window.removeEventListener("hashchange", changed);
   }, []);
   function openBook(id, passage = null) {
-    window.history.pushState(null, "", `#book/${id}`);
+    const idx = (window.history.state?.idx || 0) + 1;
+    window.history.pushState({ idx, book: true }, "", `#book/${id}`);
+    historyIndex.current = idx;
+    bookIdRef.current = id;
     setBookId(id); setBookPassage(passage); setSource(null);
   }
+  // "Back to library" steps back out of the entries this session added, rather
+  // than adding another one on top (which made Back reopen the book just closed).
   function closeBook() {
-    window.history.pushState(null, "", window.location.pathname + window.location.search);
+    bookIdRef.current = null;
     setBookId(null); setBookPassage(null);
+    const idx = window.history.state?.idx || 0;
+    if (window.history.state?.book && idx > 0) window.history.go(-idx);
+    else window.history.replaceState(null, "", window.location.pathname + window.location.search);
   }
   function viewSource(next) {
     if (next.savePassage) openBook(next.documentId, next);
@@ -923,6 +1001,13 @@ export default function App() {
   const reindexing = Boolean(reindexProgress && reindexProgress.phase !== "done");
 
   return (
+    <>
+    {updateReady && (
+      <div className="update-banner" role="status">
+        <span>A newer version of AI Librarian is ready.</span>
+        <button type="button" className="button primary small" onClick={() => window.location.reload()}>Reload</button>
+      </div>
+    )}
     <div inert={Boolean(bookId) || intakeOpen} className={`app${sidebarCollapsed ? " sidebar-collapsed" : ""}`} onDragEnter={handleDragEnter} onDragLeave={handleDragLeave} onDrop={handleDrop}>
       <aside className="app-sidebar" aria-label="Workspace navigation">
         <div className="sidebar-head">
@@ -1023,6 +1108,7 @@ export default function App() {
       </header>
 
       <main className={surface === "library" || surface === "documents" ? "library-main" : "workspace-main"}>
+        <ErrorBoundary layer="inline" title="This page could not be shown" resetKey={surface}>
         {surface === "workspace" && <section className={`hero${workspaceActive ? " docked" : ""}${workspaceActive && isAsk ? " chat-bottom" : ""}`} ref={heroRef}>
           <div className="hero-center">
             {!workspaceActive && (
@@ -1165,32 +1251,40 @@ export default function App() {
             />
           </div>
         )}
+        </ErrorBoundary>
       </main>
 
 
       {intakeOpen && (
-        <IntakeReview
-          apiBase={API_BASE}
-          intake={intake}
-          startId={intakeStartId}
-          uploading={uploading}
-          onFiles={uploadFiles}
-          onLibraryChanged={refreshDocuments}
-          onClose={(summary) => { setIntakeOpen(false); if (summary) say(summary); }}
-        />
+        <ErrorBoundary layer="overlay" title="The upload review could not be shown" onClose={() => setIntakeOpen(false)}>
+          <IntakeReview
+            apiBase={API_BASE}
+            intake={intake}
+            startId={intakeStartId}
+            uploading={uploading}
+            onFiles={uploadFiles}
+            onLibraryChanged={refreshDocuments}
+            onClose={(summary) => { setIntakeOpen(false); if (summary) say(summary); }}
+          />
+        </ErrorBoundary>
       )}
       {bookId && (
-        <BookPage key={bookId + (bookPassage?.snippet || "")} apiBase={API_BASE} documentId={bookId} passage={bookPassage} shelfNames={shelfNames} readerOpen={Boolean(source)} askEnabled={askEnabled}
-          onClose={closeBook} onRead={openSource} onChanged={refreshDocuments}
-          onCoverChanged={() => window.dispatchEvent(new Event("book-cover-changed"))}
-          onAsk={({ documentId, documentName }) => { closeBook(); setMode("ask"); scopeTo(documentId, documentName); }} />
+        <ErrorBoundary layer="overlay" title="This book page could not be shown" resetKey={bookId} onClose={closeBook}>
+          <BookPage key={bookId + (bookPassage?.snippet || "")} apiBase={API_BASE} documentId={bookId} passage={bookPassage} shelfNames={shelfNames} guardRef={bookGuard} readerOpen={Boolean(source)} askEnabled={askEnabled}
+            onClose={closeBook} onRead={openSource} onChanged={refreshDocuments}
+            onCoverChanged={() => window.dispatchEvent(new Event("book-cover-changed"))}
+            onAsk={({ documentId, documentName }) => { closeBook(); setMode("ask"); scopeTo(documentId, documentName); }} />
+        </ErrorBoundary>
       )}
       {pdfReader && (
-        <Suspense fallback={<div className="pdf-reader"><p className="pdf-reader-note muted">Opening the reader…</p></div>}>
-          <PdfReader apiBase={API_BASE} key={pdfReader.doc.document_id} doc={pdfReader.doc} page={pdfReader.page} onClose={closePdfReader} />
-        </Suspense>
+        <ErrorBoundary layer="overlay" title="The PDF reader could not open" resetKey={pdfReader.doc.document_id} onClose={() => setPdfReader(null)}>
+          <Suspense fallback={<ReaderLoading title={pdfReader.doc.title || pdfReader.doc.filename} onClose={() => setPdfReader(null)} />}>
+            <PdfReader apiBase={API_BASE} key={pdfReader.doc.document_id} doc={pdfReader.doc} page={pdfReader.page} onClose={closePdfReader} />
+          </Suspense>
+        </ErrorBoundary>
       )}
       {source && (
+        <ErrorBoundary layer="overlay" title="This preview could not be shown" resetKey={`${source.documentId}:${source.page}`} onClose={() => setSource(null)}>
         <SourceViewer
           apiBase={API_BASE}
           key={`${source.documentId}:${source.page}`}
@@ -1203,6 +1297,7 @@ export default function App() {
           onSavePassage={bookId || documents.find((doc) => doc.document_id === source.documentId)?.collection_id === "notes" ? undefined : (next) => openBook(next.documentId, next)}
           onScope={bookId ? undefined : ({ documentId, documentName }) => scopeTo(documentId, documentName)}
         />
+        </ErrorBoundary>
       )}
 
       {dragActive && (
@@ -1215,5 +1310,6 @@ export default function App() {
         </div>
       )}
     </div>
+    </>
   );
 }

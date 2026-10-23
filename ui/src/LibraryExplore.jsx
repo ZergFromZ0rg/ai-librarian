@@ -88,7 +88,8 @@ export default function LibraryExplore({ apiBase, documents, collections, loaded
   const [notes, setNotes] = useState([]);
   const [saved, setSaved] = useState(() => {
     const value = loadStored(SAVED_KEY, [], true);
-    return Array.isArray(value) ? value : [];
+    // Only well-formed views: one with no name or filters would break the list.
+    return Array.isArray(value) ? value.filter((view) => view && typeof view.name === "string" && view.filters && typeof view.filters === "object") : [];
   });
   const [saveName, setSaveName] = useState("");
   const [showFilters, setShowFilters] = useState(false);
@@ -96,11 +97,11 @@ export default function LibraryExplore({ apiBase, documents, collections, loaded
   useEffect(() => { if (preset) setFilters({ ...EMPTY_FILTERS, ...preset }); }, [preset]);
   useEffect(() => {
     const next = searchWithView(window.location.search, filters);
-    if (next !== window.location.search) window.history.replaceState(null, "", `${window.location.pathname}${next}${window.location.hash}`);
+    if (next !== window.location.search) window.history.replaceState(window.history.state, "", `${window.location.pathname}${next}${window.location.hash}`);
   }, [filters]);
   useEffect(() => () => {
     const cleared = searchWithView(window.location.search, EMPTY_FILTERS);
-    if (cleared !== window.location.search) window.history.replaceState(null, "", `${window.location.pathname}${cleared}${window.location.hash}`);
+    if (cleared !== window.location.search) window.history.replaceState(window.history.state, "", `${window.location.pathname}${cleared}${window.location.hash}`);
   }, []);
   // What you wrote about each book, so the search box can find it, and the
   // quotes the side panel shows. Refreshed when a note is added, removed or
