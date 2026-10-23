@@ -14,7 +14,7 @@ import { katexPlugin, prepareMath, remarkPlugins } from "./markdown.js";
 const STATUS_LABELS = { to_read: "To read", reading: "Reading", read: "Read", abandoned: "Abandoned" };
 const FORMATS = { word: "DOCX", excel: "XLSX", powerpoint: "PPTX", markdown: "Markdown", text: "TXT" };
 
-export default function BookPage({ apiBase, documentId, passage, onClose, onRead, onAsk, onChanged, onCoverChanged, readerOpen, askEnabled }) {
+export default function BookPage({ apiBase, documentId, passage, shelfNames, onClose, onRead, onAsk, onChanged, onCoverChanged, readerOpen, askEnabled }) {
   const [doc, setDoc] = useState(null);
   const [notes, setNotes] = useState([]);
   const [detailsDirty, setDetailsDirty] = useState(false);
@@ -218,7 +218,7 @@ export default function BookPage({ apiBase, documentId, passage, onClose, onRead
             {tabs.map(([id, label]) => <button key={id} type="button" role="tab" id={`book-tab-${id}`} aria-selected={tab === id} aria-controls={`book-panel-${id}`} tabIndex={tab === id ? 0 : -1} className={tab === id ? "active" : ""} onClick={() => setTab(id)}>{label}{id === "details" && detailsDirty ? <span className="book-tab-dot" title="Unsaved changes" /> : null}</button>)}
           </div>
 
-          <BookDetails doc={doc} apiBase={apiBase} tab={tab} coverSlot={coverSlot} titleSlot={titleSlot} onDocument={(updated) => { setDocument(updated); onChanged(); }} onDirty={setDetailsDirty} onCoverChanged={onCoverChanged} />
+          <BookDetails doc={doc} apiBase={apiBase} tab={tab} coverSlot={coverSlot} titleSlot={titleSlot} shelfNames={shelfNames} onDocument={(updated) => { setDocument(updated); onChanged(); }} onDirty={setDetailsDirty} onCoverChanged={onCoverChanged} />
 
           <div className="book-tab-group" role="tabpanel" id="book-panel-reading" aria-labelledby="book-tab-reading" hidden={tab !== "reading"}>
             <ReadingProgress apiBase={apiBase} doc={doc} onRead={onRead} onDirty={setProgressDirty} onDocument={(updated) => { setDocument(updated); onChanged(); }} />

@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import AiCheck from "./AiCheck.jsx";
 import { applyBody, matchRows } from "./catalogueMatch.js";
 import { DOC_TYPES, TYPE_LABEL, isWorkDocument } from "./documentsLibrary.js";
+import { bookShelf } from "./libraryExplore.js";
 import LookupPanel from "./LookupPanel.jsx";
 import { FORM_LABELS, displayTitle } from "./storage.js";
 
@@ -18,7 +19,7 @@ function genres(doc) {
 function values(doc) {
   return {
     title: doc.title || displayTitle(doc.filename), subtitle: doc.subtitle || "", author: doc.author || "",
-    genres: genres(doc).join(", "),
+    genres: genres(doc).join(", "), shelf: bookShelf(doc),
     kind: doc.kind_override || "auto", form: doc.book_form_override || "auto", doc_type: doc.doc_type_override || "auto", owned: doc.owned == null ? null : Boolean(doc.owned),
     acquisition_source: doc.acquisition_source || "", reading_status: doc.reading_status || (doc.read_at ? "read" : "to_read"),
     started_at: (doc.started_at || "").slice(0, 10), finished_at: (doc.finished_at || doc.read_at || "").slice(0, 10),
@@ -32,6 +33,8 @@ function values(doc) {
 function apiValue(key, value) {
   if (key === "genres") return value.split(",").map((item) => item.trim()).filter(Boolean);
   if (["published_year", "page_count"].includes(key)) return value === "" ? null : Number(value);
+  // A shelf is typed as a plain name; the library files it under Books. Empty goes back to the suggested shelf.
+  if (key === "shelf") return value.trim() ? `Books/${value.trim()}` : "";
   return value;
 }
 
@@ -65,7 +68,7 @@ function HeroText({ className, value, onChange, label, placeholder, maxLength, d
 // `tab` says which group of the form is showing (details, review, or find); all of
 // it stays mounted so edits survive a change of tab. The cover tools and file card
 // are drawn into `coverSlot`, under the big cover on the page.
-export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCoverChanged, tab = "details", coverSlot = null, titleSlot = null }) {
+export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCoverChanged, tab = "details", coverSlot = null, titleSlot = null, shelfNames = [] }) {
   const [fields, setFields] = useState(() => values(doc));
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
@@ -219,7 +222,7 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
         <div className="book-tab-group" role="tabpanel" id="book-panel-details" aria-labelledby="book-tab-details" hidden={tab !== "details"}>
         <section className="book-editor-card" aria-labelledby="metadata-heading">
           <div className="book-card-heading"><h2 id="metadata-heading">{work ? "Document details" : "Book details"}</h2><span className="muted">{work ? "Keep it findable" : "Make it yours"}</span></div>
-          <div className="book-field-pair"><label className="book-field">Subtitle<input className="input" maxLength={300} placeholder="Optional subtitle" value={fields.subtitle} onChange={(event) => set("subtitle", event.target.value)} /></label><label className="book-field" title="Separate multiple genres with commas">Genres<input className="input" maxLength={1000} placeholder="Philosophy, Essays" value={fields.genres} onChange={(event) => set("genres", event.target.value)} /></label></div>
+          <div className={work ? "book-field-pair" : "book-field-trio"}><label className="book-field">Subtitle<input className="input" maxLength={300} placeholder="Optional subtitle" value={fields.subtitle} onChange={(event) => set("subtitle", event.target.value)} /></label><label className="book-field" title="Separate multiple genres with commas">Genres<input className="input" maxLength={1000} placeholder="Philosophy, Essays" value={fields.genres} onChange={(event) => set("genres", event.target.value)} /></label>{!work && <label className="book-field" title="Where it stands in the Library. Type a new name to start a shelf.">Shelf<input className="input" list="book-shelf-names" maxLength={80} placeholder="Add to a shelf" value={fields.shelf} onChange={(event) => set("shelf", event.target.value)} /><datalist id="book-shelf-names">{shelfNames.map((name) => <option key={name} value={name} />)}</datalist></label>}</div>
           <div className={work ? "book-field-pair" : "book-field-trio"}><label className="book-field">Library type<select className="input" value={fields.kind} onChange={(event) => set("kind", event.target.value)}><option value="auto">Automatic · {doc.kind || "document"}</option><option value="book">Book</option><option value="paper">Paper</option><option value="document">Document</option></select></label>{!work && <label className="book-field">Form<select className="input" value={fields.form} onChange={(event) => set("form", event.target.value)}><option value="auto">Automatic · {FORM_LABELS[doc.book_form] || "not classified"}</option>{Object.entries(FORM_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>}{work ? <label className="book-field">Document type<select className="input" value={fields.doc_type} onChange={(event) => set("doc_type", event.target.value)}><option value="auto">Automatic · {TYPE_LABEL[doc.doc_type] || "Other"}</option>{DOC_TYPES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label> : <label className="book-field">Source<select className="input" value={fields.acquisition_source} onChange={(event) => set("acquisition_source", event.target.value)}><option value="">Not specified</option><option value="book_store">Book store</option><option value="kindle">Kindle</option><option value="audiobook">Audiobook</option><option value="borrowed">Borrowed</option><option value="second_hand">Second hand</option><option value="gifted">Gifted</option><option value="library">Library</option><option value="other">Other</option></select></label>}</div>
           <div className="book-status-row">
             {!work && <fieldset><legend>Ownership</legend><div className="book-segments">{[[true, "Owned"], [false, "Not owned"]].map(([value, label]) => <label className={fields.owned === value ? "selected" : ""} key={label}><input type="radio" name="book-owned" checked={fields.owned === value} onChange={() => set("owned", value)} />{label}</label>)}</div></fieldset>}

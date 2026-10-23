@@ -1,5 +1,4 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import BookPeek from "./BookPeek.jsx";
 import Cover from "./Cover.jsx";
 import LibraryRail from "./LibraryRail.jsx";
 import { starText } from "./ratings.js";
@@ -12,15 +11,14 @@ const VISIBLE_SHELVES = 8;
 
 // One book standing on a shelf. The cover is all there is on it: a hover or a
 // focus lifts the book off the shelf and names it above, and a click opens the
-// details panel. Everything else about the book waits in that panel, so the
-// artwork stays clean. Touch screens have no hover, so there the shelf shows a
-// label strip under each plank instead (see Bookcase).
-function Poster({ apiBase, doc, selected, onPeek, onOpen }) {
+// book's page. Touch screens have no hover, so there the shelf shows a label
+// strip under each plank instead (see Bookcase).
+function Poster({ apiBase, doc, onOpen }) {
   const title = doc.title || displayTitle(doc.filename);
   const status = readingStatus(doc);
   const progress = Math.round(doc.reading_progress || 0);
   const notes = doc.note_count || 0;
-  return <button type="button" className={`poster${selected ? " selected" : ""}`} style={{ "--height": bookHeight(doc.document_id) }} aria-controls="book-peek" aria-expanded={selected} onClick={(event) => onPeek(doc, event.currentTarget)} onDoubleClick={() => onOpen(doc)} aria-label={doc.author ? `${title}, by ${doc.author}` : title}>
+  return <button type="button" className="poster" style={{ "--height": bookHeight(doc.document_id) }} onClick={() => onOpen(doc)} aria-label={doc.author ? `${title}, by ${doc.author}` : title}>
     <Cover apiBase={apiBase} documentId={doc.document_id} filename={doc.title || doc.filename} author={doc.author} fileType={doc.file_type} width={320} className="poster-cover">
       {notes > 0 && <span className="note-ribbon" role="img" aria-label={`${notes} ${notes === 1 ? "note" : "notes"}`} title={`${notes} ${notes === 1 ? "note" : "notes"}`} />}
       {status === "reading" && progress > 0 && progress < 100 && <span className="poster-progress" aria-hidden="true"><span style={{ width: `${progress}%` }} /></span>}
@@ -40,7 +38,7 @@ const COMPACT_BELOW = 520;
 // follows the width of the case, so every plank is as full as it can be and
 // only the last one is short. Each shelf gets its own plank; on touch screens
 // a strip of titles hangs under it, like the labels on a library shelf.
-function Bookcase({ apiBase, books, selectedId, onPeek, onOpen }) {
+function Bookcase({ apiBase, books, onOpen }) {
   const rowsRef = useRef(null);
   const [fit, setFit] = useState({ columns: 6, gap: COVERS.hover.gap });
   useLayoutEffect(() => {
@@ -65,7 +63,7 @@ function Bookcase({ apiBase, books, selectedId, onPeek, onOpen }) {
     <div className="case-rows" ref={rowsRef} style={{ "--columns": fit.columns, "--gap": `${fit.gap}px` }}>
       {shelves.map((row, index) => <section className="case-shelf" key={index} aria-label={`Shelf ${index + 1} of ${shelves.length}`}>
         <div className="case-books">
-          {row.map((doc) => <Poster key={doc.document_id} apiBase={apiBase} doc={doc} selected={doc.document_id === selectedId} onPeek={onPeek} onOpen={onOpen} />)}
+          {row.map((doc) => <Poster key={doc.document_id} apiBase={apiBase} doc={doc} onOpen={onOpen} />)}
         </div>
         <div className="case-plank" aria-hidden="true" />
         <div className="case-labels" aria-hidden="true">
@@ -82,7 +80,7 @@ function Icon({ children }) {
   return <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{children}</svg>;
 }
 
-export default function LibraryExplore({ apiBase, documents, collections, loaded = true, onOpenDocument, onNavigate, onPatch, preset }) {
+export default function LibraryExplore({ apiBase, documents, collections, loaded = true, onOpenDocument, onNavigate, preset }) {
   // The view lives in the address (?lib.status=read&lib.sort=rating…) so it can
   // be bookmarked, and survives opening a book over it and closing it again.
   const [initial] = useState(() => viewFromSearch(window.location.search));
@@ -95,8 +93,6 @@ export default function LibraryExplore({ apiBase, documents, collections, loaded
   const [saveName, setSaveName] = useState("");
   const [showFilters, setShowFilters] = useState(false);
   const [allShelves, setAllShelves] = useState(false);
-  const [peekId, setPeekId] = useState(null);
-  const opener = useRef(null);
   useEffect(() => { if (preset) setFilters({ ...EMPTY_FILTERS, ...preset }); }, [preset]);
   useEffect(() => {
     const next = searchWithView(window.location.search, filters);
@@ -107,8 +103,8 @@ export default function LibraryExplore({ apiBase, documents, collections, loaded
     if (cleared !== window.location.search) window.history.replaceState(null, "", `${window.location.pathname}${cleared}${window.location.hash}`);
   }, []);
   // What you wrote about each book, so the search box can find it, and the
-  // notes and quotes the side panel and the details panel show. Refreshed when
-  // a note is added, removed or edited (their stamps change).
+  // quotes the side panel shows. Refreshed when a note is added, removed or
+  // edited (their stamps change).
   const noteStamp = useMemo(() => documents.filter((doc) => doc.collection_id === "notes").map((doc) => `${doc.document_id}${doc.updated_at}`).join("|"), [documents]);
   useEffect(() => {
     let cancelled = false;
@@ -140,10 +136,6 @@ export default function LibraryExplore({ apiBase, documents, collections, loaded
   }
   function removeView(id) { const next = saved.filter((view) => view.id !== id); setSaved(next); saveStored(SAVED_KEY, next); }
   const hasFilters = chips.length > 0 || filters.status !== "all" || filters.shelf !== "all" || Boolean(filters.query);
-  const peekDoc = peekId ? documents.find((doc) => doc.document_id === peekId) : null;
-  const peek = (doc, element) => { if (element) opener.current = element; setPeekId(doc.document_id); };
-  const closePeek = () => { setPeekId(null); opener.current?.focus?.({ preventScroll: true }); };
-  const openPage = (doc) => { setPeekId(null); onOpenDocument(doc); };
   const shownShelves = allShelves ? shelves.shelves : shelves.shelves.slice(0, VISIBLE_SHELVES);
   // A shelf picked from elsewhere (a link, a saved view) always shows, even past the fold.
   const picked = shelves.shelves.find((shelf) => shelf.name.toLocaleLowerCase() === filters.shelf.toLocaleLowerCase());
@@ -210,7 +202,7 @@ export default function LibraryExplore({ apiBase, documents, collections, loaded
       {shelves.unshelved > 0 && <button type="button" className={`shelf-chip shelf-none${filters.shelf === NO_SHELF ? " active" : ""}`} aria-pressed={filters.shelf === NO_SHELF} onClick={() => update("shelf", filters.shelf === NO_SHELF ? "all" : NO_SHELF)}>No shelf <i>{shelves.unshelved}</i></button>}
     </nav>}
 
-    {results.length > 0 && <Bookcase apiBase={apiBase} books={results} selectedId={peekDoc?.document_id} onPeek={peek} onOpen={openPage} />}
+    {results.length > 0 && <Bookcase apiBase={apiBase} books={results} onOpen={onOpenDocument} />}
     {!results.length && bookCount === 0 && loaded && <div className="quiet-prompt quiet-library" role="status">
       <svg className="quiet-book" viewBox="0 0 64 44" width="72" height="50" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M32 9c-5-3.5-14-4.5-26-3v31c12-1.5 21-.5 26 3 5-3.5 14-4.5 26-3V6c-12-1.5-21-.5-26 3zM32 9v31" /><path d="M12 15c4-.6 8-.4 14 1.2M12 22c4-.6 8-.4 14 1.2M38 16.2c6-1.6 10-1.8 14-1.2M38 23.2c6-1.6 10-1.8 14-1.2" opacity="0.55" /></svg>
       <p><strong>Your first shelf is waiting.</strong><span>Add a book and it will stand here.</span></p>
@@ -218,6 +210,5 @@ export default function LibraryExplore({ apiBase, documents, collections, loaded
     {!results.length && bookCount > 0 && <p className="muted empty-state" role="status">No books match {filterLabels(filters, collections).join(" · ") || "these filters"}. {hasFilters && <button type="button" className="text-button" onClick={clearAll}>Clear filters</button>}</p>}
   </div>
   <LibraryRail apiBase={apiBase} documents={documents} notes={notes} status={filters.status} onStatus={(status) => setFilters((current) => ({ ...current, status }))} onNavigate={onNavigate} onOpenDocument={onOpenDocument} />
-  {peekDoc && <BookPeek apiBase={apiBase} doc={peekDoc} documents={documents} notes={notes} shelfNames={shelves.shelves.map((shelf) => shelf.name)} onClose={closePeek} onOpenPage={openPage} onPeek={peek} onPatch={onPatch} />}
   </div>;
 }

@@ -465,7 +465,7 @@ export default function Stacks(props) {
         </div>
       </div>
 
-      {tab === "browse" && <LibraryExplore apiBase={apiBase} documents={documents} collections={allCollections} onOpenDocument={onOpenDocument} onNavigate={setTab} onPatch={props.onPatch} loaded={documentsLoaded} preset={browsePreset} />}
+      {tab === "browse" && <LibraryExplore apiBase={apiBase} documents={documents} collections={allCollections} onOpenDocument={onOpenDocument} onNavigate={setTab} loaded={documentsLoaded} preset={browsePreset} />}
       {tab === "notes" && <NotesPanel apiBase={apiBase} onChanged={onImported} onOpenSource={(id) => onOpenDocument({ document_id: id })} />}
       {tab === "vocabulary" && <VocabularyPanel apiBase={apiBase} documents={documents} onOpenDocument={onOpenDocument} />}
       {tab === "statistics" && <LibraryStats documents={documents} collections={allCollections} onExplore={(preset) => { setBrowsePreset({ ...preset }); setTab("browse"); }} />}

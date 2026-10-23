@@ -1,9 +1,10 @@
-import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import AskThread, { AskRail } from "./AskThread.jsx";
 import Console from "./Console.jsx";
 import SearchResults from "./SearchResults.jsx";
 import DocumentsLibrary from "./DocumentsLibrary.jsx";
+import { shelfList } from "./libraryExplore.js";
 import Settings from "./Settings.jsx";
 import SourceViewer from "./SourceViewer.jsx";
 import BookPage from "./BookPage.jsx";
@@ -555,6 +556,8 @@ export default function App() {
   const workspaceActive = isAsk ? ask.conversation.length > 0 || ask.loading : searchRun !== null;
   const busy = isAsk ? ask.busy : searchRun?.status === "running";
 
+  // The shelves already in use, offered when a book is put on one.
+  const shelfNames = useMemo(() => shelfList(documents).shelves.map((shelf) => shelf.name), [documents]);
   const indexedCount = documents.filter((document) => document.indexing_status === "indexed").length;
   const passageCount = documents.reduce((sum, doc) => sum + (doc.indexing_status === "indexed" ? doc.chunks || 0 : 0), 0);
   const healthReady = health?.status === "ready";
@@ -1177,7 +1180,7 @@ export default function App() {
         />
       )}
       {bookId && (
-        <BookPage key={bookId + (bookPassage?.snippet || "")} apiBase={API_BASE} documentId={bookId} passage={bookPassage} readerOpen={Boolean(source)} askEnabled={askEnabled}
+        <BookPage key={bookId + (bookPassage?.snippet || "")} apiBase={API_BASE} documentId={bookId} passage={bookPassage} shelfNames={shelfNames} readerOpen={Boolean(source)} askEnabled={askEnabled}
           onClose={closeBook} onRead={openSource} onChanged={refreshDocuments}
           onCoverChanged={() => window.dispatchEvent(new Event("book-cover-changed"))}
           onAsk={({ documentId, documentName }) => { closeBook(); setMode("ask"); scopeTo(documentId, documentName); }} />
