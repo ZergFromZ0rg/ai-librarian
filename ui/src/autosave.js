@@ -7,12 +7,18 @@
 // finish, saves what is still unsaved, and rejects if that fails, so the
 // reader is told instead of silently losing the change.
 //
-// State for the UI: "saved" | "unsaved" | "saving" | "error".
-export function createAutosaver({ save, delay = 1500, onState = () => {} }) {
+// A save that fails is tried again by itself after each of `retryDelays` (the
+// last one repeats until it works), unless `canRetry(error)` says the failure
+// will not go away on its own (the file is refused, or was changed elsewhere).
+// Coming back online can cut the wait short with retryNow().
+//
+// State for the UI: "saved" | "unsaved" | "saving" | "retrying" | "error".
+export function createAutosaver({ save, delay = 1500, retryDelays = [], canRetry = () => true, onState = () => {} }) {
   let timer = null;
   let dirty = false;
   let running = null;
   let state = "saved";
+  let failures = 0;
   const setState = (next) => {
     state = next;
     onState(next);
@@ -27,9 +33,17 @@ export function createAutosaver({ save, delay = 1500, onState = () => {} }) {
           setState("saving");
           try {
             await save();
+            failures = 0;
           } catch (error) {
             dirty = true;
-            setState("error");
+            failures += 1;
+            if (retryDelays.length && canRetry(error)) {
+              clearTimeout(timer);
+              timer = setTimeout(() => run().catch(() => {}), retryDelays[Math.min(failures, retryDelays.length) - 1]);
+              setState("retrying");
+            } else {
+              setState("error");
+            }
             throw error;
           }
         }
@@ -52,6 +66,19 @@ export function createAutosaver({ save, delay = 1500, onState = () => {} }) {
       clearTimeout(timer);
       if (running) await running.catch(() => {});
       if (dirty) await run();
+    },
+    // Try again now rather than at the end of the wait (a no-op unless a retry is pending).
+    retryNow() {
+      if (state !== "retrying") return;
+      clearTimeout(timer);
+      run().catch(() => {});
+    },
+    // Forget what is unsaved, for when the reader chose to throw it away.
+    discard() {
+      clearTimeout(timer);
+      dirty = false;
+      failures = 0;
+      if (!running) setState("saved");
     },
     hasUnsaved: () => dirty || running !== null,
     state: () => state,

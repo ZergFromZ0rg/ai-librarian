@@ -74,4 +74,92 @@ describe("autosave", () => {
     expect(saver.state()).toBe("saved");
     expect(save).toHaveBeenCalledTimes(2);
   });
+
+  describe("when a save fails", () => {
+    const offline = () => new Error("offline");
+
+    it("tries again by itself, waiting longer each time, and ends up saved", async () => {
+      const save = vi.fn().mockRejectedValueOnce(offline()).mockRejectedValueOnce(offline()).mockResolvedValue();
+      const states = [];
+      const saver = createAutosaver({ save, delay: 100, retryDelays: [1000, 5000], onState: (s) => states.push(s) });
+      saver.markDirty();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(saver.state()).toBe("retrying");
+      await vi.advanceTimersByTimeAsync(999);
+      expect(save).toHaveBeenCalledTimes(1); // still waiting out the first delay
+      await vi.advanceTimersByTimeAsync(1);
+      expect(save).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(save).toHaveBeenCalledTimes(2); // the second wait is the longer one
+      await vi.advanceTimersByTimeAsync(1);
+      expect(save).toHaveBeenCalledTimes(3);
+      expect(saver.state()).toBe("saved");
+      expect(saver.hasUnsaved()).toBe(false);
+      expect(states).toEqual(["unsaved", "saving", "retrying", "saving", "retrying", "saving", "saved"]);
+    });
+
+    it("keeps trying at the last delay for as long as it keeps failing", async () => {
+      const save = vi.fn().mockRejectedValue(offline());
+      const saver = createAutosaver({ save, delay: 100, retryDelays: [1000, 2000] });
+      saver.markDirty();
+      await vi.advanceTimersByTimeAsync(100 + 1000 + 2000 + 2000 + 2000);
+      expect(save).toHaveBeenCalledTimes(5);
+      expect(saver.state()).toBe("retrying");
+      expect(saver.hasUnsaved()).toBe(true);
+    });
+
+    it("does not retry a failure that will not go away by itself", async () => {
+      const refused = Object.assign(new Error("changed elsewhere"), { retry: false });
+      const save = vi.fn().mockRejectedValue(refused);
+      const saver = createAutosaver({ save, delay: 100, retryDelays: [1000], canRetry: (error) => error.retry !== false });
+      saver.markDirty();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(saver.state()).toBe("error");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(saver.hasUnsaved()).toBe(true); // and closing must still be told
+    });
+
+    it("tries at once when told the connection is back, and only if a retry is waiting", async () => {
+      const save = vi.fn().mockRejectedValueOnce(offline()).mockResolvedValue();
+      const saver = createAutosaver({ save, delay: 100, retryDelays: [60_000] });
+      saver.retryNow();
+      expect(save).not.toHaveBeenCalled(); // nothing waiting
+      saver.markDirty();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(saver.state()).toBe("retrying");
+      saver.retryNow();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(save).toHaveBeenCalledTimes(2);
+      expect(saver.state()).toBe("saved");
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(save).toHaveBeenCalledTimes(2); // the pending wait was cancelled
+    });
+
+    it("saves straight away when the reader closes, without waiting out a retry", async () => {
+      const save = vi.fn().mockRejectedValueOnce(offline()).mockResolvedValue();
+      const saver = createAutosaver({ save, delay: 100, retryDelays: [60_000] });
+      saver.markDirty();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(saver.state()).toBe("retrying");
+      await saver.flush();
+      expect(save).toHaveBeenCalledTimes(2);
+      expect(saver.hasUnsaved()).toBe(false);
+    });
+
+    it("forgets what was unsaved when the reader throws it away", async () => {
+      const save = vi.fn().mockRejectedValue(offline());
+      const saver = createAutosaver({ save, delay: 100, retryDelays: [1000] });
+      saver.markDirty();
+      await vi.advanceTimersByTimeAsync(100);
+      saver.discard();
+      expect(saver.hasUnsaved()).toBe(false);
+      expect(saver.state()).toBe("saved");
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(save).toHaveBeenCalledTimes(1);
+      await saver.flush();
+      expect(save).toHaveBeenCalledTimes(1);
+    });
+  });
 });

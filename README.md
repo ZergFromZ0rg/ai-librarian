@@ -289,16 +289,23 @@ source reading and Ask appear only when a digital file exists. Metadata editing
 is manual, and note editing uses Markdown with a preview rather than an inline
 rich-text editor.
 
-### Marking up PDFs
+### Reading and marking up PDFs
 
-The app has no PDF editor of its own. **Read PDF** opens the file in your browser's viewer (or any PDF app), where you highlight, underline, strike out, type text, add sticky notes or draw with that viewer's own tools. Those marks are standard PDF annotations, and the app reads them back out of the file:
+**Read PDF** opens the file in the app's own reader (PDF.js), so you can read, mark up and save without leaving the browser:
 
-- Highlighted and underlined passages are quoted from the page's own text layer by geometry, with any comment you attached. Typed text, notes, replies and highlighter-pen strokes are read too. They are indexed as one generated digest per book, so search and Ask can find and cite them, and the book page lists them under **Marks in your PDF** so you can check what was read.
-- A PDF edited **in place** in the library folder is noticed by the background scan (`AUTO_INGEST_INTERVAL_SECONDS`) and its marks refreshed. A file that only gained marks is not re-indexed; one whose text changed is.
-- A copy **saved from a browser's viewer** goes to your Downloads, so attach it with **Add saved copy** on the book page. It is kept beside the original (never replacing it, so a read-only library is fine) and opens in its place. **Use original** goes back.
-- Underlined single words feed the vocabulary notebook the same way.
+- **Mark up:** Highlight (five colours), Text, Draw and Undo. Every mark is saved to the library by itself a moment after you make it, and again when you press **Close** (closing waits for the save). If the server cannot be reached the reader says so and tries again by itself until it works.
+- **Find your way:** **Search** (Ctrl/Cmd+F, or `/`) searches the whole PDF, not just the pages drawn so far; Enter and Shift+Enter step through the matches. **Contents** shows the PDF's own table of contents and a strip of page thumbnails. `J` and `K` turn pages, Esc closes the search.
+- **Two tabs, or two devices:** if the marks were saved from somewhere else since you opened the book, the reader stops and asks. **Keep my marks** replaces the other version (which is kept as an earlier version); **Load the other version** drops what you marked here and reopens with theirs.
 
-Annotated copies live in `data/app/annotated/` and are included in **Settings → Backup** exports.
+The marked-up file is kept as an *annotated copy* in `data/app/annotated/`, beside the original, which is never changed (so a read-only library is fine). The copy opens in place of the original; **Use original** on the book page goes back, and **Restore earlier version** swaps back in the copy as it was before your latest sitting (or the one **Use original** set aside). Annotated copies are included in **Settings → Backup** exports; earlier versions are not.
+
+The marks are standard PDF annotations, and the app reads them back out of the file:
+
+- Highlighted and underlined passages are quoted from the page's own text layer by geometry, with any comment you attached. Typed text, notes, replies and highlighter-pen strokes are read too. They are indexed as one generated digest per book, so search and Ask can find and cite them, and the book page lists them under **Marks in your PDF**, where each page link opens the reader there.
+- A PDF marked up **somewhere else** (another app, or a browser's own viewer, whose edits cannot be saved back) can be attached with **Add saved copy** on the book page. A PDF edited **in place** in the library folder is noticed by the background scan (`AUTO_INGEST_INTERVAL_SECONDS`) and its marks refreshed. A file that only gained marks is not re-indexed; one whose text changed is.
+- Underlined single words feed the vocabulary notebook the same way. The reader has no Underline tool (PDF.js has none), but underlines made elsewhere, and thin pen lines, are read.
+
+Each save sends the whole file, so very large PDFs are slow to save, and the upload limit (`MAX_UPLOAD_MB`, 100 by default) applies; the reader says when a save is refused.
 
 ### Supported formats and OCR
 

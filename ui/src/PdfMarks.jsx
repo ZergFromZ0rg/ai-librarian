@@ -3,12 +3,12 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 const KINDS = { highlight: "Highlight", underline: "Underline", strikeout: "Struck out", text: "Text", note: "Note", drawing: "Drawing", shape: "Shape" };
 const FOLDED = 6;
 
-// What is marked in this book's PDF, read from the file itself. The app has no
-// editor: the PDF opens in the browser's viewer (or any PDF app), the reader
-// marks it up there, and the marks are read back and indexed so they can be
-// searched and cited. A copy saved from a browser viewer is attached here and
-// kept beside the original, which is never changed.
-export default function PdfMarks({ apiBase, doc, onChanged }) {
+// What is marked in this book's PDF, read from the file itself. The PDF opens in
+// the in-app reader, which saves every mark to the library, and the marks are
+// read back and indexed so they can be searched and cited. A copy marked up
+// somewhere else can still be attached here; it is kept beside the original,
+// which is never changed.
+export default function PdfMarks({ apiBase, doc, onChanged, onRead }) {
   const [data, setData] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -16,6 +16,7 @@ export default function PdfMarks({ apiBase, doc, onChanged }) {
   const [expanded, setExpanded] = useState(false);
   const input = useRef(null);
   const base = `${apiBase}/documents/${doc.document_id}`;
+  const read = (page) => onRead?.({ documentId: doc.document_id, documentName: doc.title || doc.filename, page: page || 1 });
 
   const call = useCallback(async (path, options, success) => {
     setBusy(true); setError(""); setMessage("");
@@ -49,19 +50,20 @@ export default function PdfMarks({ apiBase, doc, onChanged }) {
         {data && <span className="muted">{usingCopy ? "from your annotated copy" : "from the original PDF"}</span>}
       </div>
       <div className="pdf-marks-actions">
-        <a className="button primary small" href={`${base}/file#page=${doc.current_page || 1}`} target="_blank" rel="noreferrer">Open PDF ↗</a>
+        <button type="button" className="button primary small" onClick={() => read(doc.current_page)}>Read PDF</button>
         <button type="button" className="button small" disabled={busy} onClick={() => input.current.click()}>Add saved copy…</button>
         <input ref={input} hidden type="file" accept="application/pdf,.pdf" onChange={(event) => { attach(event.target.files[0]); event.target.value = ""; }} />
         <button type="button" className="text-button" disabled={busy} onClick={() => call("/annotations/rescan", { method: "POST" }, (body) => `Read again: ${count(body.annotations.length)}.`)}>Rescan</button>
-        {usingCopy && <button type="button" className="text-button" disabled={busy} onClick={() => call("/annotated-copy", { method: "DELETE" }, () => "Back to the original PDF.")}>Use original</button>}
+        {usingCopy && <button type="button" className="text-button" disabled={busy} onClick={() => call("/annotated-copy", { method: "DELETE" }, () => "Back to the original PDF. Your marked-up copy is kept: Restore earlier version brings it back.")}>Use original</button>}
+        {data?.has_earlier && <button type="button" className="text-button" disabled={busy} title="Swap in the version your marks had before your latest sitting. Press it again to swap back." onClick={() => call("/annotated-copy/restore-earlier", { method: "POST" }, () => "Restored the earlier version. Press Restore earlier version again to swap back.")}>Restore earlier version</button>}
       </div>
     </div>
-    <p className="pdf-marks-help">Open the PDF and mark it up with your viewer's own tools: highlight, underline, add text, draw. Marks made to the file are picked up automatically. If you saved from a browser's viewer, use <em>Add saved copy</em>; it is kept next to the original.</p>
+    <p className="pdf-marks-help">Read the PDF here and highlight, add text or draw: every mark is saved to your library as you make it and indexed, so it can be searched and cited. Marked up a copy somewhere else, in another app or a browser's own viewer? Use <em>Add saved copy</em>; it is kept next to the original, which is never changed.</p>
     {error && <p className="notice error" role="alert">{error}</p>}
     {message && <p className="muted" role="status">{message}</p>}
     {data && marks.length === 0 && !error && <p className="muted">No marks yet.</p>}
     {shown.length > 0 && <ol className="pdf-marks-list">{shown.map((mark, index) => <li key={`${mark.page}-${index}`} className={`pdf-mark pdf-mark-${mark.kind}`}>
-      <a className="pdf-mark-page" href={`${base}/file#page=${mark.page}`} target="_blank" rel="noreferrer" title={`Open page ${mark.page}`}>p. {mark.page}</a>
+      <button type="button" className="pdf-mark-page" onClick={() => read(mark.page)} title={`Read page ${mark.page}`}>p. {mark.page}</button>
       <div className="pdf-mark-body">
         <span className="pdf-mark-kind">{KINDS[mark.kind] || mark.kind}{mark.author ? ` · ${mark.author}` : ""}</span>
         {mark.text && <blockquote>{mark.text}</blockquote>}

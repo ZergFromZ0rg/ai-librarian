@@ -243,7 +243,7 @@ export default function BookPage({ apiBase, documentId, passage, shelfNames, gua
             <AttachFile apiBase={apiBase} doc={doc} onAttached={attached} />
           </div>}
 
-          <BookDetails doc={doc} apiBase={apiBase} tab={tab} coverSlot={coverSlot} titleSlot={titleSlot} shelfNames={shelfNames} onUpload={() => goTab("file")} onDocument={(updated) => { setDocument(updated); onChanged(); }} onDirty={setDetailsDirty} onCoverChanged={onCoverChanged} />
+          <BookDetails doc={doc} apiBase={apiBase} tab={tab} coverSlot={coverSlot} titleSlot={titleSlot} shelfNames={shelfNames} onUpload={() => goTab("file")} onRead={onRead} onDocument={(updated) => { setDocument(updated); onChanged(); }} onDirty={setDetailsDirty} onCoverChanged={onCoverChanged} />
 
           <div className="book-tab-group" role="tabpanel" id="book-panel-reading" aria-labelledby="book-tab-reading" hidden={tab !== "reading"}>
             <ReadingProgress apiBase={apiBase} doc={doc} onRead={onRead} onDirty={setProgressDirty} onDocument={(updated) => { setDocument(updated); onChanged(); }} />
@@ -274,7 +274,7 @@ export default function BookPage({ apiBase, documentId, passage, shelfNames, gua
           </div>
 
           {hasSource && doc.file_type === "pdf" && <div className="book-tab-group" role="tabpanel" id="book-panel-marks" aria-labelledby="book-tab-marks" hidden={tab !== "marks"}>
-            <PdfMarks apiBase={apiBase} doc={doc} onChanged={onChanged} />
+            <PdfMarks apiBase={apiBase} doc={doc} onChanged={onChanged} onRead={onRead} />
           </div>}
 
           <div className="book-tab-group" role="tabpanel" id="book-panel-vocab" aria-labelledby="book-tab-vocab" hidden={tab !== "vocab"}>

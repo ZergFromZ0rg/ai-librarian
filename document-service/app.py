@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 import pymupdf
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -4063,14 +4063,20 @@ async def delete_vocabulary(word_id: str):
 
 
 # ---------------------------------------------------------- annotations --
-# The app has no annotation editor. A PDF opens in the reader's own viewer (the
-# browser's or the OS's), and whatever they mark there is read back out of the
-# file: highlights, underlines, strike-outs, typed text, notes and pen strokes.
-# The originals are never modified. A copy saved from a viewer is kept beside
-# the original as an "annotated copy", and that copy is what opens and is read.
+# A PDF opens in the app's own reader (PDF.js), which saves what the reader marks
+# as a copy of the file; a copy marked up in another viewer can be attached too.
+# Whatever is marked is read back out of the file: highlights, underlines,
+# strike-outs, typed text, notes and pen strokes. The originals are never
+# modified. The saved copy is kept beside the original as an "annotated copy",
+# and that copy is what opens and is read.
 
 ANNOTATION_DIGEST_KIND = "annotations"
 ANNOTATED_DIR = DATA_DIR / "annotated"
+# A copy last saved longer ago than this belongs to an earlier sitting: the next
+# save keeps it as the "earlier version" before replacing it, so one bad sitting
+# (marks deleted by mistake) can be undone. Saves within a sitting do not move it.
+EARLIER_VERSION_AFTER_SECONDS = 300
+ANNOTATED_COPY_LOCK = threading.Lock()  # guards the short check-and-swap of a saved copy
 
 
 def _is_digest(doc: dict) -> bool:
@@ -4087,6 +4093,20 @@ def _digest_doc(book_id: str) -> Optional[dict]:
 
 def annotated_copy_path(doc_id: str) -> Path:
     return ANNOTATED_DIR / f"{doc_id}.pdf"
+
+
+def earlier_copy_path(doc_id: str) -> Path:
+    return ANNOTATED_DIR / f"{doc_id}.earlier.pdf"
+
+
+def annotated_version(doc_id: str) -> str:
+    """Names the saved copy as it is now, so a reader can say which one it started
+    from. "none" when there is no copy (the original is what opens)."""
+    try:
+        stat = annotated_copy_path(doc_id).stat()
+    except OSError:
+        return "none"
+    return f"{stat.st_mtime_ns}-{stat.st_size}"
 
 
 def effective_pdf_path(metadata: dict) -> Path:
@@ -4224,8 +4244,14 @@ def _annotatable_pdf(doc_id: str) -> dict:
 
 
 def _marks_response(metadata: dict, items: List[dict]) -> dict:
-    using_copy = effective_pdf_path(metadata) == annotated_copy_path(metadata["document_id"])
-    return {"annotations": items, "source": "annotated-copy" if using_copy else "original"}
+    doc_id = metadata["document_id"]
+    using_copy = effective_pdf_path(metadata) == annotated_copy_path(doc_id)
+    return {
+        "annotations": items,
+        "source": "annotated-copy" if using_copy else "original",
+        "version": annotated_version(doc_id),
+        "has_earlier": earlier_copy_path(doc_id).exists(),
+    }
 
 
 @app.get("/documents/{doc_id}/annotations")
@@ -4272,11 +4298,64 @@ def _check_annotated_pdf(path: Path, metadata: dict) -> None:
         raise HTTPException(status_code=422, detail="this does not look like a readable PDF") from exc
 
 
+def _keep_earlier_version(doc_id: str, always: bool = False) -> None:
+    """Before a saved copy is replaced, keep it as the earlier version if it dates
+    from an earlier sitting (or ``always``, for marks saved elsewhere that the
+    reader chose to replace). Called with ANNOTATED_COPY_LOCK held."""
+    copy = annotated_copy_path(doc_id)
+    try:
+        age = time.time() - copy.stat().st_mtime
+    except OSError:
+        return  # no saved copy yet: the original is the earlier version
+    if age < EARLIER_VERSION_AFTER_SECONDS and not always:
+        return
+    staged = ANNOTATED_DIR / f".{doc_id}.{secrets.token_hex(4)}.earlier"
+    try:
+        try:
+            os.link(copy, staged)  # the old file lives on under its new name when the copy is replaced
+        except OSError:
+            shutil.copy2(copy, staged)
+        os.replace(staged, earlier_copy_path(doc_id))
+    finally:
+        staged.unlink(missing_ok=True)
+
+
+def _install_annotated_copy(temporary: Path, doc_id: str, base_version: Optional[str], replacing_other: bool) -> None:
+    """Put a checked upload in place as the saved copy. A reader that says which
+    copy it started from is refused if another tab or device has saved since, so
+    two readers cannot silently overwrite each other's marks. A reader that has
+    been told so and chose to replace them (``replacing_other``) keeps theirs as
+    the earlier version."""
+    with ANNOTATED_COPY_LOCK:
+        if base_version is not None and base_version != annotated_version(doc_id):
+            raise HTTPException(
+                status_code=409,
+                detail="the marks in this book were changed somewhere else (another tab or device) since you opened it",
+            )
+        _keep_earlier_version(doc_id, always=replacing_other)
+        os.replace(temporary, annotated_copy_path(doc_id))
+
+
+@app.get("/documents/{doc_id}/annotated-copy")
+async def get_annotated_copy_state(doc_id: str):
+    """Which saved copy the book has right now (see ``annotated_version``), for a
+    reader to name when it saves, and whether an earlier version can be restored."""
+    await asyncio.to_thread(_annotatable_pdf, doc_id)
+    return {"version": annotated_version(doc_id), "has_earlier": earlier_copy_path(doc_id).exists()}
+
+
 @app.post("/documents/{doc_id}/annotated-copy")
-async def upload_annotated_copy(doc_id: str, file: UploadFile = File(...)):
+async def upload_annotated_copy(
+    doc_id: str,
+    file: UploadFile = File(...),
+    base_version: Optional[str] = Form(None),
+    replacing_other: bool = Form(False),
+):
     """Attach a copy of this book's PDF that was marked up in a viewer and saved.
     It is kept beside the original (never replacing it), opens in its place, and
-    its marks are read and indexed."""
+    its marks are read and indexed. ``base_version`` is the copy the reader opened
+    (from GET): when it is no longer the current one, the save is refused with 409,
+    unless ``replacing_other`` says the reader has chosen to replace those marks."""
     metadata = await asyncio.to_thread(_annotatable_pdf, doc_id)
     ANNOTATED_DIR.mkdir(parents=True, exist_ok=True)
     temporary = ANNOTATED_DIR / f".{doc_id}.{secrets.token_hex(4)}.uploading"
@@ -4295,7 +4374,7 @@ async def upload_annotated_copy(doc_id: str, file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail="uploaded file is empty")
 
         await asyncio.to_thread(_check_annotated_pdf, temporary, metadata)
-        os.replace(temporary, annotated_copy_path(doc_id))
+        await asyncio.to_thread(_install_annotated_copy, temporary, doc_id, base_version, replacing_other)
     finally:
         temporary.unlink(missing_ok=True)
         await file.close()
@@ -4303,11 +4382,46 @@ async def upload_annotated_copy(doc_id: str, file: UploadFile = File(...)):
     return _marks_response(metadata, items or [])
 
 
+def _set_aside_annotated_copy(doc_id: str) -> None:
+    with ANNOTATED_COPY_LOCK:
+        copy = annotated_copy_path(doc_id)
+        if copy.exists():
+            os.replace(copy, earlier_copy_path(doc_id))  # kept, so "Use original" can be undone
+
+
 @app.delete("/documents/{doc_id}/annotated-copy")
 async def remove_annotated_copy(doc_id: str):
-    """Go back to the original PDF."""
+    """Go back to the original PDF. The copy is kept as the earlier version."""
     metadata = await asyncio.to_thread(_annotatable_pdf, doc_id)
-    await asyncio.to_thread(lambda: annotated_copy_path(doc_id).unlink(missing_ok=True))
+    await asyncio.to_thread(_set_aside_annotated_copy, doc_id)
+    items = await asyncio.to_thread(_refresh_pdf_marks, metadata, force=True)
+    return _marks_response(metadata, items or [])
+
+
+def _swap_in_earlier_version(doc_id: str) -> None:
+    with ANNOTATED_COPY_LOCK:
+        earlier = earlier_copy_path(doc_id)
+        if not earlier.exists():
+            raise HTTPException(status_code=404, detail="there is no earlier version to restore")
+        copy = annotated_copy_path(doc_id)
+        parked = ANNOTATED_DIR / f".{doc_id}.{secrets.token_hex(4)}.swap"
+        try:
+            if copy.exists():
+                os.replace(copy, parked)
+            os.replace(earlier, copy)
+            if parked.exists():
+                os.replace(parked, earlier)  # swapped, so restoring again undoes the restore
+        finally:
+            parked.unlink(missing_ok=True)
+        os.utime(copy)  # it is the newest copy now, so it opens in place of the original
+
+
+@app.post("/documents/{doc_id}/annotated-copy/restore-earlier")
+async def restore_earlier_annotated_copy(doc_id: str):
+    """Swap the earlier version of the saved copy back in (and the current one
+    becomes the earlier version)."""
+    metadata = await asyncio.to_thread(_annotatable_pdf, doc_id)
+    await asyncio.to_thread(_swap_in_earlier_version, doc_id)
     items = await asyncio.to_thread(_refresh_pdf_marks, metadata, force=True)
     return _marks_response(metadata, items or [])
 
@@ -5478,6 +5592,7 @@ def _delete_document_blocking(metadata: dict) -> None:
         artifacts = [EXTRACTED_DIR / f"{doc_id}.json", CHUNKS_DIR / f"{doc_id}.json"]
         artifacts.extend(THUMBNAILS_DIR.glob(f"{doc_id}-*.jpg"))
         artifacts.append(annotated_copy_path(doc_id))
+        artifacts.append(earlier_copy_path(doc_id))
         artifacts.append(_ai_check_path(doc_id))  # the kept result of a "Check with AI"
         # Only remove the PDF itself when we own it (an upload). A
         # referenced library file is left exactly where the reader put it.

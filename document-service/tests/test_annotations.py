@@ -432,6 +432,111 @@ def test_an_annotated_copy_replaces_the_file_that_opens_but_never_the_original(b
     assert "from my viewer" not in (digest_text(module, doc_id) or "")
 
 
+def marked_copy(module, doc_id, tmp_path, note):
+    """The book's PDF with one highlight carrying ``note``, as a viewer would save it."""
+    stored = module.pdf_path(module.read_metadata(doc_id))
+    target = tmp_path / f"copy-{note}.pdf"
+    with fitz.open(stored) as document:
+        page = document[0]
+        mark = page.add_highlight_annot(page.search_for("favours the prepared")[0])
+        mark.set_info(content=note)
+        mark.update()
+        document.save(target)
+    return target.read_bytes()
+
+
+def save_copy(client, doc_id, data, **fields):
+    return client.post(f"/documents/{doc_id}/annotated-copy", files={"file": ("x.pdf", data, "application/pdf")}, data=fields)
+
+
+def test_a_reader_that_opened_an_older_copy_cannot_overwrite_a_newer_save(book, tmp_path):
+    module, client, doc_id = book
+    url = f"/documents/{doc_id}/annotated-copy"
+    state = client.get(url).json()
+    assert state == {"version": "none", "has_earlier": False}  # nothing saved yet
+
+    mine = marked_copy(module, doc_id, tmp_path, "from my laptop")
+    first = save_copy(client, doc_id, mine, base_version=state["version"])
+    assert first.status_code == 200, first.text
+    assert first.json()["version"] not in ("none", state["version"])
+    assert client.get(url).json()["version"] == first.json()["version"]
+
+    # a phone that opened the book before that save still believes there is no copy
+    theirs = marked_copy(module, doc_id, tmp_path, "from my phone")
+    stale = save_copy(client, doc_id, theirs, base_version="none")
+    assert stale.status_code == 409 and "somewhere else" in stale.json()["detail"]
+    assert client.get(f"/documents/{doc_id}/file").content == mine  # the laptop's marks survive
+
+    # having reloaded, the phone names the current copy and its save goes through
+    fresh = save_copy(client, doc_id, theirs, base_version=first.json()["version"])
+    assert fresh.status_code == 200 and client.get(f"/documents/{doc_id}/file").content == theirs
+    assert not module.earlier_copy_path(doc_id).exists()  # same sitting: nothing was set aside
+
+    # a reader told about the other save who chooses to replace it keeps it as the earlier version
+    laptop = marked_copy(module, doc_id, tmp_path, "laptop again")
+    assert save_copy(client, doc_id, laptop, base_version="none").status_code == 409
+    current = client.get(url).json()["version"]
+    chosen = save_copy(client, doc_id, laptop, base_version=current, replacing_other="true")
+    assert chosen.status_code == 200 and chosen.json()["has_earlier"] is True
+    assert module.earlier_copy_path(doc_id).read_bytes() == theirs
+    # attaching a file by hand names no starting copy, so it is never refused
+    assert save_copy(client, doc_id, mine).status_code == 200
+
+
+def test_the_copy_from_an_earlier_sitting_is_kept_and_can_be_restored(book, tmp_path):
+    module, client, doc_id = book
+    copy_path = module.annotated_copy_path(doc_id)
+    earlier_path = module.earlier_copy_path(doc_id)
+    stored = module.pdf_path(module.read_metadata(doc_id))
+    long_ago = time.time() - 3600
+    os.utime(stored, (long_ago, long_ago))  # so a copy "from ten minutes ago" is still newer than the original
+
+    def backdate(minutes):
+        moment = time.time() - minutes * 60
+        os.utime(copy_path, (moment, moment))
+
+    a, b, c, d = (marked_copy(module, doc_id, tmp_path, name) for name in "ABCD")
+    assert save_copy(client, doc_id, a).status_code == 200
+    assert save_copy(client, doc_id, b).status_code == 200
+    assert not earlier_path.exists()  # saves within one sitting keep nothing: the original is the earlier state
+
+    backdate(10)  # B was saved in an earlier sitting
+    assert save_copy(client, doc_id, c).json()["has_earlier"] is True
+    assert earlier_path.read_bytes() == b
+    assert save_copy(client, doc_id, d).status_code == 200  # same sitting as C
+    assert earlier_path.read_bytes() == b  # so B is still what can be restored
+
+    restored = client.post(f"/documents/{doc_id}/annotated-copy/restore-earlier")
+    assert restored.status_code == 200 and restored.json()["source"] == "annotated-copy"
+    assert client.get(f"/documents/{doc_id}/file").content == b
+    assert earlier_path.read_bytes() == d  # swapped, so restoring again undoes it
+    client.post(f"/documents/{doc_id}/annotated-copy/restore-earlier")
+    assert client.get(f"/documents/{doc_id}/file").content == d
+
+
+def test_use_original_can_be_undone_and_a_book_without_an_earlier_version_says_so(book, tmp_path):
+    module, client, doc_id = book
+    url = f"/documents/{doc_id}/annotated-copy"
+    assert client.post(f"{url}/restore-earlier").status_code == 404
+
+    mine = marked_copy(module, doc_id, tmp_path, "keep me")
+    assert save_copy(client, doc_id, mine).status_code == 200
+    settle(module, client, doc_id)
+    back = client.delete(url).json()
+    assert back["source"] == "original" and back["has_earlier"] is True
+    assert client.get(f"/documents/{doc_id}/file").content != mine
+
+    assert client.post(f"{url}/restore-earlier").json()["source"] == "annotated-copy"
+    assert client.get(f"/documents/{doc_id}/file").content == mine
+
+    assert not module.earlier_copy_path(doc_id).exists()  # there was no copy to swap out, so nothing is left to restore
+    settle(module, client, doc_id)
+    client.delete(url)  # back to the original once more: the copy is kept as the earlier version again
+    assert module.earlier_copy_path(doc_id).exists()
+    assert client.delete(f"/documents/{doc_id}").status_code == 200
+    assert not module.annotated_copy_path(doc_id).exists() and not module.earlier_copy_path(doc_id).exists()
+
+
 def test_a_wrong_file_is_refused_as_an_annotated_copy(book):
     _, client, doc_id = book
     url = f"/documents/{doc_id}/annotated-copy"

@@ -1270,7 +1270,7 @@ export default function App() {
       )}
       {bookId && (
         <ErrorBoundary layer="overlay" title="This book page could not be shown" resetKey={bookId} onClose={closeBook}>
-          <BookPage key={bookId + (bookPassage?.snippet || "")} apiBase={API_BASE} documentId={bookId} passage={bookPassage} shelfNames={shelfNames} guardRef={bookGuard} readerOpen={Boolean(source)} askEnabled={askEnabled}
+          <BookPage key={bookId + (bookPassage?.snippet || "")} apiBase={API_BASE} documentId={bookId} passage={bookPassage} shelfNames={shelfNames} guardRef={bookGuard} readerOpen={Boolean(source || pdfReader)} askEnabled={askEnabled}
             onClose={closeBook} onRead={openSource} onChanged={refreshDocuments}
             onCoverChanged={() => window.dispatchEvent(new Event("book-cover-changed"))}
             onAsk={({ documentId, documentName }) => { closeBook(); setMode("ask"); scopeTo(documentId, documentName); }} />
