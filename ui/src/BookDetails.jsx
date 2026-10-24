@@ -68,7 +68,7 @@ function HeroText({ className, value, onChange, label, placeholder, maxLength, d
 // `tab` says which group of the form is showing (details, review, or find); all of
 // it stays mounted so edits survive a change of tab. The cover tools and file card
 // are drawn into `coverSlot`, under the big cover on the page.
-export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCoverChanged, tab = "details", coverSlot = null, titleSlot = null, shelfNames = [] }) {
+export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCoverChanged, tab = "details", coverSlot = null, titleSlot = null, shelfNames = [], onUpload }) {
   const [fields, setFields] = useState(() => values(doc));
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
@@ -185,7 +185,7 @@ export default function BookDetails({ doc, apiBase, onDocument, onDirty, onCover
       {coverError && <p className="book-inline-error" role="alert">{coverError}</p>}
       {coverMessage && <p className="book-inline-success" role="status">{coverMessage}</p>}
     </>}
-    {hasSource ? <div className="book-file-card"><span className="eyebrow">In your library</span><div><span className={`book-format format-${doc.file_type}`}>{format}</span><span>{doc.pages || 0} {doc.file_type === "epub" ? "sections" : doc.pages === 1 ? "page" : "pages"}</span></div><p title={doc.filename}>{doc.filename}</p><a href={`${apiBase}/documents/${doc.document_id}/file`} target="_blank" rel="noreferrer">Open {format} ↗</a></div> : <div className="book-file-card book-record-card"><span className="eyebrow">Catalogue record</span><p>This book has no digital file. Its metadata, cover, reading state, review, and notes still live in your library.</p></div>}
+    {hasSource ? <div className="book-file-card"><span className="eyebrow">In your library</span><div><span className={`book-format format-${doc.file_type}`}>{format}</span><span>{!doc.pages && ["pending", "queued", "indexing"].includes(doc.indexing_status) ? "Reading the file…" : `${doc.pages || 0} ${doc.file_type === "epub" ? "sections" : doc.pages === 1 ? "page" : "pages"}`}</span></div><p title={doc.filename}>{doc.filename}</p><a href={`${apiBase}/documents/${doc.document_id}/file`} target="_blank" rel="noreferrer">Open {format} ↗</a></div> : <div className="book-file-card book-record-card"><span className="eyebrow">Catalogue record</span><p>No file is attached. Its details, cover, reading state, review and notes live in your library.</p>{onUpload && <button type="button" className="text-button" onClick={onUpload}>Upload a PDF</button>}</div>}
   </div>;
   const heroText = <>
     <h1 id="book-page-title"><HeroText className="book-hero-title" label="Title" placeholder="Untitled" maxLength={300} value={fields.title} disabled={saving} onChange={(value) => set("title", value)} /></h1>

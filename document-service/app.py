@@ -2892,8 +2892,10 @@ async def delete_owned_book(book_id: str):
     return {"ok": True}
 
 
-@app.post("/documents")
-async def upload_document(file: UploadFile = File(...)):
+async def _receive_upload(file: UploadFile, doc_id: str) -> tuple:
+    """Write an uploaded file into the documents folder as ``<doc_id><ext>`` and
+    return ``(stored_path, sha256)``. Checks the type, that it is not empty and
+    that it is within the size limit; nothing is left behind when it fails."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="missing filename")
     suffix = Path(file.filename).suffix.lower()
@@ -2902,8 +2904,6 @@ async def upload_document(file: UploadFile = File(...)):
             status_code=400,
             detail="supported files are PDF, EPUB, Word, Excel, PowerPoint, text, Markdown, and CSV",
         )
-
-    doc_id = generate_id()
     stored_path = DOCUMENTS_DIR / f"{doc_id}{suffix}"
     temporary_path = DOCUMENTS_DIR / f".{doc_id}.uploading"
     digest = hashlib.sha256()
@@ -2928,15 +2928,22 @@ async def upload_document(file: UploadFile = File(...)):
         raise
     finally:
         await file.close()
+    return stored_path, digest.hexdigest()
 
-    duplicate = await asyncio.to_thread(find_duplicate, digest.hexdigest())
+
+@app.post("/documents")
+async def upload_document(file: UploadFile = File(...)):
+    doc_id = generate_id()
+    stored_path, content_sha256 = await _receive_upload(file, doc_id)
+
+    duplicate = await asyncio.to_thread(find_duplicate, content_sha256)
     if duplicate:
         stored_path.unlink(missing_ok=True)
         return JSONResponse({**duplicate, "deduplicated": True}, status_code=200)
 
     try:
         metadata = await asyncio.to_thread(
-            create_document, stored_path, Path(file.filename).name, digest.hexdigest(), doc_id=doc_id
+            create_document, stored_path, Path(file.filename).name, content_sha256, doc_id=doc_id
         )
     except Exception as exc:
         # Extraction itself now happens in the background (see
@@ -2948,6 +2955,57 @@ async def upload_document(file: UploadFile = File(...)):
         ) from exc
     enqueue_index(IndexTask(doc_id))
     return JSONResponse(metadata, status_code=201)
+
+
+@app.post("/documents/{doc_id}/file")
+async def attach_document_file(doc_id: str, file: UploadFile = File(...)):
+    """Give a catalogue-only book its file. The record is kept as it is (same
+    id, so its rating, review, notes, reading status, shelf and cover all stay)
+    and becomes an ordinary document: the file is stored, then read and indexed
+    like any upload. The title and author were typed or looked up by the reader,
+    so they are marked as settled and indexing will not rewrite them."""
+    await asyncio.to_thread(read_metadata, doc_id)  # a 404 before any bytes are taken
+    stored_path, content_sha256 = await _receive_upload(file, doc_id)
+
+    def attach() -> dict:
+        with get_document_lock(doc_id):
+            current = read_metadata(doc_id)
+            if current.get("record_type") != "standalone":
+                raise HTTPException(status_code=409, detail="this book already has a file")
+            duplicate = find_duplicate(content_sha256)
+            if duplicate:
+                label = duplicate.get("title") or duplicate.get("filename") or "another book"
+                raise HTTPException(status_code=409, detail=f"This file is already in your library as “{label}”.")
+            return STORE.update(doc_id, {
+                "record_type": "source",
+                "filename": Path(file.filename).name,
+                "file_type": file_type_for_path(file.filename) or "document",
+                "stored_filename": stored_path.name,
+                "content_sha256": content_sha256,
+                "source_path": None,
+                "collection_id": None,
+                "pages": 0,
+                "chunks": 0,
+                "retrieval_units": 0,
+                "extraction_notes": None,
+                # "pending" until enqueue_index flips it to "queued", as for any new document.
+                "indexing_status": "pending",
+                "indexing_error": None,
+                "embedding_model": EMBEDDING_MODEL,
+                "vector_dim": 0,
+                "pipeline_version": -1,
+                "index_schema_version": 0,
+                "metadata_edited": 1,
+                "updated_at": utc_now(),
+            })
+
+    try:
+        await asyncio.to_thread(attach)
+    except Exception:
+        stored_path.unlink(missing_ok=True)
+        raise
+    enqueue_index(IndexTask(doc_id))
+    return await asyncio.to_thread(read_metadata, doc_id)
 
 
 # ------------------------------------------------------------------ intake --

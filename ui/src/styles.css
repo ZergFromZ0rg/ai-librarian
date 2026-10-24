@@ -5646,3 +5646,40 @@ main {
 .failure-page { margin: 12vh auto 0; }
 .update-banner { position: fixed; z-index: 1200; top: 12px; left: 50%; display: flex; align-items: center; gap: 14px; max-width: calc(100vw - 24px); padding: 8px 8px 8px 16px; border: 1px solid var(--rule-strong); border-radius: 999px; background: var(--surface); box-shadow: var(--shadow-pop); color: var(--ink); font-size: 13px; font-weight: 550; transform: translateX(-50%); }
 .update-banner .button { height: 28px; border-radius: 999px; }
+
+/* ---- logging a book with no file: the first slot on the shelf, its dialog, and the File tab ---- */
+.poster-add-cover { display: grid; align-content: center; justify-items: center; gap: 6px; aspect-ratio: 2 / 3; padding: 10px 8px; border: 2px dashed rgba(255, 240, 215, 0.7); border-radius: 3px 5px 5px 3px; background: rgba(255, 244, 222, 0.1); color: #fbf0d9; text-align: center; transition: transform 0.16s, background 0.16s, border-color 0.16s; }
+.poster-add-cover strong { font: 600 clamp(15px, 1.7vw, 19px)/1.1 var(--display); }
+.poster-add-cover small { color: #e6d3ad; font-size: 11px; }
+.poster-add:hover .poster-add-cover, .poster-add:focus-visible .poster-add-cover { border-color: #fff4dc; background: rgba(255, 244, 222, 0.2); transform: translateY(-7px); }
+.poster-add:focus-visible { outline: none; }
+.poster-add:focus-visible .poster-add-cover { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent); }
+@media (prefers-reduced-motion: reduce) { .poster-add-cover { transition: none; } }
+
+.add-book-layer { position: fixed; z-index: 1000; inset: 0; display: grid; place-items: center; padding: 20px; background: var(--overlay); }
+.add-book-card { display: grid; width: min(460px, 100%); max-height: calc(100vh - 40px); padding: 24px 26px 20px; overflow-y: auto; border: 1px solid var(--rule-strong); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-pop); }
+.add-book-card form, .add-book-done { display: grid; gap: 14px; }
+.add-book-card h2 { font: 600 30px/1.1 var(--display); }
+.add-book-lede { margin: -6px 0 0; color: var(--ink-2); font-size: 14px; line-height: 1.55; }
+.add-book-field { display: grid; gap: 5px; color: var(--ink-2); font-size: 12.5px; font-weight: 600; }
+.add-book-field .muted { font-weight: 400; }
+.add-book-field .input { height: 40px; font-size: 14.5px; font-weight: 400; }
+.add-book-warn { margin: 0; padding: 9px 12px; border-radius: 9px; background: var(--warn-tint); color: var(--ink); font-size: 13px; }
+.add-book-progress { margin: 0; color: var(--olive-ink); font-size: 13px; font-weight: 550; }
+.add-book-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.add-book-actions .button { height: 36px; padding: 0 18px; }
+.add-book-privacy { margin: 0; color: var(--muted); font-size: 11.5px; }
+.add-book-result { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 16px; align-items: start; }
+.add-book-result > div { display: grid; gap: 3px; }
+.add-book-result strong { font: 600 22px/1.15 var(--display); }
+.add-book-cover { width: 78px; aspect-ratio: 2 / 3; border-radius: 2px 4px 4px 2px; box-shadow: var(--shadow-cover), 3px 5px 12px -5px rgba(60, 30, 8, 0.5); }
+.add-book-note { margin: 0; color: var(--ink-2); font-size: 13.5px; line-height: 1.5; }
+.add-book-note.found { color: var(--olive-ink); font-weight: 550; }
+
+.book-nopdf { display: inline-flex; align-items: center; height: 32px; padding: 0 12px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 13px; font-weight: 550; }
+.attach-drop { display: grid; justify-items: center; gap: 10px; padding: 36px 28px; border: 2px dashed var(--rule-strong); border-radius: 16px; background: var(--surface); color: var(--ink-2); text-align: center; transition: border-color 0.12s, background 0.12s; }
+.attach-drop svg { color: var(--accent); }
+.attach-drop h2 { font: 600 28px/1.1 var(--display); color: var(--ink); }
+.attach-drop p { max-width: 46ch; margin: 0; font-size: 14px; line-height: 1.55; }
+.attach-drop.dragging { border-color: var(--accent); background: var(--accent-tint); }
+.book-record-card .text-button { justify-self: start; margin-top: 4px; font-size: 12px; }

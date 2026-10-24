@@ -61,3 +61,58 @@ export function fullBody(candidate, withCover = true) {
   if (withCover && candidate.cover_id) body.cover_id = candidate.cover_id;
   return body;
 }
+
+// ---- logging a book by title and author ---------------------------------------
+// The reader types a title (and maybe an author); the catalogue is searched for
+// it and a match is used only when it is clearly the right book. These helpers
+// decide that, and what to keep of what was typed.
+
+const fold = (text) => String(text || "").normalize("NFKD").replace(/[̀-ͯ]/g, "").toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+
+// What to search for: the title, then the author when there is one.
+export function lookupQuery(title, author) {
+  return [title, author].map((part) => String(part || "").trim()).filter(Boolean).join(" ");
+}
+
+// The one result worth trusting, or null. It has to score well and not tie with a
+// different book, so a vague title does not quietly become the wrong book.
+export function confidentMatch(results) {
+  const [first, second] = results || [];
+  if (!first || !(first.score >= 0.8)) return null;
+  if (second && first.score - second.score < 0.05 && fold(first.title) !== fold(second.title)) return null;
+  return first;
+}
+
+// A match, as the fields to apply to the book just logged. What the reader typed
+// stays unless the match is plainly the same thing written better: the title only
+// changes in capitals or punctuation, and an author typed as a lone surname
+// ("Camus") is completed from the match ("Albert Camus"). Nothing is dropped.
+export function bodyForLoggedBook(candidate, typed) {
+  const body = fullBody(candidate);
+  const { title, author } = typed;
+  if (title && fold(title) !== fold(candidate.title)) delete body.fields.title;
+  if (author) {
+    const lone = !fold(author).includes(" ");
+    const completes = lone && fold(candidate.author).split(" ").pop() === fold(author);
+    if (!completes && fold(author) !== fold(candidate.author)) delete body.fields.author;
+  }
+  return body;
+}
+
+// A book already on the shelf with this title (and author, when both are known):
+// logging it twice is allowed but worth a word first.
+export function findLoggedBook(documents, title, author) {
+  const wanted = fold(title);
+  if (!wanted) return null;
+  const who = fold(author);
+  return (documents || []).find((doc) => {
+    if (doc.collection_id === "notes" || fold(doc.title || doc.filename) !== wanted) return false;
+    const theirs = fold(doc.author);
+    return !who || !theirs || who === theirs;
+  }) || null;
+}
+
+// Where a match came from, for the words shown to the reader.
+export function providerName(candidate) {
+  return String(candidate?.id || "").startsWith("gb:") ? "Google Books" : "Open Library";
+}

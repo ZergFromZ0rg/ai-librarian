@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import AddBookDialog from "./AddBookDialog.jsx";
 import Cover from "./Cover.jsx";
 import LibraryRail from "./LibraryRail.jsx";
 import { starText } from "./ratings.js";
@@ -27,6 +28,21 @@ function Poster({ apiBase, doc, onOpen }) {
   </button>;
 }
 
+// The first slot on the first shelf: log a book you have, with no file. It stands
+// among the books but is not one of them (it is not counted, sorted or filtered).
+const ADD_TILE = Object.freeze({ addTile: true, document_id: "add-a-book" });
+
+function AddTile({ onAdd }) {
+  return <button type="button" className="poster poster-add" style={{ "--height": 1 }} onClick={onAdd} aria-label="Add a book to your library" aria-haspopup="dialog">
+    <span className="poster-add-cover">
+      <svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
+      <strong>Add a book</strong>
+      <small>Title and author</small>
+    </span>
+    <span className="poster-tip" aria-hidden="true"><strong>Add a book</strong><span>No file needed</span></span>
+  </button>;
+}
+
 // Covers per shelf: a cover is at least `min` px wide, with `gap` px between.
 // Phones get smaller covers so a shelf still holds three.
 // In a narrow column (a window of about 1000px beside the rail) the covers
@@ -38,7 +54,7 @@ const COMPACT_BELOW = 520;
 // follows the width of the case, so every plank is as full as it can be and
 // only the last one is short. Each shelf gets its own plank; on touch screens
 // a strip of titles hangs under it, like the labels on a library shelf.
-function Bookcase({ apiBase, books, onOpen }) {
+function Bookcase({ apiBase, books, onOpen, onAdd }) {
   const rowsRef = useRef(null);
   const [fit, setFit] = useState({ columns: 6, gap: COVERS.hover.gap });
   useLayoutEffect(() => {
@@ -58,16 +74,16 @@ function Bookcase({ apiBase, books, onOpen }) {
     observer?.observe(el);
     return () => observer?.disconnect();
   }, []);
-  const shelves = useMemo(() => shelfRows(books, fit.columns), [books, fit.columns]);
+  const shelves = useMemo(() => shelfRows([ADD_TILE, ...books], fit.columns), [books, fit.columns]);
   return <div className="case">
     <div className="case-rows" ref={rowsRef} style={{ "--columns": fit.columns, "--gap": `${fit.gap}px` }}>
       {shelves.map((row, index) => <section className="case-shelf" key={index} aria-label={`Shelf ${index + 1} of ${shelves.length}`}>
         <div className="case-books">
-          {row.map((doc) => <Poster key={doc.document_id} apiBase={apiBase} doc={doc} onOpen={onOpen} />)}
+          {row.map((doc) => (doc.addTile ? <AddTile key={doc.document_id} onAdd={onAdd} /> : <Poster key={doc.document_id} apiBase={apiBase} doc={doc} onOpen={onOpen} />))}
         </div>
         <div className="case-plank" aria-hidden="true" />
         <div className="case-labels" aria-hidden="true">
-          {row.map((doc) => <span className="case-label" key={doc.document_id}><strong>{doc.title || displayTitle(doc.filename)}</strong>{doc.author && <span>{doc.author}</span>}</span>)}
+          {row.map((doc) => (doc.addTile ? <span className="case-label" key={doc.document_id}><strong>Add a book</strong><span>No file needed</span></span> : <span className="case-label" key={doc.document_id}><strong>{doc.title || displayTitle(doc.filename)}</strong>{doc.author && <span>{doc.author}</span>}</span>))}
         </div>
       </section>)}
     </div>
@@ -80,7 +96,7 @@ function Icon({ children }) {
   return <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{children}</svg>;
 }
 
-export default function LibraryExplore({ apiBase, documents, collections, loaded = true, onOpenDocument, onNavigate, preset }) {
+export default function LibraryExplore({ apiBase, documents, collections, loaded = true, onOpenDocument, onNavigate, onChanged, preset }) {
   // The view lives in the address (?lib.status=read&lib.sort=rating…) so it can
   // be bookmarked, and survives opening a book over it and closing it again.
   const [initial] = useState(() => viewFromSearch(window.location.search));
@@ -94,6 +110,7 @@ export default function LibraryExplore({ apiBase, documents, collections, loaded
   const [saveName, setSaveName] = useState("");
   const [showFilters, setShowFilters] = useState(false);
   const [allShelves, setAllShelves] = useState(false);
+  const [adding, setAdding] = useState(false);
   useEffect(() => { if (preset) setFilters({ ...EMPTY_FILTERS, ...preset }); }, [preset]);
   useEffect(() => {
     const next = searchWithView(window.location.search, filters);
@@ -203,13 +220,14 @@ export default function LibraryExplore({ apiBase, documents, collections, loaded
       {shelves.unshelved > 0 && <button type="button" className={`shelf-chip shelf-none${filters.shelf === NO_SHELF ? " active" : ""}`} aria-pressed={filters.shelf === NO_SHELF} onClick={() => update("shelf", filters.shelf === NO_SHELF ? "all" : NO_SHELF)}>No shelf <i>{shelves.unshelved}</i></button>}
     </nav>}
 
-    {results.length > 0 && <Bookcase apiBase={apiBase} books={results} onOpen={onOpenDocument} />}
+    {loaded && <Bookcase apiBase={apiBase} books={results} onOpen={onOpenDocument} onAdd={() => setAdding(true)} />}
     {!results.length && bookCount === 0 && loaded && <div className="quiet-prompt quiet-library" role="status">
       <svg className="quiet-book" viewBox="0 0 64 44" width="72" height="50" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M32 9c-5-3.5-14-4.5-26-3v31c12-1.5 21-.5 26 3 5-3.5 14-4.5 26-3V6c-12-1.5-21-.5-26 3zM32 9v31" /><path d="M12 15c4-.6 8-.4 14 1.2M12 22c4-.6 8-.4 14 1.2M38 16.2c6-1.6 10-1.8 14-1.2M38 23.2c6-1.6 10-1.8 14-1.2" opacity="0.55" /></svg>
-      <p><strong>Your first shelf is waiting.</strong><span>Add a book and it will stand here.</span></p>
+      <p><strong>Your first shelf is waiting.</strong><span>Use the first slot to log a book you have, or add a file with Add books.</span></p>
     </div>}
     {!results.length && bookCount > 0 && <p className="muted empty-state" role="status">No books match {filterLabels(filters, collections).join(" · ") || "these filters"}. {hasFilters && <button type="button" className="text-button" onClick={clearAll}>Clear filters</button>}</p>}
   </div>
+  {adding && <AddBookDialog apiBase={apiBase} documents={documents} onClose={() => setAdding(false)} onChanged={onChanged} onOpenBook={(book) => { setAdding(false); onOpenDocument(book); }} />}
   <LibraryRail apiBase={apiBase} documents={documents} notes={notes} status={filters.status} onStatus={(status) => setFilters((current) => ({ ...current, status }))} onNavigate={onNavigate} onOpenDocument={onOpenDocument} />
   </div>;
 }

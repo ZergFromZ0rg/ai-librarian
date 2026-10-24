@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { createPortal } from "react-dom";
+import AttachFile from "./AttachFile.jsx";
 import BookDetails from "./BookDetails.jsx";
 import Cover from "./Cover.jsx";
 import PdfMarks from "./PdfMarks.jsx";
@@ -130,6 +131,15 @@ export default function BookPage({ apiBase, documentId, passage, shelfNames, gua
     catch (failure) { setError(failure.message); }
     finally { setBusy(false); }
   }
+  // The book now has a file: it is a normal book from here, and the File tab is gone.
+  function attached(updated) {
+    setDocument(updated);
+    setTab("details");
+    setError("");
+    setNotice("File added. It opens in the reader now, and is being read and indexed in the background so it becomes searchable.");
+    onChanged();
+    window.dispatchEvent(new Event("book-cover-changed"));
+  }
   // Jump to a tab from elsewhere on the page, and to a control inside it.
   function goTab(next, selector) {
     setTab(next);
@@ -142,6 +152,7 @@ export default function BookPage({ apiBase, documentId, passage, shelfNames, gua
 
   const tabs = doc ? [
     ["details", "Details"],
+    ...(!hasSource ? [["file", "File"]] : []),
     ["review", work ? "Summary" : "Review"],
     ["reading", "Reading"],
     ["notes", notes.length ? `Notes · ${notes.length}` : "Notes"],
@@ -196,6 +207,10 @@ export default function BookPage({ apiBase, documentId, passage, shelfNames, gua
           <button type="button" className="text-button" onClick={() => goTab("reading")}>Update</button>
         </div>}
         <div className="book-hero-actions">
+          {!hasSource && !work && <>
+            <span className="book-nopdf">No PDF yet</span>
+            <button type="button" className="button primary" onClick={() => goTab("file")}>Upload a PDF</button>
+          </>}
           {hasSource && <>
             <button className="button primary" onClick={() => onRead(source(passage?.page || doc.current_page || 1))}>{doc.current_page ? "Resume" : "Read"} {doc.file_type === "epub" ? "EPUB" : doc.file_type === "pdf" ? "PDF" : "source"} ↗</button>
             <button className="button" disabled={!askEnabled} title={!askEnabled ? "Enable an answering model in Settings" : undefined} onClick={() => { if (!dirty.current || window.confirm("Discard your unsaved changes?")) onAsk(source()); }}>{work ? "Ask this document" : "Ask this book"}</button>
@@ -224,7 +239,11 @@ export default function BookPage({ apiBase, documentId, passage, shelfNames, gua
             {tabs.map(([id, label]) => <button key={id} type="button" role="tab" id={`book-tab-${id}`} aria-selected={tab === id} aria-controls={`book-panel-${id}`} tabIndex={tab === id ? 0 : -1} className={tab === id ? "active" : ""} onClick={() => setTab(id)}>{label}{id === "details" && detailsDirty ? <span className="book-tab-dot" title="Unsaved changes" /> : null}</button>)}
           </div>
 
-          <BookDetails doc={doc} apiBase={apiBase} tab={tab} coverSlot={coverSlot} titleSlot={titleSlot} shelfNames={shelfNames} onDocument={(updated) => { setDocument(updated); onChanged(); }} onDirty={setDetailsDirty} onCoverChanged={onCoverChanged} />
+          {!hasSource && !work && <div className="book-tab-group" role="tabpanel" id="book-panel-file" aria-labelledby="book-tab-file" hidden={tab !== "file"}>
+            <AttachFile apiBase={apiBase} doc={doc} onAttached={attached} />
+          </div>}
+
+          <BookDetails doc={doc} apiBase={apiBase} tab={tab} coverSlot={coverSlot} titleSlot={titleSlot} shelfNames={shelfNames} onUpload={() => goTab("file")} onDocument={(updated) => { setDocument(updated); onChanged(); }} onDirty={setDetailsDirty} onCoverChanged={onCoverChanged} />
 
           <div className="book-tab-group" role="tabpanel" id="book-panel-reading" aria-labelledby="book-tab-reading" hidden={tab !== "reading"}>
             <ReadingProgress apiBase={apiBase} doc={doc} onRead={onRead} onDirty={setProgressDirty} onDocument={(updated) => { setDocument(updated); onChanged(); }} />

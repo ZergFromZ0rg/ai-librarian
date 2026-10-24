@@ -467,7 +467,7 @@ export default function Stacks(props) {
       </div>
 
       <ErrorBoundary layer="inline" title="This tab could not be shown" resetKey={tab}>
-      {tab === "browse" && <LibraryExplore apiBase={apiBase} documents={documents} collections={allCollections} onOpenDocument={onOpenDocument} onNavigate={setTab} loaded={documentsLoaded} preset={browsePreset} />}
+      {tab === "browse" && <LibraryExplore apiBase={apiBase} documents={documents} collections={allCollections} onOpenDocument={onOpenDocument} onNavigate={setTab} onChanged={onImported} loaded={documentsLoaded} preset={browsePreset} />}
       {tab === "notes" && <NotesPanel apiBase={apiBase} onChanged={onImported} onOpenSource={(id) => onOpenDocument({ document_id: id })} />}
       {tab === "vocabulary" && <VocabularyPanel apiBase={apiBase} documents={documents} onOpenDocument={onOpenDocument} />}
       {tab === "statistics" && <LibraryStats documents={documents} collections={allCollections} onExplore={(preset) => { setBrowsePreset({ ...preset }); setTab("browse"); }} />}

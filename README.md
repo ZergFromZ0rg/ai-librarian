@@ -130,8 +130,10 @@ title and author (prefilled from the book). Pick a match and the app shows a
 field-by-field comparison: fields the book has no value for are ticked, fields
 that already have one are not, and only what you tick is applied (the cover
 too, if you tick it). Ratings, reviews, notes, and reading state can never be
-written from a match. The **Without files** tab has the same lookup, so a
-physical book can be added from an ISBN in one step. Lookups go through the
+written from a match. **Add a book** (the first slot on the top shelf of the
+Library) logs a book you have with no file: type its title and author, and a
+clear match from Open Library or Google Books fills in the details and a cover
+(a vague or tied match is never guessed). Lookups go through the
 server (the browser never contacts Open Library or its image host), send only
 the text you typed, are cached for an hour, and fail gracefully: when Open
 Library is unreachable, or `OFFLINE=1` is set, manual editing is unaffected.
@@ -275,9 +277,13 @@ You can also drop or paste an image into the cover panel.
 The source card shows the actual file format (PDF, EPUB, etc.) and links to that file. Include `data/app/thumbnails/*-custom.jpg` in backups: these
 are reader-uploaded covers, unlike the regenerable page-thumbnail cache.
 
-The **Without files** tab creates catalogue-only books that use this same page
-and editor. Existing PDF-less entries migrate into the main catalogue on the
-next start without losing their IDs or notes. Fileless books support custom
+**Add a book** creates catalogue-only books that use this same page and editor.
+Existing PDF-less entries migrate into the main catalogue on the next start
+without losing their IDs or notes. Where the reader would be, a fileless book's
+page says **No PDF yet** and has a **File** tab: choose or drop a PDF (or EPUB,
+Word, text...) and the book keeps its ID, rating, review, notes, shelf and cover
+and becomes an ordinary book that is read and indexed in the background
+(`POST /documents/{id}/file`; a file already in the library is refused). Fileless books support custom
 covers, metadata, shelves, reading state, ratings, reviews, and linked notes;
 source reading and Ask appear only when a digital file exists. Metadata editing
 is manual, and note editing uses Markdown with a preview rather than an inline
